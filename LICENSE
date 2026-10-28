@@ -19,13 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-范围说明 / Scope note
-
-上面的 MIT 许可覆盖本仓库的**代码**（lib/、tools/、test/、cordis.patch.yml 等）。
-角色素材另有出处与授权，见 NOTICE.md；其中 Martty 的像素小人同为 MIT，
-鲸鱼娘素材为 AI 生成的二创图并保留其上游署名要求。
-The MIT license above covers the **code** in this repository. Artwork has its
-own provenance and attribution terms; see NOTICE.md.

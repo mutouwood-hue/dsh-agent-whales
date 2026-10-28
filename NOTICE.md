@@ -1,5 +1,7 @@
 # 授权与署名
 
+> 范围：`LICENSE`（MIT）覆盖本仓库的**代码**；角色素材的出处与署名要求见下面各节。
+
 ## 代码
 
 本插件代码以 **MIT License** 发布，全文见 [LICENSE](LICENSE)，Copyright (c) 2026 mutouwood-hue。
