@@ -1,0 +1,52 @@
+# dsh-agent-whales bundle patch.
+#
+# 第一部分 —— 插件本体：一行宿主条目承载这个双面包。
+# 宿主 Loader 激活节点半边（lib/index.js，空壳），dsh-client-modules 再扫同一条目里的
+# `dsh.client` 声明来装配浏览器半边（lib/client.js）。
+#
+# 第二部分 —— 智能体团队默认开启（2026-10-17 需求：装好插件后，每次对话都默认带着团队能力）。
+# 这一段与官方组合包 @deepseek-ai/dsh-experimental-agent-team-profile 的补丁等价：
+# 先关掉会被团队工具取代的旧 subagent 工具，再插入团队服务、团队工具与 Web roster 面板。
+# 三个包随 dsh 一起发布，不需要额外声明依赖。
+#
+# 想关掉团队能力：把下面 4 条 disabled 与 3 条团队 insert 整体删掉（或直接禁用本 bundle），
+# 然后重启 App 即可回到只有插件、没有团队的状态。
+# 注意：不要同时再安装官方 agent-team-profile bundle —— 那会让 agent-team / tool-agent-team /
+# ui-agent-team 三个 id 重复。
+
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-subagent
+  disabled: true
+
+- id: tool-subagent-fork
+  disabled: true
+
+- insert:
+    - id: agent-whales
+      name: dsh-agent-whales
+
+    # 团队服务：roster / 任务 DAG / 成员间直接通信
+    - id: agent-team
+      name: '@deepseek-ai/dsh-experimental-agent-team'
+      config:
+        maxMembers: 8
+        maxTasks: 256
+        maxMessageBytes: 65536
+        disposalTimeoutMs: 5000
+
+    # 九个团队工具：spawn_teammate / send_message / list_agents / wait_agent / interrupt_agent
+    # 与四个 team_task_* 工具
+    - id: tool-agent-team
+      name: '@deepseek-ai/dsh-experimental-tool-agent-team'
+      config:
+        freshProvider: spawn
+        forkProvider: fork
+
+    # Web 会话页头的 roster 面板与任务板
+    - id: ui-agent-team
+      name: '@deepseek-ai/dsh-experimental-client-ui-agent-team'

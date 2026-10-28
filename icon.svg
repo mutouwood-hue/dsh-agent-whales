@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Agent Whales">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6E8BFF"/>
+      <stop offset="1" stop-color="#3556E8"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4D6BFE" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#4D6BFE" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="128" height="128" rx="28" fill="url(#sea)"/>
+  <g transform="translate(4 30) scale(0.92)">
+    <path d="M30 30 C20 22 11 12 8 2 C20 8 28 15 34 22 Z" fill="#2C4AD8"/>
+    <path d="M30 40 C22 45 14 54 12 64 C24 59 32 52 37 45 Z" fill="#2C4AD8"/>
+    <path d="M32 26 C41 11 62 4 79 9 C97 15 109 27 107 40 C105 54 87 64 66 61 C47 58 33 49 29 38 C27 33 28 29 32 26 Z" fill="url(#body)"/>
+    <ellipse cx="79" cy="55" rx="30" ry="12" fill="#FFFFFF" opacity=".18"/>
+    <circle cx="91" cy="28" r="4.2" fill="#0B1B3A"/>
+    <circle cx="92.4" cy="26.6" r="1.5" fill="#FFFFFF" opacity=".9"/>
+    <path d="M82 42 C87 47 95 47 100 41" fill="none" stroke="#0B1B3A" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M63 8 L66 1 L70 7 L74 1 L77 8 Z" fill="#FFC53D"/>
+    <g fill="#BFE0FF">
+      <ellipse cx="58" cy="-2" rx="3" ry="4.4"/>
+      <ellipse cx="66" cy="-6" rx="3.4" ry="5"/>
+      <ellipse cx="74" cy="-2" rx="3" ry="4.4"/>
+    </g>
+  </g>
+</svg>

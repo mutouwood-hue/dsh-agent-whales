@@ -1,0 +1,11 @@
+node_modules/
+_scratch/
+.assets-cache/
+*.tgz
+dist/
+_incoming/*
+!_incoming/README.md
+tmp/
+output/
+__pycache__/
+*.pyc
