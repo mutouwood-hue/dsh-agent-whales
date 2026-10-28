@@ -777,7 +777,7 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
     effect: (run) => { run(); return () => {}; }
   });
 
-  assert.deepEqual(Object.keys(registered).sort(), ["whales_visit_list", "whales_visit_read", "whales_visit_send"]);
+  assert.deepEqual(Object.keys(registered).sort(), ["whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send"]);
   assert.equal(typeof registered.whales_visit_send.output.render, "function", "工具必须带 output.render");
   // 网关按 OpenAI function calling 校验：parameters 必须是 { type: "object", properties } 的 JSON Schema。
   // 传「属性表」或空对象会让整轮请求 400（真实事故：whales_visit_list 变成 type: null）。
@@ -894,4 +894,47 @@ test("串门：工具返回值必须是 lossless JSON（不能带 undefined 键�
   assert.equal("text" in sent.reply, false, "没拿到文本就不能有这个键");
   assertLossless(sent);
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), sent, "序列化往返必须等价");
+});
+test("串门：resume 幂等，离线会话才会真的拉起", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const registered = {};
+  const resumed = [];
+  let live = new Set(["already-on"]);
+  const liveAgent = (id) => (live.has(id) ? { id, status: "idle", session: { events: [] } } : undefined);
+
+  host.apply({
+    get: (name) => {
+      if (name === "tools") return { register: (tool) => { registered[tool.name] = tool; } };
+      if (name === "agents") {
+        return {
+          get: liveAgent,
+          list: () => [...live].map(liveAgent),
+          resume: async (options) => {
+            resumed.push(options.resumeSessionId);
+            live.add(options.resumeSessionId);
+            return { agent: liveAgent(options.resumeSessionId), dispose: async () => {} };
+          }
+        };
+      }
+      return undefined;
+    },
+    on: () => () => {},
+    effect: (run) => { run(); return () => {}; }
+  });
+
+  const tool = registered.whales_visit_resume;
+  assert.ok(tool, "必须注册 whales_visit_resume");
+  assert.equal(tool.parameters.type, "object", "parameters 必须是 object schema");
+
+  const already = await tool.execute({ sessionId: "already-on" }, {});
+  assert.deepEqual(already, { sessionId: "already-on", live: true, resumed: false }, "在线会话不重复 resume");
+  assert.equal(resumed.length, 0);
+
+  const offline = await tool.execute({ sessionId: "offline-1" }, {});
+  assert.deepEqual(resumed, ["offline-1"], "resume 用 resumeSessionId 传参");
+  assert.deepEqual(offline, { sessionId: "offline-1", live: true, resumed: true });
+
+  await assert.rejects(() => tool.execute({ sessionId: "  " }, {}), /不能为空/);
+  // 输出必须是 lossless JSON（无 undefined 键），否则宿主判非法
+  assert.deepEqual(JSON.parse(JSON.stringify(offline)), offline);
 });
