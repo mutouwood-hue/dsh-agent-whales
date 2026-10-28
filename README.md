@@ -257,7 +257,7 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 
 ## 许可
 
-- 代码：**未附开源许可证**，保留所有权利；要复用请先联系作者。
+- 代码：**MIT License**（见 [LICENSE](LICENSE)，Copyright (c) 2026 mutouwood-hue）——可自由使用、修改、分发，保留版权声明即可。
 - 素材：见 [NOTICE.md](NOTICE.md)（Martty 的 MIT 像素小人、AATINF 鲸鱼娘二创素材 + 角色参考 MIT、AI 生成说明）。
 
 ## 自测

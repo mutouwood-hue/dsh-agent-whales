@@ -2,14 +2,14 @@
 
 ## 代码
 
-本插件代码由插件作者编写，**当前未附开源许可证**。对内分享请遵守团队约定；
-如果要公开到 GitHub 或对外分发，请先补一份 LICENSE（MIT / Apache-2.0 之类），再公开仓库。
+本插件代码以 **MIT License** 发布，全文见 [LICENSE](LICENSE)，Copyright (c) 2026 mutouwood-hue。
+可以自由使用、修改、分发与商用，保留版权声明即可。
 
 ## 角色素材
 
 - 角色参考：**TreapGoGo/deepseek-whale-girl**（MIT License，Copyright (c) 2026 TreapGoGo）
 - 素材来源：**AATINF/deepseek-whale-girl-assets**（在该角色参考之上扩展的二创素材包，93 张）
-- 本插件使用的 7 张精灵图，是从上述素材包里按变体号挑出来，经抠白底、去溢色、裁切与压缩得到的
+- 本插件使用的鲸鱼娘精灵图（Q 版 8 张 + 成熟版 6 张），是从上述素材包里按变体号挑出来，经抠白底、去溢色、裁切与压缩得到的
 - 这些图片均为 **AI 生成**（`wan2.7-image` 图生图）
 
 再分发或二次修改时请保留以上署名，并说明图片为 AI 生成。
