@@ -14,7 +14,7 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 ## 效果
 
 - 页面顶端（窗口标题栏下方）一排鲸鱼娘，数量 = 当前正在干活的智能体数。
-- **混合风格**（默认）：Lead 用成熟版头肩特写，teammate 用 Q 版全身，一眼分得出谁是主导。
+- **Q 版**（默认）：全队统一用 Q 版全身，头大脸清、96px 也认得出来；想区分 Lead 可以在设置里切「混合」（Lead 成熟版头肩 + 成员 Q 版）。
 - **家族树**：按会话父子关系排布。默认只露到第 1 层（Lead + 直接子），有下级的角色脚下带「+N」按钮，点开才展开它的子 agent；再点收回去。
 - **已收工的子级会灰显留在原位**（不是消失），所以一个跑过一堆 subagent 的会话仍然看得出「谁是谁带出来的」；不想要可在设置里关掉。
 - **任务行**：角色脚下显示任务板里挂在它名下的任务（进行中优先，最多两条）。Lead 额外接管**还没人认领**的团队任务。
@@ -122,7 +122,7 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | 启用 | 开 | — | 关闭后整层移除 |
 | 计数方式 | 按成员 | 按成员 / 按团队 | 按成员：每个在干活的智能体一只；按团队：每个「至少一名成员在干活」的团队一只 |
 | 水平位置 | 中 | 左 / 中 / 右 | 队形贴着页面顶端左/中/右 |
-| 形象风格 | 混合 | 混合 / Q 版 / 成熟版 / 经典皮肤 | 混合 = Lead 成熟版 + 成员 Q 版 |
+| 形象风格 | **Q 版** | Q 版 / 混合 / 成熟版 / 经典皮肤 | 混合 = Lead 成熟版头肩 + 成员 Q 版 |
 | 动画强度 | 标准 | 关 / 轻微 / 标准 / 活泼 | 影响浮动幅度（`--daw-amp`）与气泡数量；关掉时用 CSS 停掉全部循环动画 |
 | 尺寸预设 | 标准 | 紧凑 / 标准 / 宽松 | 写 `scale` 为 67 / 100 / 133，与实际不符时显示为「自定义」 |
 | 垂直偏移 | 40 px | -60 ~ 120 | 相对内容顶端上下挪；默认 40 是为了给头顶气泡留空间 |
@@ -185,17 +185,23 @@ node tools/embed-art.mjs
 
 这是一个标准 DSH 双面插件（宿主半边注册提示策略 + 浏览器半边注册 `shell.overlay` 与 `settings.section` 槽位）。
 
-**桌面版（Electron，profile = `desktop`）**：`desktop` profile 由 App 独占管理，`dsh plugin` / `dsh --dump-config`
-都会拒绝执行，所以只能用 App 自己的入口装：
+仓库：<https://github.com/mutouwood-hue/dsh-agent-whales>
 
-1. Web 侧边栏 →「插件」（Plugins）；
-2. 选择安装 bundle，填本目录的绝对路径：`D:\干活\dsh-agent-whales`；
+**桌面版（Electron，profile = `desktop`）**：`desktop` profile 由 App 独占管理，`dsh plugin` / `dsh --dump-config`
+都会拒绝执行，只能走 App 自己的入口：
+
+1. Web 侧边栏 →「插件」（Plugins）→ 安装 bundle；
+2. 填安装说明符（三种都行）：
+   - `github:mutouwood-hue/dsh-agent-whales`（推荐，直接从仓库装）
+   - `.tgz` 安装包的绝对路径
+   - 本目录的绝对路径（本地开发时）
 3. 浏览器半边改动只需 `Ctrl+R` 刷新页面；**宿主半边（提示策略、团队行）必须重启 App**。
 
 **命令行管理的 profile（如 `web`）**：
 
 ```powershell
-dsh plugin --profile web add D:/干活/dsh-agent-whales
+dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
+# 或本地目录： dsh plugin --profile web add D:/干活/dsh-agent-whales
 ```
 
 ### 本 bundle 同时开启智能体团队
@@ -229,20 +235,17 @@ dsh plugin --profile web add D:/干活/dsh-agent-whales
 
 ## 分享给同事
 
-打包（在插件目录里执行，产物在 `dist/`）：
+**方式一 · 直接从 GitHub 装（推荐）**
+
+让对方在插件页填 `github:mutouwood-hue/dsh-agent-whales`，或命令行：
 
 ```powershell
-# 方式一：直接给 .tgz（推荐，同事不用管路径）
-#   产物：dist\dsh-agent-whales-0.18.0.tgz
-# 方式二：把整个目录压缩发过去，同事解压到任意绝对路径后按「安装 / 更新」填路径
-
+dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 ```
 
-同事侧安装（桌面版）：
+**方式二 · 离线给安装包**
 
-1. 侧边栏 →「插件」→ 安装 bundle；
-2. 填**绝对路径**：`.tgz` 文件的绝对路径，或解压后的目录绝对路径；
-3. 装完 **重启 App**（本插件带宿主半边：团队行 + 系统提示策略，刷新页面不够）。
+在插件目录里打包（产物在 `dist/`），把 `.tgz` 发给对方，对方在插件页填它的绝对路径。
 
 ⚠️ 装之前请让同事知道三件事：
 
@@ -252,7 +255,10 @@ dsh plugin --profile web add D:/干活/dsh-agent-whales
 
 素材署名见 `NOTICE.md`，转发时请一起带上。
 
-## 自测
+## 许可
+
+- 代码：**未附开源许可证**，保留所有权利；要复用请先联系作者。
+- 素材：见 [NOTICE.md](NOTICE.md)（Martty 的 MIT 像素小人、AATINF 鲸鱼娘二创素材 + 角色参考 MIT、AI 生成说明）。
 
 ## 自测
 

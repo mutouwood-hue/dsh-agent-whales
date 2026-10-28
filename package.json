@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-whales",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "private": true,
   "description": "每多一个正在干活的智能体（Lead、teammate 或子 agent），DSH Web 页面顶端就多一只游动的鲸鱼娘。",
   "type": "module",
