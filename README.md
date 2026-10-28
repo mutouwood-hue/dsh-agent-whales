@@ -266,7 +266,7 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 node --test test/client.test.mjs
 ```
 
-42 项断言，覆盖：信封/清单契约（注册 id === 包名、只 `require("react")`、注册到 `shell.overlay` +
+43 项断言，覆盖：信封/清单契约（注册 id === 包名、只 `require("react")`、注册到 `shell.overlay` +
 `settings.section`、中英文键集合一致）、计数口径（状态表优先、provisioning/failed、挂 Lead 团队、无团队退化、
 teams 模式、选择器引用稳定性）、素材表（每个精灵是 WebP data URI 且尺寸合理）、排布（超过 3 只缩小、
 超过 8 只截断成 +N）、皮肤家族（混合模式 Lead 取成熟版、经典皮肤不取位图）、家族树（默认只露两层、
@@ -307,7 +307,7 @@ node _scratch/preview.mjs
 
 - 已验证 · 契约：注册 id === 包名、只 `require("react")`、`apply` 注册到 `shell.overlay` + `settings.section`、
   中英文键集合一致、`exports` 暴露 `./client` 与 `./locale/*.json`、`icon` 为 manifest 相对路径。
-- 已验证 · 逻辑：`node --test test/client.test.mjs` 42 项全绿。
+- 已验证 · 逻辑：`node --test test/client.test.mjs` 43 项全绿。
 - 已验证 · 观感：`preview.still.html` 按 DSH 框架几何（40px 标题栏 + 240px 侧边栏 + 会话头 + `inset:0`
   的 overlay 层）截图核对——96px 下 Lead 头肩能看清脸、四个成员 Q 版尺度一致、`provisioning` 的三点与
   抱膝帧正确、名字带描边在浅底可读；`art.still.html` 在 220% 下核对边缘无白边。

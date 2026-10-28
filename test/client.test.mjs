@@ -853,3 +853,45 @@ test("经典皮肤：用 Martty 像素小人的两帧，图片不可用时退回
   assert.ok(findByClass(fallback, "daw-art").length >= 1, "退回矢量鲸鱼");
   artStatus.broken = false;
 });
+test("串门：工具返回值必须是 lossless JSON（不能带 undefined 键）", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const registered = {};
+  const session = {
+    events: [
+      { seq: 1, type: "user/message", data: { source: { kind: "user" }, content: [{ type: "text", text: "你好" }] } }
+    ]
+  };
+  const agent = { id: "s3", status: "idle", session, followup() {}, steer() {}, cancel() {} };
+  host.apply({
+    get: (name) => {
+      if (name === "tools") return { register: (tool) => { registered[tool.name] = tool; } };
+      if (name === "agents") return { get: (id) => (id === "s3" ? agent : undefined), list: () => [agent] };
+      return undefined;
+    },
+    on: () => () => {},
+    effect: (run) => { run(); return () => {}; }
+  });
+
+  /** 宿主按「序列化再解析」校验工具输出；出现 undefined 键就会被判非法。 */
+  function assertLossless(value, path = "$") {
+    if (value === undefined) throw new Error("undefined at " + path);
+    if (value === null || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) assertLossless(child, path + "." + key);
+  }
+
+  const list = await registered.whales_visit_list.execute({}, {});
+  assertLossless(list);
+  const read = await registered.whales_visit_read.execute({ sessionId: "s3" }, {});
+  assertLossless(read);
+
+  // 关键回归：等回复超时时不能把 { text: undefined } 带出来
+  const sent = await registered.whales_visit_send.execute(
+    { sessionId: "s3", message: "测试", waitForReply: true, timeoutMs: 1 },
+    {}
+  );
+  assert.equal(sent.timedOut, true, "1ms 预算必然超时");
+  assert.ok(sent.reply, "超时也要回一个 reply 对象");
+  assert.equal("text" in sent.reply, false, "没拿到文本就不能有这个键");
+  assertLossless(sent);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), sent, "序列化往返必须等价");
+});
