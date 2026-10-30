@@ -1,0 +1,11 @@
+# 素材管线的 Python 依赖
+#
+# 这两个脚本只用 numpy + Pillow，没有别的第三方依赖：
+#   python -m pip install -r tools/requirements.txt
+#   python tools/build-assets.py          # 从 AATINF 素材包重建 assets/art.json
+#   python tools/ingest-generated.py ...  # 把新画的图接进 art.json
+#
+# 版本区间刻意放宽：这两个库的 API 面足够稳定，钉死版本只会让干净机器更难装。
+# 只用到了最基础的能力（RGBA 处理、bbox、resize、WebP 编码），numpy 用于洪水填充的连通域。
+numpy>=1.24,<3
+Pillow>=10.0,<13

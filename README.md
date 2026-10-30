@@ -9,7 +9,29 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 插件分两半：
 
 - **浏览器半边**（`lib/client.js`）：角色图层、家族树、任务行、气泡与设置页。
-- **宿主半边**（`lib/index.js`）：向系统提示注册一段「团队协作（默认开启）」策略，让每个新会话默认先起团队。
+- **宿主半边**（`lib/index.js`）：注册一段「团队协作」系统提示段落、四个串门工具与一个活动接口。
+
+> ## ⚠️ 装之前必须知道的三件事
+>
+> 1. **它默认就开启「智能体团队」，并因此禁用 4 个官方 subagent 工具。**
+>    默认 `cordis.patch.yml` 会 `disabled: true` 掉 `tool-subagent-control` /
+>    `tool-subagent-list-agents` / `tool-subagent` / `tool-subagent-fork`，再插入团队服务
+>    `agent-team`、团队工具 `tool-agent-team`、Web roster 面板 `ui-agent-team`
+>    （与官方 `@deepseek-ai/dsh-experimental-agent-team-profile` 的补丁逐字段等价）。
+>    **这是团队工具取代旧 subagent 工具，不是 bug**；不想要的话见
+>    §[关闭团队 / 回滚](#关闭团队--回滚)。
+> 2. **它与官方 `@deepseek-ai/dsh-experimental-agent-team-profile` 互斥——必须二选一。**
+>    两者同装会给 `agent-team` / `tool-agent-team` / `ui-agent-team` 各插入两次，
+>    `cordis-plugin-loader` 抛 `TypeError: duplicate loader entry id`，**DSH 直接启动失败**
+>    （不是「后一个补丁覆盖前一个」）。检查方法见 §[常见问题](#常见问题)。
+> 3. **它只在自带 experimental 包的宿主上可用。** 三个团队包只随桌面版 runtime 分发
+>    （`@deepseek-ai/dsh-desktop-runtime@0.2.1-rc.3` 的 app.asar 内有 24 个
+>    `dsh-experimental-*`）；npm 全局 CLI 版 `dsh@0.1.5-rc.2` 的依赖树里是 **0 个**。
+>    解析不到 → `assertEntriesLoaded` 抛 `plugin(s) failed to load` → **启动失败**。
+>    在 `dsh web` / CLI profile 上请先按 §[关闭团队 / 回滚](#关闭团队--回滚) 关掉团队段。
+
+**运行环境**：需要随包提供 `web` 客户端插件的 DSH（桌面版 runtime 0.2.1-rc.3 实测通过）；
+版本号见 §[版本与兼容性](#版本与兼容性)。
 
 ## 效果
 
@@ -109,13 +131,14 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | provisioning（还在起） | 抱膝坐姿 + 半透明呼吸 + 头顶三点 | `q-sleepy` |
 | 已收工的子级 | 灰显 + 缩小 + 不冒泡不眨眼，留在父级下方 | 当前帧 |
 | 退出 | 下沉 + 淡出 + 气泡上升 | `q-proud` |
-| Lead 全程 | 成熟版头肩，与成员区分 | `m-bust` |
+| Lead 全程 | 成熟版头肩，与成员区分 | `m-base` |
 | 经典皮肤 | **Martty 的像素小人**：待命「嘘」/ 干活抱键盘；素材被拦时退回手绘矢量鲸鱼 | `c-idle` / `c-work`（退回时用内联 SVG） |
 | failed | 不渲染（沉底） | — |
 
 ## 设置
 
-设置 → 智能体鲸鱼 · Agent Whales（也显示当前在干活的实时数量）。共 19 项参数 + 一个「恢复默认」按钮。
+设置 → 智能体鲸鱼 · Agent Whales（也显示当前在干活的实时数量）。参数与 `lib/client.js` 的
+`DEFAULTS` 一一对应，另有一个「恢复默认」按钮。
 
 | 参数 | 默认 | 范围 | 说明 |
 |---|---|---|---|
@@ -131,10 +154,18 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | 游动速度 | 100 % | 25 ~ 250 | 统一缩放浮动、光晕、眨眼、气泡四类动画的周期 |
 | 气泡粒子 | 开 | — | 角色周围上浮的小水泡 |
 | 对话气泡 | 开 | — | 头顶那句「当前在做的事」 |
+| 俏皮话 | 开 | — | 没正事可说时冒一句短句（`quips`），关掉只留正经气泡 |
+| 团队汇总条 | 开 | — | 队形左侧「大伙在干什么」的汇总条（`teamBar`） |
+| 空闲挂着 | 开 | — | 没人在干活时把最后一批角色灰显挂着（`alwaysShow`）；关掉即整层消失、不占位 |
 | 显示任务 | 开 | — | 角色脚下的任务行 |
 | 已收工子级 | 开 | — | 关掉后只画正在跑的子 agent，收工的立刻消失 |
 | 可拖拽 | 开 | — | 允许鼠标把角色拖到任意位置，双击复位；关掉会顺带清空已拖的坐标 |
 | 显示名字 | 关 | — | 每个角色下面显示名字（Lead 显示会话标题） |
+
+面板里还有**一个不属于 `DEFAULTS` 的开关**：**串门工具**（默认开）。它控制的是**宿主侧四个
+`whales_visit_*` 工具注册与否**，所以真相在宿主、不在 `localStorage`——面板显示值来自
+`GET /agent-whales/api/activity` 的 `visitTools` 字段，点开关会 `POST /agent-whales/api/visit-tools`。
+详见下面「串门」一节。
 
 参数立即生效，持久化在 `localStorage["dsh-agent-whales.settings"]`；拖拽坐标另外存在
 `localStorage["dsh-agent-whales.positions"]`（按会话 id 记，形状是 `{ [id]: {x, y} }`，相对队形左上角）；
@@ -142,7 +173,7 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 
 ## 串门（自建，不依赖外部插件）
 
-宿主半边自己注册了三个工具，机理与 [`dsh-session-bridge`](https://github.com/heartmove/dsh-session-bridge) 一致（`agent.followup/steer` + 折叠 `session.events`），但只做「去看、去说、去听」这一层：
+宿主半边自己注册了四个工具，机理与 [`dsh-session-bridge`](https://github.com/heartmove/dsh-session-bridge) 一致（`agent.followup/steer` + 折叠 `session.events`），但只做「去看、去说、去听、去叫醒」这一层：
 
 | 工具 | 作用 |
 | --- | --- |
@@ -166,6 +197,30 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | 归档 / 取回 | 送客 / 请回来 |
 
 对方以后新增工具也不会让气泡报错，只会回落到「在干活」。
+
+### 串门工具是**可关的**（默认开）
+
+四个工具的 schema 会出现在**每一轮模型请求**里，实测合计约 **1589 字符**（`name` + `description` +
+`parameters`；PTC 模式下 `output.schema` 还会再多约 1430 字符）。同时它们给任何 agent 赋予了
+「驱动别的会话」的能力——包括 `steer` 打断、`resume` 拉起离线会话。所以给了一个开关：
+
+| 关掉的方式 | 适用 | 说明 |
+|---|---|---|
+| 设置面板 →「串门工具」 | 日常 | 立刻 `POST /agent-whales/api/visit-tools`，宿主**真的把四个工具从工具注册表注销**，不是只藏 UI |
+| 插件 entry 的 `config` | 一次性默认关 | 在任意 patch 层写 `- id: agent-whales` + `config: { visitTools: false }`；`apply(ctx, config)` 严格 `=== false` 才关 |
+
+关掉后：模型请求里不再有这四个工具定义；设置面板仍显示真实状态（真相来自宿主，不落 `localStorage`）。
+重新打开即恢复注册。
+
+**协议**（两个半边就靠它通信，都是本插件的私有路由）：
+
+| 路由 | 方法 | 作用 |
+|---|---|---|
+| `/agent-whales/api/activity` | `GET` / `HEAD` | 只读快照 `{ at, active, visitTools, controlToken }` |
+| `/agent-whales/api/visit-tools` | `POST` | 唯一写操作；必须带 `x-whales-token`（= 最近一次 GET 里的 `controlToken`），体 `{ enabled: boolean }` |
+
+`controlToken` 只出现在同源 GET 的响应体里——跨源页面受 CORS 限制读不到响应体，因此拿不到 token，
+伪造的 POST 会被 403。这是**同源证明（CSRF 防护）而不是身份认证**，别把它当鉴权用。
 
 ## 素材重建
 
@@ -194,9 +249,9 @@ node tools/embed-art.mjs
 1. Web 侧边栏 →「插件」（Plugins）→ 安装 bundle；
 2. 填安装说明符（三种都行）：
    - `github:mutouwood-hue/dsh-agent-whales`（推荐，直接从仓库装）
-   - `.tgz` 安装包的绝对路径
+   - `.tgz` 安装包的绝对路径（自己打包：`npm run pack:dist`，产物落在 `dist/`）
    - 本目录的绝对路径（本地开发时）
-3. 浏览器半边改动只需 `Ctrl+R` 刷新页面；**宿主半边（提示策略、团队行）必须重启 App**。
+3. 浏览器半边改动只需 `Ctrl+R` 刷新页面；**宿主半边（提示策略、活动接口）必须重启 App**。
 
 **命令行管理的 profile（如 `web`）**：
 
@@ -205,15 +260,25 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 # 或本地目录： dsh plugin --profile web add D:/干活/dsh-agent-whales
 ```
 
-### 本 bundle 同时开启智能体团队
+> 没有 `scripts` 里的 `pack:dist` 之前，`dist/` 里的 `.tgz` 是手工 `npm pack` 出来的；
+> 现在 `npm pack` 会先跑 `prepack` 检查 `lib/client.js` 里有没有内联 ART，缺了直接失败。
 
-`cordis.patch.yml` 里除了插入 `agent-whales` 这一行，还带上了官方组合包
-`@deepseek-ai/dsh-experimental-agent-team-profile` 等价的一层：
+### 默认开启智能体团队（本 bundle 的一部分）
 
-- 关掉会被团队工具取代的旧 subagent 工具（`tool-subagent-control`、`tool-subagent-list-agents`、`tool-subagent`、`tool-subagent-fork` 四行）；
-- 插入团队服务 `agent-team`、九个团队工具 `tool-agent-team`、Web roster 面板 `ui-agent-team`。
+`cordis.patch.yml` 里除了插入 `agent-whales`，还带上了官方组合包
+`@deepseek-ai/dsh-experimental-agent-team-profile` **逐字段等价**的一层：
 
-也就是说：**装上这个插件，每个会话就默认带着智能体团队能力**（团队服务 + 团队工具 + 任务板面板）。
+- `disabled: true` 掉会被团队工具取代的旧 subagent 工具（`tool-subagent-control`、
+  `tool-subagent-list-agents`、`tool-subagent`、`tool-subagent-fork` 四行）；
+- 插入团队服务 `agent-team`、团队工具 `tool-agent-team`、Web roster 面板 `ui-agent-team`
+  （config 与官方层一致：`maxMembers: 8` / `maxTasks: 256` / `maxMessageBytes: 65536` /
+  `disposalTimeoutMs: 5000`、`freshProvider: spawn` / `forkProvider: fork`）。
+
+也就是说：**装上这个插件，每个会话就默认带着智能体团队能力**（团队服务 + 团队工具 + 任务板面板），
+代价是本 profile 里不再有 `subagent` / `subagent_fork` / `list_agents` / `subagent_control`
+这四件工具——delegate 改走团队工具。已用真实 `composeEntries` 复算：默认层叠加
+`dsh-base` + `dsh-web-app` 后**恰好触碰 8 行**（4 行 disabled + 插件自己 + 3 行 insert），
+**零 warning**。
 
 **但这只是「能力可用」，不等于「已经在组队」。** 为了让会话真的用起来，宿主半边会注册
 `agent-whales/team-policy`（order 87）这一节系统提示，大意是：
@@ -222,17 +287,87 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 > 用任务板拆活并写清验收标准与写入范围，Lead 只做整合、评审与最终答复；确实无法拆分时可以不建团队，
 > 但要在回复里说明原因。
 
-所以重启 App 之后，**新会话默认就是团队模式**。这是提示层面的约定，不是硬编码调度：模型仍可能判断某任务
-确实不可拆分而跳过，统计上不会 100% 每次都组队。
+所以重启 App 之后，**新会话默认就是团队模式**。这是提示层面的约定，不是硬编码调度：模型仍可能判断
+某任务确实不可拆分而跳过，统计上不会 100% 每次都组队。
 
-注意：
+**宿主侧的兜底逻辑**：`agent-whales/team-policy` 是按服务判定的——组装提示时如果 `agentTeams`
+服务存在，本段输出空字符串（让位给官方 `team:policy`，避免双份注入）；不存在时输出上面的兜底段落。
+注意这条兜底在「你手工关掉团队」时**仍会输出**，所以关掉团队后如果不想让模型去找
+`spawn_teammate`，最省事的做法是在插件页直接禁用整个 bundle（见下）。
 
-- 想回到「能力有、但不默认组队」：删掉 `lib/index.js` 里那段 `systemPrompt.section(...)` 注册，重启 App。
-- 不要同时再安装官方 `agent-team-profile` bundle —— 那会让 `agent-team` / `tool-agent-team` / `ui-agent-team`
-  三个 id 重复注册，行为变成「后应用的补丁覆盖前一个」。
-- **回滚要两步**：① 删掉 `cordis.patch.yml` 里那 4 条 `disabled: true` 与 3 条团队 `insert`；
-  ② 删掉 `lib/index.js` 里的策略注册（否则提示仍会要求使用已被关掉的团队工具）。改完重启 App。
-  更省事的做法是在插件页直接禁用本 bundle。
+### 关闭团队 / 回滚
+
+有两条路径，**都不需要改本插件文件**。
+
+**A. 只关团队、保留鲸鱼**：把下面 7 行追加到 `$DSH_HOME/cordis.patch.yml`
+（家目录用户补丁层，叠在每个 profile 之上、优先级最高；`live` 热加载，通常不必重启）：
+
+```yaml
+- id: agent-team
+  disabled: true
+- id: tool-agent-team
+  disabled: true
+- id: ui-agent-team
+  disabled: true
+- id: tool-subagent-control
+  disabled: false
+- id: tool-subagent-list-agents
+  disabled: false
+- id: tool-subagent
+  disabled: false
+- id: tool-subagent-fork
+  disabled: false
+```
+
+> ✅ **这 7 行经过真实复算验证**（`_scratch/verify-t3.mjs`「关闭步骤复算」一节，用
+> `composeEntries` 叠加 `dsh-base` + `dsh-web-app` + 本 bundle + 上面这段）：三条团队行
+> `disabled === true`、四条 `tool-subagent*` 回到 `disabled === false`、鲸鱼保持启用、
+> 团队行仍然只有一份（不会又造出重复 id）、**零 warning**。原理是补丁按 `target[key] = value`
+> 逐键覆盖（`dsh-app-boot/lib/index.js:102-105`），后应用的层能翻回前一层的 `disabled`。
+>
+> ⚠️ 已知副作用：`lib/index.js` 的提示段落会在团队服务缺失时输出兜底策略（要求用
+> `spawn_teammate`），而那时工具已被关掉。要彻底干净走路径 B，或等 lib 侧把兜底改成
+> 「无团队服务就不输出」（已作为跨范围项转派）。
+
+**B. 整个插件停用**（鲸鱼和团队一起关，绝不出现提示/工具不一致）：
+
+```yaml
+- id: agent-whales
+  disabled: true
+```
+
+或者更省事：在插件页直接禁用本 bundle。
+
+### 两种会启动失败的组合（务必避开）
+
+| 组合 | 结果 |
+|---|---|
+| profile 里同时有官方 `@deepseek-ai/dsh-experimental-agent-team-profile` bundle | ❌ **DSH 起不来**：两边插入同一批 id（`agent-team` / `tool-agent-team` / `ui-agent-team`），`cordis-plugin-loader/lib/index.js:91` 抛 `TypeError: duplicate loader entry id`。已用真实补丁复现出 3 个重复 id |
+| 在没有 experimental 包的 DSH 上装（例如 npm 全局 CLI `dsh@0.1.5-rc.2` 的 profile） | ❌ **DSH 起不来**：三个 `name` 解析不到（该依赖树里 experimental 包数量为 0），`dsh-app-boot/lib/index.js:1434-1438` 的 `assertEntriesLoaded` 抛 `plugin(s) failed to load` |
+
+**装之前先自检**（缺哪个会直接告诉你；全 OK 才装）：
+
+```powershell
+node -e "for (const p of ['@deepseek-ai/dsh-experimental-agent-team','@deepseek-ai/dsh-experimental-tool-agent-team','@deepseek-ai/dsh-experimental-client-ui-agent-team']) { try { require.resolve(p); console.log('OK', p) } catch { console.log('MISSING', p) } }"
+```
+
+### 常见问题
+
+**Q：我怎么知道自己 profile 里有没有装官方 agent-team-profile？**
+看 `<DSH_PROFILE_DIR>/package.json` 的 `dsh.profile.bundles`（桌面版 profile 目录是
+`$DSH_HOME/profiles/desktop`）。里面**同时出现** `dsh-agent-whales` 和
+`@deepseek-ai/dsh-experimental-agent-team-profile` 就是踩雷配置，必须删掉后者。
+
+> 本仓库作者本机就是这种配置（`~/.dsh/profiles/desktop/package.json` 两个都列着）。
+> 之所以还没炸，是因为那条 bundle 从 profile 目录解析不到（`MODULE_NOT_FOUND`），
+> 也就是说它当前**并没有真正生效**——一旦补齐安装，就会命中 duplicate id。属于待修的踩雷配置。
+
+**Q：装完重启，DSH 起不来怎么办？**
+看启动报错里的关键词：
+- `duplicate loader entry id` → 官方 profile 同装，删掉它；
+- `plugin(s) failed to load` → 宿主没有 experimental 包，按 §关闭团队 / 回滚 A 关掉团队段，
+  或换桌面版。
+
 
 ## 分享给同事
 
@@ -246,13 +381,16 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 
 **方式二 · 离线给安装包**
 
-在插件目录里打包（产物在 `dist/`），把 `.tgz` 发给对方，对方在插件页填它的绝对路径。
+在插件目录里打包：`npm run pack:dist`（产物落在 `dist/`，`prepack` 会先校验内联 ART），
+把 `.tgz` 发给对方，对方在插件页填它的绝对路径。
 
 ⚠️ 装之前请让同事知道三件事：
 
-- 它会**给整个 profile 装上智能体团队**（团队服务 + 9 个团队工具 + roster 面板），并**禁用旧 `tool-subagent*` 工具**；
-- 它会注册一段系统提示，**让每个新会话默认先起 1–3 个 teammate**——这会增加 token 消耗；
-- 不想要任一项，删掉 `cordis.patch.yml` 里对应段落或直接禁用本 bundle 即可。
+- 它会**给整个 profile 装上智能体团队**（团队服务 + 团队工具 + roster 面板），并因此
+  **禁用 4 个官方 subagent 工具**（团队工具取代它们，不是 bug）；
+- 它会注册一段系统提示，**让新会话默认先起 1–3 个 teammate**——这会增加 token 消耗；
+- **必须先确认对方没装官方 `agent-team-profile`**（同装会让 DSH 起不来），且宿主是自带
+  experimental 包的桌面版；否则按 §关闭团队 / 回滚 处理。
 
 素材署名见 `NOTICE.md`，转发时请一起带上。
 
@@ -261,13 +399,38 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 - 代码：**MIT License**（见 [LICENSE](LICENSE)，Copyright (c) 2026 mutouwood-hue）——可自由使用、修改、分发，保留版权声明即可。
 - 素材：见 [NOTICE.md](NOTICE.md)（Martty 的 MIT 像素小人、AATINF 鲸鱼娘二创素材 + 角色参考 MIT、AI 生成说明）。
 
+## 版本与兼容性
+
+当前插件版本：**0.21.0**。
+
+| 宿主 | 团队段 | 说明 |
+|---|---|---|
+| 桌面版（Electron，runtime `0.2.1-rc.3`） | ✅ 可用 | app.asar 自带 24 个 `dsh-experimental-*` 包，实测通过 |
+| npm 全局 CLI `dsh@0.1.5-rc.2` 的 profile（`dsh web` / headless） | ❌ 需先关闭 | 依赖树里 `dsh-experimental-*` 数量为 0，团队三条 insert 解析不到会拒绝启动 → 按 §关闭团队 / 回滚 A 处理 |
+
+**为什么没有 `engines.dsh` / 宿主版本区间**：DSH 的插件清单契约（`@deepseek-ai/dsh-package-manifest`
+的 `DshManifest` 类型）只认 `bundle` / `profile` / `client` / `configTrees` / `sessionFormatMigration` /
+`moduleFallback`，**没有宿主版本字段**；239 个官方包里 238 个不声明 `engines`，唯一的版本旋钮是
+`peerDependencies["@deepseek-ai/cordis"]`，而 cordis 4.x 同时覆盖上面两代 runtime，拦不住语义漂移。
+所以兼容性靠两件事守：**README 这张表** + **每次升级 DSH 后跑一遍 `npm test` 并目视页面**。
+
+**升级 DSH 后可能静默坏的三个面**（离线测试覆盖了前两个的仓库侧契约）：
+`dsh.client` 的 `platform` / `immediately` / `inject` / `external` 字段语义、团队三包的
+`id` 与 `config` 键名、以及 `systemPrompt.section()` 的签名。真坏了的表现通常是「页面没有鲸鱼」
+或「启动报 plugin(s) failed to load」，前者刷新 + 看控制台，后者看启动日志关键词。
+
 ## 自测
 
 ```powershell
-node --test test/client.test.mjs
+npm test          # = node --test test/，跑 test/ 下全部 *.test.mjs
 ```
 
-44 项断言，覆盖：信封/清单契约（注册 id === 包名、只 `require("react")`、注册到 `shell.overlay` +
+四个文件分工：`client.test.mjs`（基线：契约/计数/素材/排布/家族树/气泡/拖拽/设置/渲染）、
+`index.test.mjs`（宿主半边）、`client-robustness.test.mjs`（对抗性：畸形输入、缺服务、边界值）、
+`meta.test.mjs`（发布门禁：清单契约、`files` 覆盖 `exports` 目标、patch 无 BOM/可解析、
+默认 patch 只增量插入自己、`npm test` 覆盖全部用例）。
+
+覆盖：信封/清单契约（注册 id === 包名、只 `require("react")`、注册到 `shell.overlay` +
 `settings.section`、中英文键集合一致）、计数口径（状态表优先、provisioning/failed、挂 Lead 团队、无团队退化、
 teams 模式、选择器引用稳定性）、素材表（每个精灵是 WebP data URI 且尺寸合理）、排布（超过 3 只缩小、
 超过 8 只截断成 +N）、皮肤家族（混合模式 Lead 取成熟版、经典皮肤不取位图）、家族树（默认只露两层、
@@ -291,30 +454,45 @@ node _scratch/preview.mjs
 
 | 文件 | 作用 |
 |---|---|
-| `lib/index.js` | 宿主半边：注册「团队协作（默认开启）」策略段落；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边。服务缺失一律静默降级 |
+| `lib/index.js` | 宿主半边：注册「团队协作」策略段落（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、四个 `whales_visit_*` 串门工具（可运行时开关）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
 | `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层与设置页；**含内联的精灵图数据** |
-| `cordis.patch.yml` | 插入 `agent-whales` 行 + 团队三行，禁用旧 subagent 四行 |
-| `assets/*.webp` | 7 张精灵图（源，便于人工核对） |
+| `cordis.patch.yml` | 默认层（**唯一真相**）：插入 `agent-whales` + 团队服务/工具/面板三行，并 `disabled` 掉旧 subagent 四行 |
+| `assets/*.webp` | 14 张精灵图（源，便于人工核对；另 2 张 Martty 像素小人的 PNG 源在 `assets/pet/`，见下） |
+| `assets/pet/` | 经典皮肤的两张上游 PNG（Martty，MIT）+ 复现说明；`c-idle` / `c-work` 的唯一源 |
 | `assets/art.json` | 精灵图产物清单（data URI + 尺寸 + 来源变体号） |
 | `tools/build-assets.py` | 素材管线：下载 → 抠图 → 压缩 → 产出 webp 与 art.json |
+| `tools/ingest-generated.py` | 把新画的图接进 `art.json`（白底洪水填充 → 羽化 → 去溢色 → WebP） |
+| `tools/requirements.txt` | 上面两个脚本的 Python 依赖（numpy + Pillow） |
 | `tools/embed-art.mjs` | 把 art.json 内联进 `lib/client.js` |
 | `locale/*.json` | 插件管理页卡片文案 |
 | `icon.svg` | 插件管理页图标 |
 | `test/harness.mjs` | 离线测试用的最小 React 垫片与插件加载器 |
-| `test/client.test.mjs` | 离线冒烟测试（含宿主半边的一节） |
+| `test/client.test.mjs` | 基线用例（契约 / 计数 / 素材 / 家族树 / 气泡 / 拖拽 / 设置 / 渲染） |
+| `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具、活动接口） |
+| `test/client-robustness.test.mjs` | 对抗性用例（畸形输入、缺服务、边界值） |
+| `test/meta.test.mjs` | 发布门禁用例（清单契约、`files`/`exports`、patch BOM 与结构、`npm test` 覆盖面） |
+| `test/index.js` | `node --test test/` 的目录入口，导入全部 `*.test.mjs` |
 | `_scratch/` | 开发期侦察、预览与截图脚本（可整目录删掉） |
 
 ## 已验证 / 未验证
 
 - 已验证 · 契约：注册 id === 包名、只 `require("react")`、`apply` 注册到 `shell.overlay` + `settings.section`、
   中英文键集合一致、`exports` 暴露 `./client` 与 `./locale/*.json`、`icon` 为 manifest 相对路径。
-- 已验证 · 逻辑：`node --test test/client.test.mjs` 44 项全绿。
+- 已验证 · 逻辑：`npm test`（= `node --test test/`）全绿（断言数以 `test/` 下的文件为准）。
 - 已验证 · 观感：`preview.still.html` 按 DSH 框架几何（40px 标题栏 + 240px 侧边栏 + 会话头 + `inset:0`
   的 overlay 层）截图核对——96px 下 Lead 头肩能看清脸、四个成员 Q 版尺度一致、`provisioning` 的三点与
   抱膝帧正确、名字带描边在浅底可读；`art.still.html` 在 220% 下核对边缘无白边。
 - 已验证 · 真机出现：用户截图确认角色、头顶气泡、计数徽章都正常渲染，`data:` 图片未被 CSP 拦截。
 - 已验证 · 经典皮肤：素材未内联时（`ART` 为空）整层自动退回矢量鲸鱼，摆尾与喷水动画在 CSS 里。
-- 已验证 · 团队挂载：`agent-team` / `tool-agent-team` / `ui-agent-team` 三行已在 profile 组合里，旧 `tool-subagent*` 已 inactive。
+- 已验证 · 默认层组合（2026-10-30，用真实 `composeEntries` + 真实 `dsh-base`/`dsh-web-app` 补丁复算）：
+  叠加后**恰好触碰 8 行**（4 行 `disabled: true` + `agent-whales` + 团队三行 insert），**零 warning**，
+  `agent-team` 的 config 与官方 profile 补丁逐字段一致。
+- 已验证 · 互斥性：本插件补丁 + 官方 `agent-team-profile` 补丁同时应用 → `agent-team` /
+  `tool-agent-team` / `ui-agent-team` 各重复 2 次 → `cordis-plugin-loader/lib/index.js:91`
+  抛 `TypeError: duplicate loader entry id`，`Include._apply` 直接失败，**DSH 不启动**（不是「补丁覆盖」）。
+- 已验证 · 关闭步骤：把 §关闭团队 / 回滚 A 的 7 行叠在 `$DSH_HOME/cordis.patch.yml` 上复算 →
+  团队三行 `disabled: true`、四条 `tool-subagent*` 回到 `disabled: false`、鲸鱼保持启用、
+  团队行仍只有一份、零 warning（原理：补丁逐键覆盖，`dsh-app-boot/lib/index.js:102-105`）。
 - 已验证 · 拖拽健壮性：`pointercancel`（滚动/切窗口）不会把角色甩到队形原点；`(0,0)`、`NaN`、离谱坐标读取侧一律忽略。
 - 已验证 · 拖拽渲染：把某只的坐标写进 store 后，它在离屏页面里以 `position:absolute` 落点，
   它的子 agent 自动跟到右下 30/12px；没拖过的仍在队形里。
@@ -322,6 +500,16 @@ node _scratch/preview.mjs
   只验证了坐标换算与落点渲染。
 - 未验证 · 真机对位：`96px` 比旧版 `46px` 高，加上任务行与头顶气泡，整个簇会压到会话头与第一行内容；
   用「尺寸预设·紧凑」或「垂直偏移」调。
-- 未验证 · 团队策略的实际效果：`agent-whales/team-policy` 只在单元测试里验证了注册与兜底，
-  尚未在重启后的新会话里观察「默认起团队」是否稳定生效。
-- 未验证 · 重复安装：如果 profile 里同时装了官方 `agent-team-profile`，两套补丁会注册同一批 id。
+- 已验证 · 串门开关（宿主侧）：`GET /agent-whales/api/activity` 带 `visitTools` + `controlToken`；
+  `POST /agent-whales/api/visit-tools` 无/错 token → 403 且状态不变，坏 body → 400，正确 token +
+  `{enabled:false}` → 204 且四个工具**从注册表真的消失**，`{enabled:true}` → 204 恢复且
+  `parameters.type === "object"`；GET/PUT/PATCH/DELETE 打到该路由 → 405；并发 toggle 不重复注册。
+- 已验证 · 串门开关（客户端侧）：点击发出正确的 `x-whales-token` 与 `{enabled}`；403/500/网络失败
+  一律把 UI 回滚到宿主真相；未拿到首次快照前开关 `disabled`；连点只发一个请求；老宿主（响应里没有
+  `visitTools`）整行隐藏。设置面板显示值**只来自宿主快照，不落 `localStorage`**。
+- 未验证 · 串门开关端到端：「关掉后 4 个工具定义确实不再进模型请求」这条只能由宿主侧注册表证明
+  （已完成），真实模型请求 payload 未抓包；真实浏览器里点开关、真实 403 触发也未跑。
+- 未验证 · HMR 时序：热重载时若新实例注册早于旧实例注销，可能短暂出现「新实例该工具未注册」，
+  客户端下一次轮询会如实显示 `visitTools:false`，重新打开即可自愈；未在真机复现。
+- 未验证 · 在缺少 `@deepseek-ai/dsh-experimental-*` 的 DSH 上安装：按代码推断会拒绝启动
+  （`assertEntriesLoaded` 抛 `plugin(s) failed to load`），未在真机上复现。

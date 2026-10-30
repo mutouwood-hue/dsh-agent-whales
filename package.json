@@ -1,16 +1,18 @@
 {
   "name": "dsh-agent-whales",
-  "version": "0.20.0",
-  "private": true,
-  "license": "MIT",
+  "version": "0.21.0",
   "description": "每多一个正在干活的智能体（Lead、teammate 或子 agent），DSH Web 页面顶端就多一只游动的鲸鱼娘。",
+  "license": "MIT",
   "type": "module",
+  "author": "mutouwood-hue",
   "icon": "./icon.svg",
+  "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json",
-    "./locale/*.json": "./locale/*.json"
+    "./locale/*.json": "./locale/*.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "files": [
     "lib/index.js",
@@ -21,6 +23,32 @@
     "README.md",
     "NOTICE.md"
   ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mutouwood-hue/dsh-agent-whales.git"
+  },
+  "homepage": "https://github.com/mutouwood-hue/dsh-agent-whales#readme",
+  "bugs": {
+    "url": "https://github.com/mutouwood-hue/dsh-agent-whales/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "whale",
+    "ui"
+  ],
+  "scripts": {
+    "test": "node --test test/",
+    "pack:dist": "npm pack --pack-destination dist",
+    "prepack": "node -e \"const s=require('fs').readFileSync('lib/client.js','utf8');if(!s.includes('<art:begin>')||!s.includes('data:image/webp;base64')){console.error('prepack: lib/client.js 缺少内联 ART —— 先跑 node tools/embed-art.mjs');process.exit(1)}\""
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

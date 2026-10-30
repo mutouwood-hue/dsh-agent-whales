@@ -490,7 +490,7 @@ test("渲染：设置页显示实时数量与全部控件", () => {
   const ranges = findByClass(tree, "daw-range");
   assert.equal(ranges.length, 4, "偏移 / 大小 / 不透明度 / 速度 四个滑杆");
   const switches = findByClass(tree, "daw-switch");
-  assert.equal(switches.length, 10, "启用 / 粒子 / 对话气泡 / 俏皮话 / 没活也挂着 / 团队汇总 / 显示任务 / 已收工子级 / 可拖拽 / 显示名字");
+  assert.equal(switches.length, 11, "启用 / 粒子 / 对话气泡 / 俏皮话 / 没活也挂着 / 团队汇总 / 串门工具 / 显示任务 / 已收工子级 / 可拖拽 / 显示名字");
   const segments = findByClass(tree, "daw-seg");
   assert.equal(segments.length, 5, "计数方式 / 水平位置 / 形象风格 / 动画强度 / 尺寸预设五组分段控件");
 });
@@ -508,8 +508,11 @@ test("宿主半边：注册团队协作策略，拿不到 systemPrompt 或注册
   assert.equal(sections.length, 1, "只注册一个提示段落");
   assert.equal(sections[0].name, "agent-whales/team-policy");
   assert.ok(Number.isFinite(sections[0].order), "order 必须是有限数字");
-  assert.ok(sections[0].text.includes("spawn_teammate"), "策略里要点名团队工具");
-  assert.ok(sections[0].text.includes("默认先起团队"), "默认行为是起团队");
+  // 真实 dsh-system-prompt 契约：text 可以是 string，也可以是 (context) => string 的惰性段落。
+  const policyText = typeof sections[0].text === "function" ? sections[0].text({}) : sections[0].text;
+  assert.equal(typeof policyText, "string", "段落文本要么是 string，要么是返回 string 的函数");
+  assert.ok(policyText.includes("spawn_teammate"), "策略里要点名团队工具");
+  assert.ok(policyText.includes("默认先起团队"), "默认行为是起团队");
   assert.ok(labels.every((label) => typeof label === "string" && label.length > 0), "每个 effect 都要有名字");
 
   // 没有 systemPrompt 服务：安静跳过，不抛
