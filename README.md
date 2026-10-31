@@ -216,9 +216,14 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | 工具 | 作用 |
 | --- | --- |
 | `whales_visit_list` | 列出可串门的会话：id / 标题 / 是否在跑 / 所属工作区。只读。 |
-| `whales_visit_send` | 给另一个会话说话：`queue` 追加一轮、`steer` 打断当前步并注入；`waitForReply=true` 会阻塞等它回话。 |
+| `whales_visit_send` | 给另一个会话说话。**默认插话**（`mode: "steer"`）：它正在跑的那一轮会在**下一个步边界**注入你这句话，不用等整轮跑完；要排队等它跑完再处理就显式传 `mode: "queue"`。`waitForReply=true` 会阻塞等它回话。 |
 | `whales_visit_read` | 读某个会话最近的对话文本（默认 20 行，上限 100）。 |
 | `whales_visit_resume` | 把持久化的离线会话重新拉上线（`agents.resume`，幂等：已在线直接返回），之后才能给它发消息。 |
+
+> **投递方式默认是「插话」（steer）**，2026-10-31 按用户决定改的：智能体之间互相说话不该排队等对方整轮跑完。
+> 宿主契约里 `steer` 对 **running** 的 agent 在**下一个步边界**消费、对 **idle** 的直接开一轮——它不会打断
+> 正在进行的单个步骤（做不到），但也不用等整轮结束。想全局改回排队：给插件 entry 写
+> `config: { visitMode: "queue" }`（兼容 `config: { visitSteer: false }`）；单次调用仍可用 `mode: "queue"`。
 
 **明确不做**：会话创建、离线日志读取、按段落读、看门狗监控、思维链循环检测与任务转移、归档/取消归档——要这些请单独安装 `dsh-session-bridge`（它的工具名是 `session_bridge_*`，与我们不冲突，可以共存）。
 

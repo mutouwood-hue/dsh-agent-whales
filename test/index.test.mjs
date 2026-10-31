@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 宿主半边（lib/index.js）的对抗性回归测试。
  *   node --test test/            # 通过 test/index.js 汇总执行
  *   node --test "test/*.test.mjs"
@@ -665,7 +665,8 @@ test("宿主工具：whales_visit_send 真的等到回话时，reply.text 是字
   });
 
   const sent = await tools.whales_visit_send.execute(
-    { sessionId: "s-reply", message: "来串门", waitForReply: true, timeoutMs: 2000 },
+    // 默认已是插话；这条用例要验的是「等回话」，显式走 queue 保持原语义
+    { sessionId: "s-reply", message: "来串门", mode: "queue", waitForReply: true, timeoutMs: 2000 },
     {}
   );
   assert.equal(followups.length, 1, "送信走 followup");

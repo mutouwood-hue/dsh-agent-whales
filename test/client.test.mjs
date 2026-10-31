@@ -904,13 +904,15 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
   assert.equal(list.sessions[0].title, "隔壁的活", "标题取自 session/title 事件");
   assert.equal(list.sessions[0].workspaceId, "w1");
 
+  // 2026-10-31 用户决定：默认「插话」（steer），排队要显式指定。
   await registered.whales_visit_send.execute({ sessionId: "s2", message: "来串门" }, {});
-  assert.equal(followups.length, 1, "queue 走 followup");
-  assert.equal(followups[0].role, "user");
-  assert.equal(followups[0].content[0].text, "来串门");
+  assert.equal(steers.length, 1, "省略 mode → 默认插话（steer）");
+  assert.equal(steers[0].role, "user");
+  assert.equal(steers[0].content[0].text, "来串门");
 
-  await registered.whales_visit_send.execute({ sessionId: "s2", message: "打断", mode: "steer" }, {});
-  assert.equal(steers.length, 1, "steer 走 steer");
+  await registered.whales_visit_send.execute({ sessionId: "s2", message: "排队说", mode: "queue" }, {});
+  assert.equal(followups.length, 1, "显式 queue 走 followup");
+  assert.equal(followups[0].content[0].text, "排队说");
 
   const read = await registered.whales_visit_read.execute({ sessionId: "s2" }, {});
   assert.deepEqual(read.messages.map((row) => row.role), ["user", "assistant"]);
@@ -1382,4 +1384,39 @@ test("体积：client.js 不再内联 base64 素材，且控制在 200KB 以内"
   const bytes = Buffer.byteLength(source, "utf8");
   assert.ok(bytes < 200 * 1024, "client.js 必须 ≤200KB（D1 目标），实际 " + Math.round(bytes / 1024) + "KB");
   assert.ok(source.includes("var ART = {};"), "ART 必须保留空表占位，等运行时填充");
+});
+
+
+// ── 串门投递方式：默认插话，可用 config 改回排队（2026-10-31 用户决定）────
+test("串门：默认插话（steer），config.visitMode=queue / visitSteer=false 可改回排队", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+
+  async function run(config) {
+    const registered = {};
+    const calls = { followup: 0, steer: 0 };
+    const session = { events: [] };
+    const agent = {
+      id: "s9",
+      status: "idle",
+      session,
+      followup: () => { calls.followup += 1; },
+      steer: () => { calls.steer += 1; }
+    };
+    host.apply({
+      get: (name) => {
+        if (name === "tools") return { register: (tool) => { registered[tool.name] = tool; } };
+        if (name === "agents") return { get: (id) => (id === "s9" ? agent : undefined), list: () => [agent] };
+        return undefined;
+      },
+      on: () => () => {},
+      effect: (fn) => { fn(); return () => {}; }
+    }, config);
+    await registered.whales_visit_send.execute({ sessionId: "s9", message: "hi" }, {});
+    return calls;
+  }
+
+  assert.deepEqual(await run(undefined), { followup: 0, steer: 1 }, "不配置时默认插话");
+  assert.deepEqual(await run({ visitMode: "queue" }), { followup: 1, steer: 0 }, "config.visitMode=queue → 默认排队");
+  assert.deepEqual(await run({ visitSteer: false }), { followup: 1, steer: 0 }, "兼容 config.visitSteer=false");
+  assert.deepEqual(await run({ visitMode: "nonsense" }), { followup: 0, steer: 1 }, "脏配置退回插话");
 });
