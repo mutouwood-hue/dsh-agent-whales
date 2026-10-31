@@ -17,6 +17,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { clientPath, findByClass, installDocumentStub, loadPlugin, pluginDir, render, walk } from "./harness.mjs";
+// D1 之后素材不再内联：这组用例用一个假宿主路由把 manifest + webp 喂给 artLoader。
+import { testApiWithArt } from "./artkit.mjs";
 
 const artJsonPath = join(pluginDir, "assets", "art.json");
 
@@ -364,13 +366,10 @@ test("apply：重复执行两次不重复注入样式，disposer 之后还能重
 
 // ── 5. 素材完整性：引用集合 ⊆ ART，ART 与 art.json 同源 ─────────────────
 
-test("ART：frameOf / pickMoodKey 引用到的每一帧都真的存在", (t) => {
-  const { ART, frameOf, pickMoodKey } = testApi();
+test("ART：frameOf / pickMoodKey 引用到的每一帧都真的存在", async () => {
+  const { ART, frameOf, pickMoodKey } = await testApiWithArt(["q", "mature"]);
   const art = ART();
-  if (Object.keys(art).length === 0) {
-    t.skip("素材尚未内联");
-    return;
-  }
+  assert.ok(Object.keys(art).length > 0, "D1 之后素材必须能从假宿主路由加载进来");
 
   for (const skin of ["mix", "q", "mature"]) {
     for (const isLead of [true, false]) {
@@ -394,19 +393,17 @@ test("ART：frameOf / pickMoodKey 引用到的每一帧都真的存在", (t) => 
   }
 });
 
-test("ART：内联素材与 assets/art.json 的 key 集合、尺寸一致（防改了帧表忘了补图）", (t) => {
-  const art = testApi().ART();
-  if (Object.keys(art).length === 0) {
-    t.skip("素材尚未内联");
-    return;
-  }
+test("ART：运行时素材表与 assets/art.json 的 key 集合、尺寸一致（防改了帧表忘了补图）", async () => {
+  const art = (await testApiWithArt(["q", "mature", "classic"])).ART();
+  assert.ok(Object.keys(art).length > 0, "素材必须已从假宿主路由加载");
   const source = JSON.parse(readFileSync(artJsonPath, "utf8"));
   const sprites = source && source.sprites;
   assert.ok(sprites && typeof sprites === "object", "assets/art.json 必须带 sprites 表");
-  assert.deepEqual(Object.keys(art).sort(), Object.keys(sprites).sort(), "内联 ART 的 key 集合必须与 art.json 一致");
+  assert.deepEqual(Object.keys(art).sort(), Object.keys(sprites).sort(), "运行时素材表的 key 集合必须与 art.json 一致");
 
   for (const [key, entry] of Object.entries(art)) {
-    assert.match(entry.uri, /^data:image\/webp;base64,/, key + " 必须是内联 WebP");
+    // D1：uri 不再是 data URI，而是宿主素材路由的地址。
+    assert.match(entry.uri, /^\/agent-whales\/api\/art\/[a-z0-9-]+\.webp$/, key + " 必须指向素材路由");
     assert.ok(Number.isFinite(entry.w) && entry.w > 0, key + " 宽度必须有限");
     assert.ok(Number.isFinite(entry.h) && entry.h > 0, key + " 高度必须有限");
     assert.equal(entry.w, sprites[key].w, key + " 宽度必须与 art.json 一致");
@@ -414,12 +411,9 @@ test("ART：内联素材与 assets/art.json 的 key 集合、尺寸一致（防�
   }
 });
 
-test("ART：源码帧表/心情池里的 key 全部命中 ART（交叉验证，不整文件 dump）", (t) => {
-  const art = testApi().ART();
-  if (Object.keys(art).length === 0) {
-    t.skip("素材尚未内联");
-    return;
-  }
+test("ART：源码帧表/心情池里的 key 全部命中 ART（交叉验证，不整文件 dump）", async () => {
+  const art = (await testApiWithArt(["q", "mature", "classic"])).ART();
+  assert.ok(Object.keys(art).length > 0, "素材必须已从假宿主路由加载");
   const source = readFileSync(clientPath, "utf8");
 
   function quotedKeys(body) {

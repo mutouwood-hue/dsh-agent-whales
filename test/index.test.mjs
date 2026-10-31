@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 宿主半边（lib/index.js）的对抗性回归测试。
  *   node --test test/            # 通过 test/index.js 汇总执行
  *   node --test "test/*.test.mjs"
@@ -15,6 +15,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import * as host from "../lib/index.js";
 
@@ -1022,4 +1026,441 @@ test("宿主采集：多个会话并发时各自独立，结束一个不会误�
 
   listeners["tools/result"]({ agent: { id: "s2" }, name: "bash" });
   assert.deepEqual(readActive(), {});
+});
+
+
+// ── 运行时状态采集（v0.23 状态信号接线，2026-10-30）──────────────────────────
+function stateSnapshot(routes) {
+  return JSON.parse(callRoute(routes[0], { method: "GET", url: "/agent-whales/api/activity" }).body).state;
+}
+
+test("宿主状态：status / streaming / 失败 / 回合结束 都落到 state 快照，且序列化无损", () => {
+  const listeners = {};
+  const routes = [];
+  host.apply({
+    get(name) {
+      if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
+      return undefined;
+    },
+    effect(run) { return run(); },
+    on(name, listener) { listeners[name] = listener; return () => {}; }
+  });
+
+  listeners["agent/status"]({ agent: { id: "s1" }, status: "running" });
+  let s = stateSnapshot(routes);
+  assert.equal(s.s1.running, true);
+  assert.equal(typeof s.s1.runStartedAt, "number");
+
+  listeners["agent/assistant-stream"]({ agent: { id: "s1" }, frame: { type: "start" } });
+  assert.equal(stateSnapshot(routes).s1.streaming, true, "模型开始输出 → streaming");
+  listeners["agent/assistant-stream"]({ agent: { id: "s1" }, frame: { type: "chunk" } });
+  assert.equal(stateSnapshot(routes).s1.streaming, true, "chunk 期间仍然在输出");
+  listeners["agent/assistant-stream"]({ agent: { id: "s1" }, frame: { type: "end" } });
+  assert.equal("streaming" in stateSnapshot(routes).s1, false, "输出结束 → 不再 streaming");
+
+  listeners["tools/result"]({ agent: { id: "s1" }, name: "bash" }, { isError: true, error: { message: "boom" } });
+  s = stateSnapshot(routes);
+  assert.equal(s.s1.lastErrorKind, "tool", "工具失败要记下来");
+  assert.equal(typeof s.s1.lastErrorAt, "number");
+
+  listeners["agent/error"]({ agent: { id: "s1" }, turn: 1, step: 1, error: new Error("x") });
+  assert.equal(stateSnapshot(routes).s1.lastErrorKind, "agent");
+
+  listeners["agent/turn-stopping"]({ agent: { id: "s1" }, turn: 1 });
+  assert.equal(typeof stateSnapshot(routes).s1.lastTurnEndAt, "number", "回合结束要记下来");
+
+  listeners["agent/status"]({ agent: { id: "s1" }, status: "idle" });
+  s = stateSnapshot(routes);
+  assert.equal("running" in s.s1, false, "idle 之后不再报 running");
+  assert.equal(typeof s.s1.lastRunMs, "number", "收工时记下这一轮跑了多久");
+  assert.deepEqual(JSON.parse(JSON.stringify(s)), s, "state 必须是 lossless JSON（不能有 undefined 键）");
+});
+
+test("宿主状态：脏事件不抛、不凭空造会话", () => {
+  const listeners = {};
+  const routes = [];
+  host.apply({
+    get(name) {
+      if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
+      return undefined;
+    },
+    effect(run) { return run(); },
+    on(name, listener) { listeners[name] = listener; return () => {}; }
+  });
+
+  assert.doesNotThrow(() => listeners["agent/status"](null));
+  assert.doesNotThrow(() => listeners["agent/status"]({ agent: {} }));
+  assert.doesNotThrow(() => listeners["agent/status"]({ agent: { id: "s9" }, status: "weird" }));
+  assert.doesNotThrow(() => listeners["agent/assistant-stream"]({ agent: { id: "s9" } }));
+  assert.doesNotThrow(() => listeners["agent/turn-stopping"]({}));
+  assert.doesNotThrow(() => listeners["tools/result"]({ agent: { id: "s9" } }, null));
+  assert.deepEqual(stateSnapshot(routes), {}, "没有有效事件时不该凭空造会话");
+});
+
+
+// ── P2：模型请求失败 + 团队全完成（2026-10-30）──────────────────────────────
+test("宿主状态：agent/request-error 是 waterfall，必须放行并记成 request 失败", () => {
+  const listeners = {};
+  const routes = [];
+  host.apply({
+    get(name) {
+      if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
+      return undefined;
+    },
+    effect(run) { return run(); },
+    on(name, listener) { listeners[name] = listener; return () => {}; }
+  });
+
+  let released = 0;
+  const outcome = listeners["agent/request-error"](
+    { agent: { id: "s1" }, turn: 1, step: 1, provider: "p", failure: {}, retryPolicy: undefined, signal: {} },
+    () => { released += 1; return Promise.resolve({ kind: "next" }); }
+  );
+  assert.equal(released, 1, "waterfall 必须调用 next()，否则会吞掉宿主的重试策略");
+  assert.equal(typeof outcome.then, "function");
+  const state = JSON.parse(callRoute(routes[0], { method: "GET", url: "/agent-whales/api/activity" }).body).state;
+  assert.equal(state.s1.lastErrorKind, "request");
+  assert.equal(typeof state.s1.lastErrorAt, "number");
+});
+
+// ── 9. 素材路由（D1：素材出 bundle，宿主按 key 供图）──────────────────────
+//
+// 契约（Lead 定死，勿改）：
+//   GET /agent-whales/api/art/manifest → {version:1, keys:{key:{w,h,bytes,skin}}}
+//   GET /agent-whales/api/art/<key>.webp → image/webp + immutable 缓存 + etag，HEAD 同头无体
+//   错误面：未知 key/穿越 404、非 GET/HEAD/OPTIONS 405+allow、OPTIONS 204、绝不外抛
+
+const ART_MANIFEST = "/agent-whales/api/art/manifest";
+const ART_MANIFEST_FILE = new URL("../assets/manifest.json", import.meta.url);
+const ART_SKINS = ["q", "mature", "classic"];
+
+function readArtManifestFile() {
+  return JSON.parse(readFileSync(ART_MANIFEST_FILE, "utf8"));
+}
+
+test("素材路由：manifest 200 + 结构 + 键集合与 assets/manifest.json 一致", () => {
+  const route = mountRoute();
+  const result = callRoute(route, { method: "GET", url: ART_MANIFEST });
+  assert.equal(result.status, 200);
+  assert.match(String(result.headers["content-type"]), /application\/json/);
+  assert.equal(result.headers["cache-control"], "no-store");
+
+  const body = JSON.parse(result.body);
+  assert.equal(body.version, 1, "清单协议版本必须是 1");
+  const fileManifest = readArtManifestFile();
+  assert.deepEqual(
+    Object.keys(body.keys).sort(),
+    Object.keys(fileManifest.keys).sort(),
+    "响应里的 key 集合必须与构建产物 assets/manifest.json 完全一致"
+  );
+  assert.ok(Object.keys(body.keys).length >= 26, "素材数量不对：" + Object.keys(body.keys).length);
+
+  for (const [key, entry] of Object.entries(body.keys)) {
+    assert.deepEqual(Object.keys(entry).sort(), ["bytes", "h", "skin", "w"], key + " 只应输出 w/h/bytes/skin 四个字段");
+    assert.ok(Number.isInteger(entry.w) && entry.w > 0, key + ".w 必须是正整数");
+    assert.ok(Number.isInteger(entry.h) && entry.h > 0, key + ".h 必须是正整数");
+    assert.ok(Number.isInteger(entry.bytes) && entry.bytes > 0, key + ".bytes 必须是正整数");
+    assert.ok(ART_SKINS.includes(entry.skin), key + ".skin 必须是 q/mature/classic");
+    const expectedSkin = key.startsWith("q-") ? "q" : key.startsWith("m-") ? "mature" : "classic";
+    assert.equal(entry.skin, expectedSkin, key + " 的 skin 必须由 key 前缀决定");
+    assert.deepEqual(entry, fileManifest.keys[key], key + " 的字段必须与 manifest.json 一致");
+  }
+  assertLossless(body);
+});
+
+test("素材路由：每个合法 key 都 200 + image/webp + 字节数与清单一致 + RIFF/WEBP 头", () => {
+  const route = mountRoute();
+  const manifest = JSON.parse(callRoute(route, { method: "GET", url: ART_MANIFEST }).body);
+  for (const key of Object.keys(manifest.keys)) {
+    const result = callRoute(route, { method: "GET", url: "/agent-whales/api/art/" + key + ".webp" });
+    assert.equal(result.status, 200, key + " 必须 200");
+    assert.equal(result.headers["content-type"], "image/webp", key + " 的 content-type");
+    assert.match(String(result.headers["cache-control"]), /public, max-age=86400, immutable/, key + " 的缓存头");
+    assert.equal(typeof result.headers["etag"], "string", key + " 必须带 etag");
+    assert.equal(
+      String(result.headers["content-length"]),
+      String(manifest.keys[key].bytes),
+      key + " 的 content-length 必须等于清单 bytes"
+    );
+    assert.ok(Buffer.isBuffer(result.body), key + " 的响应体必须是 Buffer");
+    assert.equal(result.body.length, manifest.keys[key].bytes, key + " 的字节数必须等于清单 bytes");
+    assert.equal(result.body.subarray(0, 4).toString("latin1"), "RIFF", key + " 必须以 RIFF 开头");
+    assert.equal(result.body.subarray(8, 12).toString("latin1"), "WEBP", key + " 必须是 WebP");
+  }
+});
+
+test("素材路由：HEAD 同头无体（manifest 与图片都支持）", () => {
+  const route = mountRoute();
+  const getImage = callRoute(route, { method: "GET", url: "/agent-whales/api/art/q-smile.webp" });
+  const headImage = callRoute(route, { method: "HEAD", url: "/agent-whales/api/art/q-smile.webp" });
+  assert.equal(headImage.status, 200);
+  assert.equal(headImage.body, undefined, "HEAD 不得带 body");
+  assert.equal(headImage.headers["content-type"], "image/webp");
+  assert.equal(headImage.headers["etag"], getImage.headers["etag"]);
+  assert.equal(headImage.headers["content-length"], getImage.headers["content-length"]);
+
+  const headManifest = callRoute(route, { method: "HEAD", url: ART_MANIFEST });
+  assert.equal(headManifest.status, 200);
+  assert.equal(headManifest.body, undefined, "HEAD 不得带 body");
+  assert.match(String(headManifest.headers["content-type"]), /application\/json/);
+});
+
+test("素材路由：未知 key / 路径穿越 / 形状不对一律 404", () => {
+  const route = mountRoute();
+  const bad = [
+    "/agent-whales/api/art/nope.webp",
+    "/agent-whales/api/art/q-smile",
+    "/agent-whales/api/art/q-smile.webp/extra",
+    "/agent-whales/api/art/..%2Fsecret.webp",
+    "/agent-whales/api/art/%2e%2e%2fmanifest.json",
+    "/agent-whales/api/art/..%5Csecret.webp",
+    "/agent-whales/api/art/",
+    "/agent-whales/api/art"
+  ];
+  for (const url of bad) {
+    const result = callRoute(route, { method: "GET", url });
+    assert.equal(result.status, 404, url + " 必须 404，实际 " + result.status);
+  }
+});
+
+test("素材路由：OPTIONS 204，非 GET/HEAD/OPTIONS 405 + allow", () => {
+  const route = mountRoute();
+  for (const url of [ART_MANIFEST, "/agent-whales/api/art/q-smile.webp"]) {
+    const options = callRoute(route, { method: "OPTIONS", url });
+    assert.equal(options.status, 204, url + " OPTIONS 必须 204");
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      const result = callRoute(route, { method, url });
+      assert.equal(result.status, 405, url + " " + method + " 必须 405");
+      assert.equal(result.headers["allow"], "GET, HEAD, OPTIONS", url + " 405 必须带 allow");
+    }
+  }
+});
+
+test("素材路由：素材目录不存在（asar/缺文件）时 manifest 仍 200 空表、图片 404、不抛", () => {
+  const missingRoot = new URL("../assets/__definitely_missing__/", import.meta.url);
+  let store;
+  assert.doesNotThrow(() => { store = host.createArtStore(missingRoot); }, "读不到素材目录不得抛");
+
+  const manifest = host.artResponse(store, ART_MANIFEST, "GET");
+  assert.equal(manifest.status, 200, "没有素材时 manifest 仍必须 200（客户端据此降级）");
+  assert.deepEqual(JSON.parse(manifest.body), { version: 1, keys: {} }, "没有素材时 keys 必须是空表");
+  const head = host.artResponse(store, ART_MANIFEST, "HEAD");
+  assert.equal(head.status, 200);
+  assert.equal(head.body, undefined);
+  assert.equal(head.contentLength, manifest.contentLength);
+
+  assert.equal(host.artResponse(store, "/agent-whales/api/art/q-smile.webp", "GET").status, 404);
+  assert.equal(host.artResponse(store, "/agent-whales/api/art/q-smile.webp", "HEAD").status, 404);
+  assert.doesNotThrow(() => store.read("q-smile"));
+});
+
+test("素材路由：清单里的脏 key / 脏尺寸被丢弃，穿越 key 进不了白名单", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-agent-whales-art-"));
+  try {
+    writeFileSync(
+      join(dir, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        keys: {
+          "q-good": { w: 10, h: 20, bytes: 3, skin: "q" },
+          "../evil": { w: 1, h: 1, bytes: 1, skin: "q" },
+          "q-bad-w": { w: "10", h: 20, bytes: 3, skin: "q" },
+          "q-bad-bytes": { w: 10, h: 20, bytes: 0, skin: "q" },
+          "x-unknown": { w: 1, h: 1, bytes: 1, skin: "q" },
+          "q-bad-skin": { w: 10, h: 20, bytes: 3, skin: "weird" }
+        }
+      })
+    );
+    const store = host.createArtStore(pathToFileURL(dir + "/"));
+    const body = JSON.parse(store.manifestBody);
+    assert.deepEqual(
+      Object.keys(body.keys).sort(),
+      ["q-bad-skin", "q-good"],
+      "只保留 key 前缀合法且 w/h/bytes 为正整数的条目；脏 skin 按前缀回退"
+    );
+    assert.equal(body.keys["q-bad-skin"].skin, "q", "脏 skin 必须按 key 前缀回退");
+    assert.equal(store.read("../evil"), undefined, "穿越 key 不得命中");
+    assert.equal(store.read("q-good"), undefined, "文件不存在时 read 回 undefined（不抛）");
+    // 字面 ".." 在解析阶段就被拒（artResponse 返回 undefined → dispatcher 404）；
+    // 百分号编码的穿越会先被 decode，但白名单里没有它，所以同样 404。
+    assert.equal(host.artResponse(store, "/agent-whales/api/art/..%2Fevil.webp", "GET"), undefined);
+    assert.equal(host.artResponse(store, "/agent-whales/api/art/%2e%2e%2Fevil.webp", "GET").status, 404);
+    assert.equal(host.artResponse(store, "/agent-whales/api/art/q-good.webp", "GET").status, 404);
+    assert.equal(host.artResponse(store, ART_MANIFEST, "GET").status, 200);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("素材路由：图片命中后走内存缓存，clear() 后重新读盘", () => {
+  const store = host.createArtStore();
+  const first = store.read("q-smile");
+  assert.ok(first && Buffer.isBuffer(first.buffer), "q-smile 必须能读到");
+  assert.equal(store.read("q-smile"), first, "第二次必须命中缓存（同一对象）");
+  assert.match(String(first.etag), /^".+"$/, "etag 必须是带引号的字符串");
+  store.clear();
+  const again = store.read("q-smile");
+  assert.ok(again, "clear 后仍能重新读盘");
+  assert.notEqual(again, first, "clear 后必须是重新读出来的对象");
+});
+
+test("素材路由：非素材路径 artResponse 返回 undefined（交给 404）", () => {
+  const store = host.createArtStore();
+  assert.equal(host.artResponse(store, "/agent-whales/api/other", "GET"), undefined);
+  assert.equal(host.artResponse(store, "/agent-whales/api/art/manifest.json", "GET"), undefined);
+  assert.equal(host.artResponse(store, "/agent-whales/api/art", "GET"), undefined);
+});
+
+// ── 10. 宿主服务晚到：cordis 并行加载下的注册时序（真实事故 2026-10-31）──────
+//
+// 事故：宿主把 profile 里的插件并行加载（cordis-plugin-loader 的 EntryGroup.update
+// 用 Promise.allSettled），我们的 apply 曾经早于 webServer/tools/systemPrompt 注册，
+// 只用 ctx.get() 探测 → 四条能力被静默跳过：鲸鱼娘（浏览器半边）还在，
+// 但 /agent-whales/api/* 全 404、串门工具没注册、团队策略段消失。
+// 修复：依赖服务的注册走 ctx.inject()，服务就绪/重载时执行。
+
+/** 模拟 cordis：inject 记录回调，等测试手动「服务就绪」；作用域 effect 可释放。 */
+function makeInjectHost() {
+  const state = { tools: {}, routes: [], sections: [], disposers: [], injected: [] };
+  const services = {
+    tools: {
+      register(definition) {
+        state.tools[definition.name] = definition;
+        return () => {
+          delete state.tools[definition.name];
+        };
+      },
+    },
+    webServer: {
+      register(route) {
+        state.routes.push(route);
+        return () => {
+          const at = state.routes.indexOf(route);
+          if (at >= 0) state.routes.splice(at, 1);
+        };
+      },
+    },
+    systemPrompt: {
+      section(section) {
+        state.sections.push(section);
+        return () => {
+          const at = state.sections.indexOf(section);
+          if (at >= 0) state.sections.splice(at, 1);
+        };
+      },
+    },
+  };
+  const makeScope = () => ({
+    get(name) {
+      return services[name];
+    },
+    effect(run) {
+      const dispose = run();
+      state.disposers.push(dispose);
+      return dispose;
+    },
+    on() {
+      return () => {};
+    },
+  });
+  const ctx = makeScope();
+  ctx.inject = (names, callback) => {
+    const entry = { names, callback, scope: makeScope(), disposers: [] };
+    state.injected.push(entry);
+    return { dispose() {} };
+  };
+  return { ctx, state };
+}
+
+/** 模拟依赖就绪：按 inject 顺序回放回调，并记录各自作用域新增的 disposer。 */
+function flushInjected(injectHost) {
+  for (const entry of injectHost.state.injected) {
+    const before = injectHost.state.disposers.length;
+    entry.callback(entry.scope);
+    entry.disposers = injectHost.state.disposers.slice(before);
+  }
+}
+
+function disposeInjected(injectHost) {
+  for (const entry of injectHost.state.injected) {
+    for (const dispose of [...(entry.disposers ?? [])].reverse()) {
+      if (typeof dispose === "function") dispose();
+    }
+    entry.disposers = [];
+  }
+}
+
+test("宿主 apply：服务晚到时用 ctx.inject 等就绪再注册，而不是静默跳过", () => {
+  const injectHost = makeInjectHost();
+  host.apply(injectHost.ctx);
+
+  assert.deepEqual(
+    injectHost.state.injected.map((entry) => entry.names.join("+")).sort(),
+    ["systemPrompt", "tools", "webServer"],
+    "systemPrompt / tools / webServer 三个依赖都必须走 ctx.inject"
+  );
+  assert.deepEqual(Object.keys(injectHost.state.tools), [], "服务没就绪前不得注册工具（旧实现的 bug）");
+  assert.equal(injectHost.state.routes.length, 0, "服务没就绪前不得注册路由");
+  assert.equal(injectHost.state.sections.length, 0, "服务没就绪前不得注册提示段");
+
+  flushInjected(injectHost);
+  assert.equal(Object.keys(injectHost.state.tools).length, 4, "tools 就绪后四个工具必须全部注册");
+  assert.equal(injectHost.state.routes.length, 1, "webServer 就绪后路由必须注册");
+  assert.equal(injectHost.state.sections.length, 1, "systemPrompt 就绪后策略段必须注册");
+  assert.equal(injectHost.state.sections[0].name, "agent-whales/team-policy");
+
+  // 路由真的能服务请求（素材路由是 D1 的产物，最容易被这个 bug 打掉）。
+  const manifest = callRoute(injectHost.state.routes[0], { method: "GET", url: "/agent-whales/api/art/manifest" });
+  assert.equal(manifest.status, 200);
+  assert.ok(Object.keys(JSON.parse(manifest.body).keys).length >= 26);
+  const activity = JSON.parse(callRoute(injectHost.state.routes[0], { method: "GET", url: "/agent-whales/api/activity" }).body);
+  assert.equal(activity.visitTools, true, "tools 就绪后 GET 必须回显 visitTools=true");
+});
+
+test("宿主 apply：ctx.inject 抛错时退回立即注册，不把异常抛给宿主", () => {
+  const registered = {};
+  const routes = [];
+  const ctx = {
+    get(name) {
+      if (name === "tools") {
+        return {
+          register(definition) {
+            registered[definition.name] = definition;
+            return () => {};
+          },
+        };
+      }
+      if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
+      return undefined;
+    },
+    effect(run) {
+      return run();
+    },
+    on() {
+      return () => {};
+    },
+    inject() {
+      throw new Error("inject unavailable in this host");
+    },
+  };
+  assert.doesNotThrow(() => host.apply(ctx));
+  assert.equal(Object.keys(registered).length, 4, "inject 不可用时必须退化为立即注册");
+  assert.equal(routes.length, 1, "inject 不可用时路由也要立即注册");
+});
+
+test("宿主 apply：服务重载（作用域释放 + 重新注入）不重复注册、不泄漏", () => {
+  const injectHost = makeInjectHost();
+  host.apply(injectHost.ctx);
+  flushInjected(injectHost);
+  const toolCount = Object.keys(injectHost.state.tools).length;
+  assert.equal(toolCount, 4);
+  assert.equal(injectHost.state.routes.length, 1);
+
+  disposeInjected(injectHost);
+  assert.deepEqual(Object.keys(injectHost.state.tools), [], "旧作用域释放后工具必须注销");
+  assert.equal(injectHost.state.routes.length, 0, "旧作用域释放后路由必须撤销");
+
+  flushInjected(injectHost);
+  assert.equal(Object.keys(injectHost.state.tools).length, toolCount, "重新注入后工具数量不变（无重复注册残留）");
+  assert.equal(injectHost.state.routes.length, 1, "重新注入后路由只有一条");
 });

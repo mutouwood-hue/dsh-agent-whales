@@ -15,13 +15,15 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { pluginDir } from "./harness.mjs";
+import { pluginDir, clientPath } from "./harness.mjs";
 
 const manifestPath = join(pluginDir, "package.json");
 const patchPath = join(pluginDir, "cordis.patch.yml");
 const teamPatchPath = join(pluginDir, "cordis.patch.team.yml");
 const localeDir = join(pluginDir, "locale");
-const artJsonPath = join(pluginDir, "assets", "art.json");
+const assetsDir = join(pluginDir, "assets");
+const artJsonPath = join(assetsDir, "art.json");
+const artManifestPath = join(assetsDir, "manifest.json");
 const testDir = join(pluginDir, "test");
 const testFiles = readdirSync(testDir).filter((name) => name.endsWith(".test.mjs"));
 
@@ -251,6 +253,58 @@ test("package.json：files 覆盖运行期必需文件与 exports 目标", () =>
   }
 });
 
+test("package.json：素材清单与 webp 必须进包，art.json 不得进包", () => {
+  // D1（PRD §34.1）：client.js 只含代码与矢量兜底，精灵图由宿主路由按需提供，
+  // 所以 assets/manifest.json + assets/*.webp 是运行期必需文件；art.json 是构建产物。
+  assert.ok(manifest.files.includes("assets/manifest.json"), "files 白名单缺少 assets/manifest.json");
+  assert.ok(
+    manifest.files.some((entry) => entry === "assets/*.webp" || /^assets\/[^/*]+\.webp$/.test(String(entry))),
+    "files 白名单必须覆盖 assets/*.webp（否则装到别人机器上全是碎图）"
+  );
+  assert.equal(
+    manifest.files.some((entry) => String(entry).includes("art.json")),
+    false,
+    "assets/art.json 是构建产物（~465KB），不得进安装包"
+  );
+  assert.ok(existsSync(artManifestPath), "assets/manifest.json 不存在：先跑 node tools/build-manifest.mjs");
+  assert.ok(filesCover(manifest.files, "assets/q-smile.webp"), "files 必须覆盖单张 webp 路径");
+
+  const fileManifest = JSON.parse(readFileSync(artManifestPath, "utf8"));
+  assert.equal(fileManifest.version, 1, "清单协议版本必须是 1");
+  const keys = Object.keys(fileManifest.keys || {});
+  assert.ok(keys.length >= 26, "清单 key 数过少：" + keys.length);
+  let declaredBytes = 0;
+  for (const key of keys) {
+    const entry = fileManifest.keys[key];
+    assert.ok(["q", "mature", "classic"].includes(entry.skin), key + " 的 skin 非法");
+    assert.ok(Number.isInteger(entry.w) && entry.w > 0, key + " 的 w 非法");
+    assert.ok(Number.isInteger(entry.h) && entry.h > 0, key + " 的 h 非法");
+    assert.ok(Number.isInteger(entry.bytes) && entry.bytes > 0, key + " 的 bytes 非法");
+    const webpPath = join(assetsDir, key + ".webp");
+    assert.ok(existsSync(webpPath), "清单里的 " + key + " 缺少 assets/" + key + ".webp（装到别人机器上会 404）");
+    assert.equal(readFileSync(webpPath).length, entry.bytes, key + " 的 webp 字节数必须与清单一致");
+    declaredBytes += entry.bytes;
+  }
+  // 反过来：目录里多出来的顶层 webp 会进包但路由永远取不到，必须清掉或并进 art.json。
+  const extras = readdirSync(assetsDir).filter(
+    (name) => name.endsWith(".webp") && !keys.includes(name.slice(0, -".webp".length))
+  );
+  assert.deepEqual(extras, [], "assets/ 里有清单之外的 webp：" + extras.join(", "));
+  assert.ok(declaredBytes > 0);
+});
+
+test("package.json：prepack 必须生成素材清单，并拦住 client.js 内联回归", () => {
+  const prepack = manifest.scripts && manifest.scripts.prepack;
+  assert.equal(typeof prepack, "string", "必须声明 prepack");
+  assert.match(prepack, /build-manifest\.mjs/, "prepack 必须生成/校验 assets/manifest.json");
+  assert.match(prepack, /client\.js/, "prepack 必须检查 client.js 没有回退到内联");
+  assert.equal(
+    prepack.includes("embed-art.mjs"),
+    false,
+    "prepack 不得再调用 embed-art.mjs（D1 起它只是 build-manifest 的兼容别名）"
+  );
+});
+
 test("package.json：内嵌版本声明（如果有）必须与清单版本一致", () => {
   const sources = [
     ["lib/index.js", readFileSync(join(pluginDir, "lib", "index.js"), "utf8")],
@@ -441,6 +495,25 @@ test("assets/art.json：sprites 每项都带内联 WebP 与正尺寸", () => {
     assert.ok(Number.isFinite(sprite.h) && sprite.h > 0, key + " 高度必须为正");
     assert.ok(Number.isFinite(sprite.bytes) && sprite.bytes > 0, key + " 字节数必须为正");
   }
+});
+
+// ── 3b. client.js：D1 之后不得再内联素材 ────────────────────────────────
+
+test("lib/client.js：D1 起不得再内联 base64 素材，且体积必须 ≤200KB", () => {
+  // 产品决策（PRD §34.1 D1，2026-10-30 用户拍板）：client.js 只含代码与矢量兜底，
+  // 精灵图由宿主路由 /agent-whales/api/art/* 按当前皮肤按需提供。
+  // 这条用例是回归守门：谁再把 base64 内联回来，或者体积重新膨胀，这里立刻红。
+  // 注意只查 base64 与体积：client.js 允许保留空的 ART 占位（T-client 用它做
+  // 「旧内联构建已就绪」的兼容判断），那不是内联素材。
+  const source = readFileSync(clientPath, "utf8");
+  assert.equal(
+    source.includes("data:image/webp;base64,"),
+    false,
+    "client.js 不得内联 WebP data URI：素材必须走宿主路由 /agent-whales/api/art/*"
+  );
+  assert.equal(/data:image\/(?:webp|png|jpeg);base64,/i.test(source), false, "client.js 不得内联任何位图 data URI");
+  const bytes = Buffer.byteLength(source, "utf8");
+  assert.ok(bytes <= 200 * 1024, "client.js 必须 ≤200KB（只含代码与矢量兜底），实际 " + (bytes / 1024).toFixed(1) + "KB");
 });
 
 // ── 4. 测试入口卫生 ─────────────────────────────────────────────────────

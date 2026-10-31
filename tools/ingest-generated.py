@@ -45,18 +45,27 @@ def load_pipeline():
     return module
 
 
-def matte(ba, source: str, height: int, bust: bool = False) -> np.ndarray:
+def matte(ba, source: str, height: int, bust: bool = False,
+          shadows: bool = True, edge_fix: bool = True) -> np.ndarray:
     """一张白底图 → 目标高度的 RGBA。
 
-    bust=True 时在缩放前裁成「头顶→胸口」的头肩像，用来把成熟版那批
-    构图不一的表情（有的抱手半身、有的特写）统一成同一种取景。
+    步骤与 build-assets.build_sprite 的**顺序完全一致**（抠白底 → 清脚下投影 →
+    羽化 → 边缘精修 → 裁 bbox → 去白溢色 → [头肩] → 预乘缩放）。走同一条管线，
+    生成的新帧才会和现有 16 张精灵看起来是同一批做的。
+
+    bust=True 时在缩放前裁成「头顶→胸口」的头肩像，用来把成熟版那批构图不一的表情
+    统一成同一种取景。**注意**：源图本身已经是近景时不要再加 --bust（会只剩额头）。
     """
     with Image.open(source) as im:
         rgb = np.asarray(im.convert("RGB")).copy()
     alpha = ba.background_alpha(Image.fromarray(rgb))
+    if shadows:
+        alpha, _info = ba.remove_ground_shadow(rgb, alpha, verbose=False)
     alpha = ba.feather(alpha)
-    rgb = ba.despill_white(rgb, alpha)
+    if edge_fix:
+        alpha = ba.refine_edge_alpha(rgb, alpha)
     rgb, alpha = ba.crop_to_content(rgb, alpha)
+    rgb = ba.despill_white(rgb, alpha)
     if bust:
         rgb, alpha, _window = ba.bust_crop(rgb, alpha)
     rgba = np.dstack([rgb, alpha])
@@ -72,6 +81,9 @@ def main(argv=None) -> int:
     parser.add_argument("--out", default=os.path.join(ROOT, "assets"))
     parser.add_argument("--dry-run", action="store_true", help="只报告，不写文件")
     parser.add_argument("--bust", action="store_true", help="裁成头肩像（成熟版表情集构图不一，必须先统一）")
+    parser.add_argument("--no-shadows", action="store_true",
+                        help="跳过「清脚下投影」（源图本来就带投影、或投影是画面内容的一部分时用）")
+    parser.add_argument("--no-edge-fix", action="store_true", help="跳过边缘精修（只在排查白边时用）")
     args = parser.parse_args(argv)
 
     if not os.path.isdir(args.drop):
@@ -98,7 +110,8 @@ def main(argv=None) -> int:
     for name in files:
         key = os.path.splitext(name)[0]
         source = os.path.join(args.drop, name)
-        rgba = matte(ba, source, args.height, bust=args.bust)
+        rgba = matte(ba, source, args.height, bust=args.bust,
+                     shadows=not args.no_shadows, edge_fix=not args.no_edge_fix)
         webp = ba.encode_webp(Image.fromarray(rgba, "RGBA"))
         h, w = rgba.shape[0], rgba.shape[1]
         total += len(webp)

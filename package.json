@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-whales",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "每多一个正在干活的智能体（Lead、teammate 或子 agent），DSH Web 页面顶端就多一只游动的鲸鱼娘。",
   "license": "MIT",
   "type": "module",
@@ -20,6 +20,8 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
+    "assets/manifest.json",
+    "assets/*.webp",
     "README.md",
     "NOTICE.md"
   ],
@@ -46,8 +48,9 @@
   ],
   "scripts": {
     "test": "node --test test/",
+    "build:manifest": "node tools/build-manifest.mjs",
     "pack:dist": "npm pack --pack-destination dist",
-    "prepack": "node -e \"const s=require('fs').readFileSync('lib/client.js','utf8');if(!s.includes('<art:begin>')||!s.includes('data:image/webp;base64')){console.error('prepack: lib/client.js 缺少内联 ART —— 先跑 node tools/embed-art.mjs');process.exit(1)}\""
+    "prepack": "node tools/build-manifest.mjs && node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('assets/manifest.json','utf8'));if(!m.keys||Object.keys(m.keys).length===0){console.error('prepack: assets/manifest.json 为空，素材没打进去');process.exit(1)}const c=fs.readFileSync('lib/client.js','utf8');if(/data:image\\/(?:webp|png|jpeg);base64,/i.test(c)){console.error('prepack: lib/client.js 仍在内联 base64 素材（D1 起素材走宿主路由 /agent-whales/api/art/*，client.js 只能含代码与矢量兜底）');process.exit(1)}const kb=Buffer.byteLength(c,'utf8')/1024;if(kb>200){console.error('prepack: lib/client.js 体积 '+kb.toFixed(1)+'KB 超过 D1 上限 200KB');process.exit(1)}\""
   },
   "dsh": {
     "bundle": {

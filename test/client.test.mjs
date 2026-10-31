@@ -60,6 +60,100 @@ function testApi() {
   return loadPlugin().plugin.__test;
 }
 
+// ── 素材加载（D1）：假宿主路由 ────────────────────────────────────────────
+// 客户端不再内联 base64：素材由 artLoader 从 /agent-whales/api/art/* 拉。
+// 这里用 loadPlugin().win.fetch 注入假实现，不碰 Node 全局，也不碰真宿主。
+const ART_ROUTE = "/agent-whales/api/art/";
+const ART_KEYS = {
+  q: [
+    "q-smile", "q-blink", "q-wave", "q-proud", "q-sleepy", "q-laugh", "q-pout",
+    "q-surprise", "q-shy", "q-think", "q-oops", "q-heart", "q-cry"
+  ],
+  mature: ["m-base", "m-blink", "m-wave", "m-proud", "m-laugh", "m-pout", "m-surprise", "m-shy", "m-think", "m-oops"],
+  classic: ["c-idle", "c-work", "c-think", "c-oops", "c-done"]
+};
+const ART_SIZES = { q: [168, 192], mature: [192, 192], classic: [177, 192] };
+const ALL_ART_KEYS = Object.values(ART_KEYS).flat();
+
+function artManifestBody(extraKeys = {}) {
+  const keys = {};
+  for (const [skin, list] of Object.entries(ART_KEYS)) {
+    const [w, h] = ART_SIZES[skin];
+    for (const key of list) keys[key] = { w, h, bytes: 1000, skin };
+  }
+  return { version: 1, keys: Object.assign(keys, extraKeys) };
+}
+
+/**
+ * 假宿主：manifest + 每张 webp；记录请求顺序。
+ * control 可运行时改：manifestStatus（数字）、manifestStatuses（按次消费的状态队列，
+ * 用来模拟「第一次 404、第二次 200」）、manifestBody、failKeys。
+ */
+function createArtFetch(options = {}) {
+  const log = [];
+  const control = {
+    manifestStatus: options.manifestStatus ?? 200,
+    manifestStatuses: Array.isArray(options.manifestStatuses) ? options.manifestStatuses.slice() : null,
+    manifestBody: Object.prototype.hasOwnProperty.call(options, "manifestBody")
+      ? options.manifestBody
+      : artManifestBody(),
+    failKeys: new Set(options.failKeys || [])
+  };
+  const fetchImpl = (url) => {
+    const target = String(url);
+    log.push(target);
+    if (target === ART_ROUTE + "manifest") {
+      let status = control.manifestStatus;
+      if (control.manifestStatuses !== null && control.manifestStatuses.length > 0) {
+        status = control.manifestStatuses.shift();
+      }
+      if (status !== 200) return Promise.resolve({ ok: false, status });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(control.manifestBody) });
+    }
+    const match = new RegExp("^" + ART_ROUTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(.+)\\.webp$").exec(target);
+    if (match === null) return Promise.resolve({ ok: false, status: 404 });
+    const key = decodeURIComponent(match[1]);
+    if (control.failKeys.has(key)) return Promise.resolve({ ok: false, status: 404 });
+    return Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(new ArrayBuffer(16)) });
+  };
+  fetchImpl.log = log;
+  fetchImpl.control = control;
+  return fetchImpl;
+}
+
+function loadPluginWithArt(options = {}) {
+  const loaded = loadPlugin();
+  loaded.win.fetch = createArtFetch(options);
+  return loaded;
+}
+
+/**
+ * 失败场景专用：把重试等待换成「立即 resolve」，测试不依赖真实 setTimeout 计时。
+ * （生产默认是 1s→2s→4s→8s 的真退避。）
+ */
+function loadPluginWithArtRetry(options = {}) {
+  const loaded = loadPluginWithArt(options);
+  loaded.plugin.__test.artLoader.setRetryWait(() => Promise.resolve());
+  return loaded;
+}
+
+/** 触发若干皮肤的素材加载并等到全部落定（成功或失败、含全部重试）。 */
+async function loadArt(loaded, families) {
+  const { artLoader } = loaded.plugin.__test;
+  for (const family of families) artLoader.ensureSkin(family);
+  await artLoader.whenIdle();
+}
+
+function manifestCalls(loaded) {
+  return loaded.win.fetch.log.filter((url) => url === ART_ROUTE + "manifest").length;
+}
+
+async function testApiWithArt(families = ["q", "mature"]) {
+  const loaded = loadPluginWithArt();
+  await loadArt(loaded, families);
+  return loaded.plugin.__test;
+}
+
 // ── 1. 信封与清单契约 ──────────────────────────────────────────────────────
 test("信封：注册 id 等于包名，且只 require('react')", () => {
   const { registration, requireLog } = loadPlugin();
@@ -259,36 +353,52 @@ test("渲染：2 个在干活 → 2 只角色（各带 agent 标签、Lead 标�
   assert.deepEqual(whales.map((node) => node.props["data-state"]), ["running", "running", "idle"]);
   assert.equal(findByClass(tree, "daw-stage").length, 3, "每只角色一个造型容器");
 
-  // 素材没内联时退化成经典皮肤；内联之后应该是一串 WebP data URI。
-  const hasArt = Object.keys(testApi().ART()).length > 0;
-  if (hasArt) {
-    const sprites = findByClass(tree, "daw-sprite");
-    assert.ok(sprites.length >= 2, "位图模式下每只至少一张 img");
-    for (const img of sprites) assert.match(img.props.src, /^data:image\/webp;base64,/);
-  } else {
-    const arts = findByClass(tree, "daw-art");
-    assert.equal(arts.length, 2, "经典皮肤：每只一个 SVG");
-    assert.equal(arts[0].props.viewBox, "0 -16 134 100");
-    let gradientIds = [];
-    walk(arts[0], (node) => {
-      if (node.type === "path" && typeof node.props.fill === "string" && node.props.fill.startsWith("url(#")) {
-        gradientIds.push(node.props.fill);
-      }
-    });
-    assert.ok(gradientIds.length >= 1, "鲸鱼身体用渐变上色");
-  }
+  // 素材是运行时加载的：没就绪之前用矢量鲸鱼占位（D1 的分层策略），不能等白屏。
+  const sprites = findByClass(tree, "daw-sprite");
+  assert.equal(sprites.length, 0, "素材未就绪时还没有位图");
+  const arts = findByClass(tree, "daw-art");
+  assert.equal(arts.length, 3, "三只角色各自用矢量鲸鱼占位");
+  assert.equal(arts[0].props.viewBox, "0 -16 134 100");
+  let gradientIds = [];
+  walk(arts[0], (node) => {
+    if (node.type === "path" && typeof node.props.fill === "string" && node.props.fill.startsWith("url(#")) {
+      gradientIds.push(node.props.fill);
+    }
+  });
+  assert.ok(gradientIds.length >= 1, "鲸鱼身体用渐变上色");
 });
 
-test("素材表：内联后每个精灵都是 WebP data URI，尺寸在合理区间", (t) => {
-  const art = testApi().ART();
-  if (Object.keys(art).length === 0) {
-    t.skip("素材尚未内联（先跑 tools/build-assets.py，再跑 tools/embed-art.mjs）");
-    return;
+test("渲染：素材就绪后改用宿主路由的 <img>，不再画矢量占位", async () => {
+  const loaded = loadPluginWithArt();
+  await loadArt(loaded, ["q", "mature"]);
+  const { WhaleLayer } = loaded.plugin.__test;
+  const tree = render(WhaleLayer({
+    useSessions: (selector) => selector(listState()),
+    useSessionStatus: (selector) => selector(statusMap({ [LEAD]: true, [MATE_A]: true, [MATE_B]: false })),
+    leadIdOf: (id) => id,
+    t: (key, params) => (params ? key + ":" + params.count : key)
+  }));
+  assert.equal(findByClass(tree, "daw-art").length, 0, "有素材就不再画矢量");
+  const sprites = findByClass(tree, "daw-sprite");
+  assert.ok(sprites.length >= 4, "每只角色至少一张 base 位图，实际 " + sprites.length);
+  for (const img of sprites) {
+    assert.match(img.props.src, /^\/agent-whales\/api\/art\/[a-z-]+\.webp$/, "位图必须走宿主素材路由");
   }
+  const layer = findByClass(tree, "daw-layer")[0];
+  assert.equal(layer.props["data-art"], "ready", "图层暴露素材加载状态");
+  assert.ok(Number(layer.props["data-art-frames"]) > 0, "已加载帧数必须可观测");
+});
+
+test("素材表：manifest 填进 ART 后每张都是路由 URL，尺寸来自宿主清单", async () => {
+  const { ART } = await testApiWithArt(["q", "mature", "classic"]);
+  const art = ART();
+  assert.deepEqual(Object.keys(art).sort(), [...ALL_ART_KEYS].sort(), "28 张全部就位");
   for (const [key, value] of Object.entries(art)) {
-    assert.match(value.uri, /^data:image\/webp;base64,/, key + " 必须是 WebP data URI");
-    assert.ok(value.w > 0 && value.h > 0, key + " 缺少像素尺寸");
-    assert.ok(value.h >= 64 && value.h <= 256, key + " 高度应在 64–256 之间，实际 " + value.h);
+    assert.equal(value.uri, ART_ROUTE + key + ".webp", key + " 的 src 必须是宿主路由");
+    assert.equal(value.uri.includes("base64"), false, key + " 不得再带内联 base64");
+    const skin = key.slice(0, 2) === "q-" ? "q" : key.slice(0, 2) === "m-" ? "mature" : "classic";
+    assert.equal(value.w, ART_SIZES[skin][0], key + " 宽度必须来自 manifest");
+    assert.equal(value.h, ART_SIZES[skin][1], key + " 高度必须来自 manifest");
   }
 });
 
@@ -310,8 +420,8 @@ test("排布：超过 3 只线性缩小，超过上限截断成 +N", () => {
   assert.ok(many.size >= 56, "缩小有下限，不会缩到看不见");
 });
 
-test("皮肤家族：混合模式 Lead 成熟版、成员 Q 版；经典皮肤没有位图", () => {
-  const { familyOf, frameOf, ART } = testApi();
+test("皮肤家族：混合模式 Lead 成熟版、成员 Q 版；经典皮肤没有位图", async () => {
+  const { familyOf, frameOf } = await testApiWithArt(["q", "mature"]);
   assert.equal(familyOf("mix", true), "mature");
   assert.equal(familyOf("mix", false), "q");
   assert.equal(familyOf("q", true), "q");
@@ -319,12 +429,10 @@ test("皮肤家族：混合模式 Lead 成熟版、成员 Q 版；经典皮肤�
   assert.equal(familyOf("classic", true), "classic");
   assert.equal(frameOf("classic", true, "base"), undefined, "经典皮肤走矢量，不取位图");
 
-  if (Object.keys(ART()).length > 0) {
-    assert.equal(frameOf("mix", false, "blink"), "q-blink", "Q 版有同构图的眨眼帧");
-    assert.equal(frameOf("mix", true, "base"), "m-base", "成熟版也换成同批的头肩近景");
-    assert.equal(frameOf("mix", true, "blink"), "m-blink", "成熟版现在有真正的眨眼帧");
-    assert.equal(frameOf("mix", true, "exit"), "m-proud", "成熟版退场用得意帧");
-  }
+  assert.equal(frameOf("mix", false, "blink"), "q-blink", "Q 版有同构图的眨眼帧");
+  assert.equal(frameOf("mix", true, "base"), "m-base", "成熟版也换成同批的头肩近景");
+  assert.equal(frameOf("mix", true, "blink"), "m-blink", "成熟版现在有真正的眨眼帧");
+  assert.equal(frameOf("mix", true, "exit"), "m-proud", "成熟版退场用得意帧");
 });
 
 test("家族树：默认只露出根与直接子，点开才出现孙级", () => {
@@ -490,7 +598,8 @@ test("渲染：设置页显示实时数量与全部控件", () => {
   const ranges = findByClass(tree, "daw-range");
   assert.equal(ranges.length, 4, "偏移 / 大小 / 不透明度 / 速度 四个滑杆");
   const switches = findByClass(tree, "daw-switch");
-  assert.equal(switches.length, 11, "启用 / 粒子 / 对话气泡 / 俏皮话 / 没活也挂着 / 团队汇总 / 串门工具 / 显示任务 / 已收工子级 / 可拖拽 / 显示名字");
+  // 2026-10-30 新增「状态表情」「出错表情」两个开关（v0.23 状态信号接线）
+  assert.equal(switches.length, 13, "启用 / 粒子 / 对话气泡 / 俏皮话 / 状态表情 / 出错表情 / 没活也挂着 / 团队汇总 / 串门工具 / 显示任务 / 已收工子级 / 可拖拽 / 显示名字");
   const segments = findByClass(tree, "daw-seg");
   assert.equal(segments.length, 5, "计数方式 / 水平位置 / 形象风格 / 动画强度 / 尺寸预设五组分段控件");
 });
@@ -810,20 +919,16 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
   await assert.rejects(() => registered.whales_visit_send.execute({ sessionId: "nope", message: "x" }, {}), /不活着/);
   await assert.rejects(() => registered.whales_visit_send.execute({ sessionId: "s2", message: "  " }, {}), /不能为空/);
 });
-test("心情帧：每 3 个 tick 换一次表情，收工只走抱膝", () => {
-  const { pickMoodKey, ART } = testApi();
-  const art = ART();
-  if (!art["q-laugh"]) {
-    // 素材没接进来时不硬断言（和素材表那条用例同样的降级策略）
-    assert.equal(pickMoodKey("q", "running", 0), undefined);
-    return;
-  }
+test("心情帧：每 3 个 tick 换一次表情，收工只走抱膝", async () => {
+  const { pickMoodKey } = await testApiWithArt(["q", "mature"]);
   assert.equal(pickMoodKey("q", "running", 0), "q-smile");
   assert.equal(pickMoodKey("q", "running", 2), "q-smile", "3 个 tick 内不换");
   assert.equal(pickMoodKey("q", "running", 3), "q-laugh");
   assert.equal(pickMoodKey("q", "running", 6), "q-pout");
   assert.equal(pickMoodKey("q", "running", 9), "q-surprise");
-  assert.equal(pickMoodKey("q", "running", 12), "q-smile", "四个一循环");
+  // 2026-10-30 补入 q-shy（连片红晕），池子从 4 张变 5 张
+  assert.equal(pickMoodKey("q", "running", 12), "q-shy", "第 5 张心情帧");
+  assert.equal(pickMoodKey("q", "running", 15), "q-smile", "五个一循环");
   assert.equal(pickMoodKey("q", "idle", 3), "q-sleepy", "收工只走抱膝，不放大头特写");
   assert.equal(pickMoodKey("q", "provisioning", 3), "q-sleepy");
   // 成熟版同一套轮换，只是池子不同
@@ -831,11 +936,14 @@ test("心情帧：每 3 个 tick 换一次表情，收工只走抱膝", () => {
   assert.equal(pickMoodKey("mature", "running", 3), "m-laugh");
   assert.equal(pickMoodKey("mature", "running", 6), "m-pout");
   assert.equal(pickMoodKey("mature", "running", 9), "m-surprise");
+  assert.equal(pickMoodKey("mature", "running", 12), "m-shy", "成熟版同样补到 5 张");
+  assert.equal(pickMoodKey("mature", "running", 15), "m-base", "五个一循环");
   assert.equal(pickMoodKey("mature", "idle", 3), "m-base", "成熟版收工固定用基础帧");
 });
-test("经典皮肤：用 Martty 像素小人的两帧，图片不可用时退回矢量", () => {
-  const { plugin } = loadPlugin();
-  const { WhaleLayer, settings, artStatus } = plugin.__test;
+test("经典皮肤：用 Martty 像素小人的两帧，图片不可用时退回矢量", async () => {
+  const loaded = loadPluginWithArt();
+  await loadArt(loaded, ["classic"]);
+  const { WhaleLayer, settings, artStatus } = loaded.plugin.__test;
   settings.set({ skin: "classic" });
   const props = {
     useSessions: (selector) => selector(listState()),
@@ -848,8 +956,7 @@ test("经典皮肤：用 Martty 像素小人的两帧，图片不可用时退回
   assert.equal(findByClass(tree, "daw-art").length, 0, "经典皮肤不再画矢量鲸鱼");
   const sprites = findByClass(tree, "daw-sprite");
   assert.ok(sprites.length >= 1, "经典皮肤用位图");
-  assert.match(sprites[0].props.src, /^data:image\/webp;base64,/, "而且是内联的 WebP");
-
+  assert.match(sprites[0].props.src, /^\/agent-whales\/api\/art\/c-[a-z]+\.webp$/, "而且走宿主素材路由");
   // 图片被安全策略拦掉（artBroken）时退回手绘矢量，保证还有东西可看
   artStatus.broken = true;
   const fallback = render(WhaleLayer(props));
@@ -940,4 +1047,339 @@ test("串门：resume 幂等，离线会话才会真的拉起", async () => {
   await assert.rejects(() => tool.execute({ sessionId: "  " }, {}), /不能为空/);
   // 输出必须是 lossless JSON（无 undefined 键），否则宿主判非法
   assert.deepEqual(JSON.parse(JSON.stringify(offline)), offline);
+});
+
+// ── 状态表情（v0.23 状态信号接线，2026-10-30）──────────────────────────────
+test("状态表情：失败 > 庆祝 > 思考 > 工作 > 空闲 的优先级与时效", () => {
+  const { faceOf, faceVariant } = testApi();
+  const now = 1_000_000;
+  const opts = { stateFaces: true, errorFaces: true };
+
+  assert.equal(faceOf({}, now, opts), "idle");
+  assert.equal(faceOf({ running: true }, now, opts), "working");
+  assert.equal(faceOf({ running: true, streaming: true }, now, opts), "thinking");
+  assert.equal(faceOf({ lastErrorAt: now - 1000 }, now, opts), "failed");
+  assert.equal(faceOf({ lastErrorAt: now - 9000 }, now, opts), "idle", "8 秒后失败脸自动恢复");
+  assert.equal(faceOf({ lastTurnEndAt: now - 1000, lastRunMs: 6000 }, now, opts), "celebrating");
+  assert.equal(faceOf({ lastTurnEndAt: now - 1000, lastRunMs: 1000 }, now, opts), "idle", "跑得太短不庆祝");
+  assert.equal(faceOf({ lastTurnEndAt: now - 7000, lastRunMs: 6000 }, now, opts), "idle", "6 秒窗口外不庆祝");
+  assert.equal(faceOf({ lastErrorAt: now - 1000 }, now, { stateFaces: true, errorFaces: false }), "idle", "关掉出错表情就不显示");
+  assert.equal(faceOf({ running: true, streaming: true }, now, { stateFaces: false }), "working", "关掉状态表情退回工作/空闲");
+  assert.equal(faceOf({ running: true, streaming: true }, now, { stateFaces: false }), "working");
+  assert.equal(faceOf(null, now, opts), "idle", "空数据不抛");
+  assert.equal(faceOf({ lastErrorAt: "x", lastTurnEndAt: NaN, streaming: 1, running: "yes" }, now, opts), "idle", "脏数据不抛");
+  assert.equal(faceOf({ running: true, lastErrorAt: now - 100 }, now, opts), "failed", "失败压过在跑");
+
+  assert.equal(faceVariant("failed"), "oops");
+  assert.equal(faceVariant("thinking"), "think");
+  assert.equal(faceVariant("celebrating"), "celebrate");
+  assert.equal(faceVariant("working"), undefined);
+  assert.equal(faceVariant("idle"), undefined);
+});
+
+test("状态表情：Q / 成熟 / 经典的思考·出错·庆祝帧都已接线", async () => {
+  const { frameOf, ART } = await testApiWithArt(["q", "mature", "classic"]);
+  const art = ART();
+  assert.equal(frameOf("q", false, "think"), "q-think");
+  assert.equal(frameOf("q", false, "oops"), "q-oops");
+  assert.equal(frameOf("q", false, "celebrate"), "q-cry");
+  assert.equal(frameOf("mature", true, "think"), "m-think");
+  assert.equal(frameOf("mature", true, "oops"), "m-oops");
+  assert.equal(frameOf("mature", true, "celebrate"), "m-proud", "成熟版没有 m-done，收工沿用得意帧");
+  for (const key of ["q-think", "q-oops", "q-cry", "q-heart", "m-think", "m-oops", "c-think", "c-oops", "c-done"]) {
+    assert.ok(art[key], key + " 必须已经加载进 ART，否则 frameOf 会静默退回基础帧");
+  }
+});
+
+test("设置：状态表情默认开，只有显式 false 才关", () => {
+  const { normalizeSettings, DEFAULTS } = testApi();
+  assert.equal(DEFAULTS.stateFaces, true);
+  assert.equal(DEFAULTS.errorFaces, true);
+  assert.equal(normalizeSettings({ stateFaces: false }).stateFaces, false);
+  assert.equal(normalizeSettings({ errorFaces: false }).errorFaces, false);
+  assert.equal(normalizeSettings({ stateFaces: "no" }).stateFaces, true, "非布尔值不该把开关关掉");
+  assert.equal(normalizeSettings({ errorFaces: 0 }).errorFaces, true);
+});
+
+test("活动快照：宿主 state 字段脏数据不会污染快照、也不会抛", () => {
+  const { toolActivity } = testApi();
+  const before = toolActivity.getSnapshot().state;
+  assert.equal(typeof before, "object");
+  toolActivity.apply({ active: {}, state: { s1: { running: true, lastErrorAt: "x", streaming: "yes", lastRunMs: NaN } } });
+  const row = toolActivity.getSnapshot().state.s1;
+  assert.equal(row.running, true);
+  assert.equal("lastErrorAt" in row, false, "非数字时间戳要丢掉");
+  assert.equal("streaming" in row, false, "非 true 的 streaming 要丢掉");
+  assert.equal("lastRunMs" in row, false, "NaN 要丢掉");
+  toolActivity.apply({ active: {} });
+  assert.deepEqual(toolActivity.getSnapshot().state, {}, "旧宿主没 state 时降级成空表，不保留旧值");
+});
+
+
+// ── P2：团队全完成 → 比心（2026-10-30）────────────────────────────────────
+test("状态表情：teamDone 映射到比心帧，且 q-heart 真的在 ART 里", async () => {
+  const { faceVariant, frameOf, ART } = await testApiWithArt(["q", "mature"]);
+  assert.equal(faceVariant("teamDone"), "teamDone");
+  assert.equal(frameOf("q", false, "teamDone"), "q-heart");
+  assert.equal(frameOf("mature", true, "teamDone"), "m-proud", "成熟版没有比心素材，沿用得意帧");
+  assert.ok(ART()["q-heart"], "q-heart 必须已加载");
+});
+
+// ── D1：素材加载器（按皮肤分批 / 失败降级 / 幂等）──────────────────────────
+test("素材加载：manifest 之后按皮肤分波（L1 base → L2 常用 → L3 其余），且只拉所选皮肤", async () => {
+  const loaded = loadPluginWithArt();
+  await loadArt(loaded, ["q"]);
+  const log = loaded.win.fetch.log;
+  const { ART } = loaded.plugin.__test;
+
+  assert.equal(log[0], ART_ROUTE + "manifest", "第一件事是拉清单");
+  assert.equal(log[1], ART_ROUTE + "q-smile.webp", "L1：base 帧必须第一个到");
+
+  const indexOf = (key) => log.indexOf(ART_ROUTE + key + ".webp");
+  const blink = indexOf("q-blink");
+  const wave = indexOf("q-wave");
+  const proud = indexOf("q-proud");
+  const think = indexOf("q-think");
+  const heart = indexOf("q-heart");
+  assert.ok(blink > 1 && wave > 1 && proud > 1, "L2：常用帧在 base 之后");
+  assert.ok(Math.min(blink, wave, proud) < Math.min(think, heart), "L2 必须先于 L3（心情/状态帧）");
+
+  // 只请求了 q-*（外加 manifest）
+  for (const url of log.slice(1)) assert.match(url, /^\/agent-whales\/api\/art\/q-[a-z]+\.webp$/);
+  assert.equal(log.length, 1 + ART_KEYS.q.length, "manifest + 13 张 Q 版");
+  assert.deepEqual(Object.keys(ART()).sort(), [...ART_KEYS.q].sort());
+});
+
+test("素材加载：重复 ensureSkin 不重复请求；切皮肤只补拉新皮肤", async () => {
+  const loaded = loadPluginWithArt();
+  const { artLoader, ART } = loaded.plugin.__test;
+
+  await loadArt(loaded, ["q"]);
+  const afterQ = loaded.win.fetch.log.length;
+  await loadArt(loaded, ["q"]); // 同一皮肤再来一次
+  assert.equal(loaded.win.fetch.log.length, afterQ, "同一皮肤只加载一次");
+
+  await loadArt(loaded, ["mature"]);
+  const log = loaded.win.fetch.log;
+  assert.equal(log.filter((url) => url.endsWith("manifest")).length, 1, "manifest 只拉一次");
+  assert.equal(log.length, 1 + ART_KEYS.q.length + ART_KEYS.mature.length, "切皮肤只补拉 m-*");
+  assert.equal(ART()["q-smile"].uri, ART_ROUTE + "q-smile.webp", "旧皮肤的素材留着不删，切回来不用再拉");
+});
+
+test("素材加载：单帧 404 只丢这一帧，frameOf 退回 base，不影响其它帧", async () => {
+  const loaded = loadPluginWithArt({ failKeys: ["q-blink"] });
+  await loadArt(loaded, ["q"]);
+  const { ART, frameOf, artStatus } = loaded.plugin.__test;
+
+  assert.equal(ART()["q-blink"], undefined, "失败的帧不得进 ART");
+  assert.ok(ART()["q-smile"], "base 帧照常可用");
+  assert.equal(frameOf("q", false, "blink"), "q-smile", "眨眼帧挂了就退回 base，而不是整层变矢量");
+  assert.equal(frameOf("q", false, "base"), "q-smile");
+  assert.equal(artStatus.broken, false, "非 base 帧失败不能把整层打成矢量");
+});
+
+test("素材加载：base 帧 404 → 该皮肤没有主帧、逐只退矢量（不误伤全局）；manifest 重试耗尽 → 整层退矢量", async () => {
+  const baseGone = loadPluginWithArt({ failKeys: ["q-smile"] });
+  await loadArt(baseGone, ["q"]);
+  const baseApi = baseGone.plugin.__test;
+  assert.equal(baseApi.ART()["q-smile"], undefined, "404 的 base 帧不得进 ART");
+  assert.equal(baseApi.frameOf("q", false, "base"), undefined, "没有主帧 → frameOf 不给位图，渲染逐只退矢量");
+  assert.equal(baseApi.artStatus.broken, false, "帧级失败不设全局 broken（换皮肤/回前台还能救）");
+  const baseTree = render(baseApi.WhaleLayer({
+    useSessions: (selector) => selector(listState()),
+    useSessionStatus: (selector) => selector(statusMap({ [LEAD]: true })),
+    leadIdOf: (id) => id,
+    t: (key) => key
+  }));
+  assert.ok(findByClass(baseTree, "daw-art").length >= 1, "没有主帧时画矢量兜底");
+
+  const noManifest = loadPluginWithArtRetry({ manifestStatus: 404 });
+  const { ART_MAX_ATTEMPTS } = noManifest.plugin.__test;
+  await loadArt(noManifest, ["q"]);
+  assert.equal(noManifest.plugin.__test.artStatus.broken, true, "manifest 重试耗尽后整层退矢量");
+  assert.deepEqual(Object.keys(noManifest.plugin.__test.ART()), [], "一张图都不应该进 ART");
+  assert.equal(manifestCalls(noManifest), ART_MAX_ATTEMPTS, "manifest 只允许有限次重试");
+  assert.equal(
+    noManifest.win.fetch.log.filter((url) => url.endsWith(".webp")).length,
+    0,
+    "manifest 都拉不到时不得再试探单帧"
+  );
+});
+
+test("素材加载：manifest 第一次 404、第二次 200 → 自动重试成功并渲染位图", async () => {
+  const { ART_MAX_ATTEMPTS } = testApi();
+  const loaded = loadPluginWithArtRetry({ manifestStatuses: [404, 200] });
+  await loadArt(loaded, ["q"]);
+  const { ART, artStatus } = loaded.plugin.__test;
+
+  assert.equal(manifestCalls(loaded), 2, "manifest 恰好请求两次（一次失败 + 一次成功）");
+  assert.ok(manifestCalls(loaded) < ART_MAX_ATTEMPTS, "成功之后不再重试");
+  assert.ok(ART()["q-smile"], "重试成功后素材进 ART");
+  assert.equal(artStatus.broken, false, "重试期间不得提前 latch 成 broken");
+
+  const tree = render(loaded.plugin.__test.WhaleLayer({
+    useSessions: (selector) => selector(listState()),
+    useSessionStatus: (selector) => selector(statusMap({ [LEAD]: true })),
+    leadIdOf: (id) => id,
+    t: (key) => key
+  }));
+  assert.ok(findByClass(tree, "daw-sprite").length >= 1, "重试成功后渲染出 <img>");
+});
+
+test("素材加载：重试期间保持矢量占位、不提前 markBroken；最终成功后淡入位图", async () => {
+  // 手动控制重试闸门，模拟「宿主还在起、客户端已经渲染过一帧」
+  let release = null;
+  const loaded = loadPluginWithArt({ manifestStatus: 404 });
+  const { artLoader, artStatus, WhaleLayer } = loaded.plugin.__test;
+  artLoader.setRetryWait(() => new Promise((resolve) => { release = resolve; }));
+
+  artLoader.ensureSkin("q");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(artStatus.broken, false, "第一次失败只是「在重试」，不许 markBroken");
+  assert.equal(artLoader.getSnapshot().retrying, true, "快照要能看出正在退避重试");
+
+  const tree = render(WhaleLayer({
+    useSessions: (selector) => selector({ ids: [], byId: {}, phase: "ready", projectionsBySession: {} }),
+    useSessionStatus: (selector) => selector(new Map()),
+    leadIdOf: (id) => id,
+    t: (key) => key
+  }));
+  // 空会话时图层返回 null，这里只验证重试期间不抛、不 broken
+  assert.equal(tree, null);
+  assert.equal(artStatus.broken, false);
+
+  // 闸门放行 + 宿主恢复：下一轮就该成功
+  loaded.win.fetch.control.manifestStatus = 200;
+  const idle = artLoader.whenIdle();
+  assert.equal(typeof release, "function", "应当有一个在等待的重试");
+  release();
+  await idle;
+  assert.ok(loaded.plugin.__test.ART()["q-smile"], "重试成功后素材就绪");
+  assert.equal(artStatus.broken, false);
+});
+
+test("素材加载：重试耗尽后不再无限请求，且能被「回前台」唤醒自愈", async () => {
+  const { installDocumentStub } = await import("./harness.mjs");
+  const doc = installDocumentStub();
+  try {
+    const loaded = loadPluginWithArtRetry({ manifestStatus: 404 });
+    const { artLoader, artStatus, ART_MAX_ATTEMPTS: maxAttempts } = loaded.plugin.__test;
+    await loadArt(loaded, ["q"]);
+    assert.equal(artStatus.broken, true, "重试耗尽后整层退矢量");
+    assert.equal(manifestCalls(loaded), maxAttempts, "尝试次数封顶");
+
+    // 就此停手：再等也不会继续打
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(manifestCalls(loaded), maxAttempts, "耗尽后不再无限重试");
+
+    // 宿主终于起来了：用户切回窗口就该自愈，不用 Ctrl+R
+    loaded.win.fetch.control.manifestStatus = 200;
+    doc.document.hidden = false;
+    doc.document.dispatchEvent({ type: "visibilitychange" });
+    await artLoader.whenIdle();
+    assert.equal(artStatus.broken, false, "回前台重试成功后撤销 broken");
+    assert.ok(loaded.plugin.__test.ART()["q-smile"], "素材恢复");
+    assert.ok(manifestCalls(loaded) > maxAttempts, "回前台确实又打了一轮");
+  } finally {
+    delete globalThis.document;
+  }
+});
+
+test("素材加载：重试耗尽后切皮肤也能唤醒重试", async () => {
+  const loaded = loadPluginWithArtRetry({ manifestStatus: 404 });
+  const { artLoader, artStatus } = loaded.plugin.__test;
+  await loadArt(loaded, ["q"]);
+  assert.equal(artStatus.broken, true);
+
+  loaded.win.fetch.control.manifestStatus = 200;
+  artLoader.ensureSkin("mature"); // 用户的主动动作
+  await artLoader.whenIdle();
+  assert.equal(artStatus.broken, false, "切皮肤触发重试，成功后恢复");
+  assert.ok(loaded.plugin.__test.ART()["m-base"], "新皮肤素材就绪");
+});
+
+test("素材加载：manifest 脏数据（缺 keys / 尺寸非法）→ 重试耗尽后退矢量且不抛", async () => {
+  const { ART_MAX_ATTEMPTS } = testApi();
+  for (const body of [null, {}, { keys: {} }, { keys: { "q-smile": { w: 0, h: 192 } } }, { keys: "nope" }]) {
+    const loaded = loadPluginWithArtRetry({ manifestBody: body });
+    await assert.doesNotReject(() => loadArt(loaded, ["q"]));
+    assert.equal(loaded.plugin.__test.artStatus.broken, true, "脏清单必须退矢量：" + JSON.stringify(body));
+    assert.deepEqual(Object.keys(loaded.plugin.__test.ART()), [], "脏清单不得塞进半截素材");
+    assert.equal(manifestCalls(loaded), ART_MAX_ATTEMPTS, "脏清单也走有限重试：" + JSON.stringify(body));
+  }
+});
+
+test("素材加载：加载中不阻塞渲染，失败后仍有矢量兜底（不白屏）", async () => {
+  const loaded = loadPluginWithArtRetry({ manifestStatus: 500 });
+  const props = {
+    useSessions: (selector) => selector(listState()),
+    useSessionStatus: (selector) => selector(statusMap({ [LEAD]: true })),
+    leadIdOf: (id) => id,
+    t: (key) => key
+  };
+  // 加载进行中先渲染一次：必须是矢量占位，不能抛
+  const loading = render(loaded.plugin.__test.WhaleLayer(props));
+  assert.ok(findByClass(loading, "daw-whale").length >= 1, "素材没到货也要画角色");
+  assert.ok(findByClass(loading, "daw-art").length >= 1, "用矢量占位");
+  await loadArt(loaded, ["q"]);
+  const failed = render(loaded.plugin.__test.WhaleLayer(props));
+  assert.ok(findByClass(failed, "daw-art").length >= 1, "失败后仍然有矢量兜底");
+  assert.equal(findByClass(failed, "daw-sprite").length, 0, "失败后不再尝试位图");
+});
+
+test("素材加载：退避节奏是 1s→2s→4s→8s（记录真实请求的延迟值，不睡真实时间）", async () => {
+  const loaded = loadPluginWithArt({ manifestStatus: 404 });
+  const { artLoader, ART_RETRY_DELAYS } = loaded.plugin.__test;
+  const seen = [];
+  // 只记录、立即放行：断言的是「请求了多少毫秒」，不是真的等
+  artLoader.setRetryWait((ms) => { seen.push(ms); return Promise.resolve(); });
+  await loadArt(loaded, ["q"]);
+  assert.deepEqual(seen, ART_RETRY_DELAYS, "重试节奏必须是 1s→2s→4s→8s");
+  assert.deepEqual(ART_RETRY_DELAYS, [1000, 2000, 4000, 8000]);
+  // 5 次尝试（首次 + 4 次重试），累计等待 15s
+  assert.equal(seen.reduce((sum, ms) => sum + ms, 0), 15000, "总退避时长 15s");
+});
+
+test("素材加载：重试耗尽后，activity 通了（宿主路由已就绪）自动补一轮，且只补一次", async () => {
+  const loaded = loadPluginWithArtRetry({ manifestStatus: 404 });
+  const { artLoader, artStatus, activityPoll } = loaded.plugin.__test;
+  await loadArt(loaded, ["q"]);
+  assert.equal(artStatus.broken, true, "先耗尽重试、退矢量");
+
+  // 宿主终于起来了：activity 路由 200（同一个 /agent-whales/api 前缀）
+  const artFetch = loaded.win.fetch;
+  const fetchImpl = (url, options) => {
+    if (String(url) === "/agent-whales/api/activity") {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ active: {}, state: {} }) });
+    }
+    return artFetch(url, options);
+  };
+  fetchImpl.log = artFetch.log;
+  fetchImpl.control = artFetch.control;
+  loaded.win.fetch = fetchImpl;
+
+  loaded.win.fetch.control.manifestStatus = 200;
+  activityPoll.start();
+  try {
+    for (let i = 0; i < 30; i += 1) await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    await artLoader.whenIdle();
+  } finally {
+    activityPoll.stop();
+  }
+  assert.equal(artStatus.broken, false, "宿主路由恢复后自愈，不用刷新");
+  assert.ok(loaded.plugin.__test.ART()["q-smile"], "素材补拉成功");
+
+  // 只补一次：再给宿主「活着」的信号也不该重复重试
+  loaded.win.fetch.control.manifestStatus = 404;
+  assert.equal(artLoader.notifyHostAlive(), false, "hostAlive 信号只消费一次");
+});
+
+test("体积：client.js 不再内联 base64 素材，且控制在 200KB 以内", () => {
+  const source = readFileSync(join(pluginDir, "lib", "client.js"), "utf8");
+  assert.equal(source.includes("data:image/webp;base64"), false, "bundle 里不得再出现内联 WebP");
+  const bytes = Buffer.byteLength(source, "utf8");
+  assert.ok(bytes < 200 * 1024, "client.js 必须 ≤200KB（D1 目标），实际 " + Math.round(bytes / 1024) + "KB");
+  assert.ok(source.includes("var ART = {};"), "ART 必须保留空表占位，等运行时填充");
 });

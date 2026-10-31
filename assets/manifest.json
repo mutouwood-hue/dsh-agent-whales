@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "keys": {
+    "c-done": {
+      "w": 177,
+      "h": 192,
+      "bytes": 9174,
+      "skin": "classic"
+    },
+    "c-idle": {
+      "w": 177,
+      "h": 192,
+      "bytes": 7448,
+      "skin": "classic"
+    },
+    "c-oops": {
+      "w": 177,
+      "h": 192,
+      "bytes": 9174,
+      "skin": "classic"
+    },
+    "c-think": {
+      "w": 177,
+      "h": 192,
+      "bytes": 8864,
+      "skin": "classic"
+    },
+    "c-work": {
+      "w": 177,
+      "h": 192,
+      "bytes": 7166,
+      "skin": "classic"
+    },
+    "m-base": {
+      "w": 192,
+      "h": 192,
+      "bytes": 13474,
+      "skin": "mature"
+    },
+    "m-blink": {
+      "w": 192,
+      "h": 192,
+      "bytes": 13436,
+      "skin": "mature"
+    },
+    "m-laugh": {
+      "w": 192,
+      "h": 192,
+      "bytes": 13188,
+      "skin": "mature"
+    },
+    "m-oops": {
+      "w": 192,
+      "h": 192,
+      "bytes": 13574,
+      "skin": "mature"
+    },
+    "m-pout": {
+      "w": 192,
+      "h": 192,
+      "bytes": 13790,
+      "skin": "mature"
+    },
+    "m-proud": {
+      "w": 192,
+      "h": 192,
+      "bytes": 13766,
+      "skin": "mature"
+    },
+    "m-shy": {
+      "w": 192,
+      "h": 192,
+      "bytes": 13826,
+      "skin": "mature"
+    },
+    "m-surprise": {
+      "w": 192,
+      "h": 192,
+      "bytes": 12942,
+      "skin": "mature"
+    },
+    "m-think": {
+      "w": 192,
+      "h": 192,
+      "bytes": 13258,
+      "skin": "mature"
+    },
+    "m-wave": {
+      "w": 192,
+      "h": 192,
+      "bytes": 14278,
+      "skin": "mature"
+    },
+    "q-blink": {
+      "w": 169,
+      "h": 192,
+      "bytes": 13166,
+      "skin": "q"
+    },
+    "q-cry": {
+      "w": 168,
+      "h": 192,
+      "bytes": 13024,
+      "skin": "q"
+    },
+    "q-heart": {
+      "w": 168,
+      "h": 192,
+      "bytes": 12606,
+      "skin": "q"
+    },
+    "q-laugh": {
+      "w": 168,
+      "h": 192,
+      "bytes": 13064,
+      "skin": "q"
+    },
+    "q-oops": {
+      "w": 168,
+      "h": 192,
+      "bytes": 12654,
+      "skin": "q"
+    },
+    "q-pout": {
+      "w": 168,
+      "h": 192,
+      "bytes": 13042,
+      "skin": "q"
+    },
+    "q-proud": {
+      "w": 161,
+      "h": 192,
+      "bytes": 12638,
+      "skin": "q"
+    },
+    "q-shy": {
+      "w": 174,
+      "h": 192,
+      "bytes": 13068,
+      "skin": "q"
+    },
+    "q-sleepy": {
+      "w": 175,
+      "h": 192,
+      "bytes": 13002,
+      "skin": "q"
+    },
+    "q-smile": {
+      "w": 168,
+      "h": 192,
+      "bytes": 13218,
+      "skin": "q"
+    },
+    "q-surprise": {
+      "w": 169,
+      "h": 192,
+      "bytes": 13114,
+      "skin": "q"
+    },
+    "q-think": {
+      "w": 168,
+      "h": 192,
+      "bytes": 12546,
+      "skin": "q"
+    },
+    "q-wave": {
+      "w": 169,
+      "h": 192,
+      "bytes": 13260,
+      "skin": "q"
+    }
+  }
+}

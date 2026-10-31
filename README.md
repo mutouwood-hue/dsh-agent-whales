@@ -93,7 +93,7 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 
 ## 形象与素材
 
-16 张精灵图，全部 WebP + alpha，长边 192px（96px 显示的 2x 屏）：
+28 张精灵图，全部 WebP + alpha，长边 192px（96px 显示的 2x 屏）：
 
 | key | 来源变体 | 尺寸 | 字节 | 用在哪 |
 |---|---|---|---|---|
@@ -102,22 +102,41 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | `q-wave` | C23 | 169×192 | 13,260 | 入场挥手帧 |
 | `q-proud` | C21 | 161×192 | 12,638 | 退场得意帧 |
 | `q-sleepy` | C27 | 175×192 | 13,002 | 起步中，抱膝坐姿 |
-| `q-laugh` | C10 | 192×192 | 13,344 | Q 版心情帧（大笑） |
-| `q-pout` | C15 | 192×192 | 13,604 | Q 版心情帧（鼓脸） |
-| `q-surprise` | C17 | 169×192 | 13,458 | Q 版心情帧（惊讶） |
+| `q-laugh` | C12 · AI 返工 2026-10-30 | 168×192 | 13,064 | Q 版心情帧（大笑）——原帧是半身构图，已按全身重画 |
+| `q-pout` | C12 · AI 返工 2026-10-30 | 168×192 | 13,042 | Q 版心情帧（鼓脸）——同上 |
+| `q-surprise` | C17 · 2026-10-30 重抠 | 169×192 | 13,114 | Q 版心情帧（惊讶）——构图未变，只清掉脚下灰影 |
+| `q-shy` | C12 · AI 返工 2026-10-30 | 174×192 | 13,068 | Q 版心情帧（害羞）——连片红晕，96px 下与微笑可区分 |
+| `q-think` | C12 · AI 新增 2026-10-30 | 168×192 | 12,546 | **状态帧**：思考（托腮） |
+| `q-oops` | C12 · AI 新增 2026-10-30 | 168×192 | 12,654 | **状态帧**：出错（歉意） |
+| `q-heart` | C12 · AI 新增 2026-10-30 | 168×192 | 12,606 | **状态帧**：团队全完成（比心） |
+| `q-cry` | C12 · AI 返工 v3 2026-10-30 | 168×192 | 13,024 | **状态帧**：收工庆祝（感动哭，96px 可辨） |
 | `m-base` | C13 | 192×192 | 13,474 | Lead 常态（头肩近景） |
-| `m-blink` | C20 | 192×192 | 14,464 | Lead 眨眼帧 |
-| `m-laugh` | C11 | 192×192 | 12,942 | Lead 心情帧（大笑） |
-| `m-pout` | C16 | 184×192 | 13,482 | Lead 心情帧（不满） |
+| `m-blink` | C13 · AI 返工 2026-10-30 | 192×192 | 13,436 | Lead 眨眼帧——原帧脸更近，已按头肩取景重画 |
+| `m-laugh` | C11 | 192×192 | 13,188 | Lead 心情帧（大笑） |
+| `m-pout` | C13 · AI 返工 2026-10-30 | 192×192 | 13,790 | Lead 心情帧（不满）——原帧取景到腰，已改头肩 |
 | `m-surprise` | C18 | 192×192 | 12,942 | Lead 心情帧（惊讶） |
-| `m-proud` | C83 | 189×192 | 13,888 | Lead 退场得意帧 |
+| `m-proud` | C13 · AI 返工 2026-10-30 | 192×192 | 13,766 | Lead 退场得意帧——原帧取景到腰，已改头肩 |
+| `m-wave` | C13 · AI 新增 2026-10-30 | 192×192 | 14,278 | Lead 入场招手帧——**接替原来的 `m-base` 入场回退** |
+| `m-shy` | C13 · AI 新增 2026-10-30 | 192×192 | 13,826 | Lead 心情帧（害羞） |
+| `m-think` | C13 · AI 新增 2026-10-30 | 192×192 | 13,258 | **状态帧**：思考 |
+| `m-oops` | C13 · AI 新增 2026-10-30 | 192×192 | 13,574 | **状态帧**：出错 |
 | `c-idle` | Martty liang-idle | 177×192 | 7,448 | 经典皮肤·待命（像素小人「嘘」） |
 | `c-work` | Martty liang-working | 177×192 | 7,166 | 经典皮肤·干活（抱着终端键盘） |
+| `c-think` | Martty/Liang AI 衍生 2026-10-30 | 177×192 | 8,864 | **状态帧**：经典·思考（已对齐 c-idle 画布） |
+| `c-oops` | Martty/Liang AI 衍生 2026-10-30 | 177×192 | 9,174 | **状态帧**：经典·出错 |
+| `c-done` | Martty/Liang AI 衍生 2026-10-30 | 177×192 | 9,174 | **状态帧**：经典·完成 |
 
-合计 201,742 B（≈197KB），base64 内联后 `client.js` 约 **343KB**——一次性加载，无额外请求，离线可用。
+合计 345,760 B（≈338KB）。**素材不再内联进 `client.js`**（v0.22 D1）：它们随包分发在 `assets/*.webp`，
+由宿主只读路由 `/agent-whales/api/art/<key>.webp` 按需提供给浏览器；`client.js` 因此从 566KB 降到约 **127KB**。
+客户端只拉**当前所选皮肤**的那一批，并按 L1 基础帧 → L2 常用帧 → L3 心情/状态帧的顺序分批。
 
-**为什么内联**：浏览器半边是单文件 bundle（`clientModules` 只托管一个入口），既不能 `require` 兄弟文件，
-也没有静态资源目录。要换成宿主 `webServer` 路由托管图片，见 PRD 的 v2 方案。
+> 为什么不再内联：浏览器半边是单文件 bundle，以前只能把图 base64 塞进代码里；28 张之后
+> `client.js` 涨到 566KB，每次启动都要一次性下载全部皮肤。现在改成宿主路由 + 按皮肤懒加载，
+> 素材总量也不再受限。
+
+> 2026-10-30 这几批返工/新增帧的验收数据（96px 对照、轮廓 IoU、眨眼带外位移、软边占比、经典帧画布对齐）
+> 见 PRD §35.12–§35.14；生成脚本 `tools/ingest-generated.py` / `tools/ingest-classic.py`（与
+> `build-assets.py` 走同一条管线）、QA 脚本 `tools/qa-frames.py`。
 
 **降级**：任何一张图加载失败（例如页面安全策略不允许 `data:`）会自动把整层切到经典皮肤，
 设置页会给出提示，不会留一排空位。
@@ -155,6 +174,8 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | 气泡粒子 | 开 | — | 角色周围上浮的小水泡 |
 | 对话气泡 | 开 | — | 头顶那句「当前在做的事」 |
 | 俏皮话 | 开 | — | 没正事可说时冒一句短句（`quips`），关掉只留正经气泡 |
+| 状态表情 | 开 | — | 思考时托腮、收工轻哭、团队全完成比心（`stateFaces`）；关掉只走心情轮换 |
+| 出错表情 | 开 | — | 工具或模型失败时画出错脸（`errorFaces`），8 秒后自动恢复；关掉不影响任何行为 |
 | 团队汇总条 | 开 | — | 队形左侧「大伙在干什么」的汇总条（`teamBar`） |
 | 空闲挂着 | 开 | — | 没人在干活时把最后一批角色灰显挂着（`alwaysShow`）；关掉即整层消失、不占位 |
 | 显示任务 | 开 | — | 角色脚下的任务行 |
@@ -170,6 +191,23 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 参数立即生效，持久化在 `localStorage["dsh-agent-whales.settings"]`；拖拽坐标另外存在
 `localStorage["dsh-agent-whales.positions"]`（按会话 id 记，形状是 `{ [id]: {x, y} }`，相对队形左上角）；
 「恢复默认」会把这两处一起清掉。
+
+## 状态表情（角色知道自己在干什么）
+
+人物表情不再只按「心情轮换」随机换，而是跟着**真实运行时状态**走。宿主半边订阅四个事件、聚合成
+每会话一行的只读快照（`state` 字段，挂在同一个 `GET /agent-whales/api/activity` 里），客户端据此选帧：
+
+| 状态 | 触发事实 | 展示 | 时长 |
+|---|---|---|---|
+| 失败 | `tools/result.isError` / `agent/error` / `agent/request-error` | `q-oops` · `m-oops` · `c-oops` | 8s，之后自动恢复 |
+| 收工庆祝 | `agent/turn-stopping` 且这一轮跑了 ≥5s | `q-cry` · `m-proud` · `c-done` | 6s |
+| 思考 | `agent/assistant-stream` 处于 `start..end` 之间 | `q-think` · `m-think` · `c-think` | 跟着 stream 走 |
+| 团队全完成 | `agentTeam` 投影：任务全 `completed` 且无人在跑 | `q-heart`（成熟版沿用 `m-proud`） | 持续到有新工作 |
+| 干活 / 空闲 | `agent/status` | 心情轮换 / 抱膝 | 现有逻辑 |
+
+优先级 `失败 > 庆祝 > 团队完成 > 思考 > 干活 > 空闲`；「思考」只在模型真的在输出时出现（避免工具间隙一直托腮）。
+`agent/request-error` 是 **waterfall**，插件监听后必须 `return next()` 放行，否则会吞掉宿主的重试策略。
+两个开关可分别关掉（状态表情 / 出错表情）。设计细节与取舍见 [`docs/state-signals.md`](docs/state-signals.md)。
 
 ## 串门（自建，不依赖外部插件）
 
@@ -228,14 +266,20 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 # 1) 下载源图 → 抠白底 → 去溢色 → 清脚下投影 → 导出 WebP + assets/art.json
 python tools/build-assets.py
 
-# 2) 把 art.json 内联进 lib/client.js（幂等，只改 <art:begin>/<art:end> 之间）
-node tools/embed-art.mjs
+# 2) 由 art.json 生成 assets/manifest.json，并把 assets/<key>.webp 对齐到 art.json
+#    （v0.22 D1 起不再内联；这一步也会补齐缺失的 webp / 修正与 art.json 不一致的图）
+node tools/build-manifest.mjs
+
+# 只校验不写盘（CI / 发布前用）
+node tools/build-manifest.mjs --check
 ```
 
 - 源图下载自 `https://raw.githubusercontent.com/AATINF/deepseek-whale-girl-assets/main/share-1600/`，
   缓存在 `.assets-cache/`，已下载过就不再联网，可离线复现。
 - `assets/_contact.png` 是质检图：七张图分别叠在白底 / 深底 / 品牌蓝底上，人眼核对白边与灰影。
 - 抠图用「边界洪水填充」而不是按亮度抠——后者会把白色围裙和蕾丝抠穿。
+- `assets/art.json` 是**构建产物**（465KB），**不进 npm 包**；运行时只用到 `assets/manifest.json`
+  + `assets/*.webp`。`node tools/embed-art.mjs` 仍可用，但它现在只是 `build-manifest` 的兼容别名。
 
 ## 安装 / 更新
 
@@ -261,7 +305,7 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 ```
 
 > 没有 `scripts` 里的 `pack:dist` 之前，`dist/` 里的 `.tgz` 是手工 `npm pack` 出来的；
-> 现在 `npm pack` 会先跑 `prepack` 检查 `lib/client.js` 里有没有内联 ART，缺了直接失败。
+> 现在 `npm pack` 会先跑 `prepack`：重新生成 `assets/manifest.json`，并守两道门——`lib/client.js` **不得再内联 base64 素材**、体积 **不得超过 200KB**。
 
 ### 默认开启智能体团队（本 bundle 的一部分）
 
@@ -381,7 +425,7 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 
 **方式二 · 离线给安装包**
 
-在插件目录里打包：`npm run pack:dist`（产物落在 `dist/`，`prepack` 会先校验内联 ART），
+在插件目录里打包：`npm run pack:dist`（产物落在 `dist/`，`prepack` 会先跑 build-manifest 并校验：client.js 无内联素材、≤200KB、manifest 非空），
 把 `.tgz` 发给对方，对方在插件页填它的绝对路径。
 
 ⚠️ 装之前请让同事知道三件事：
@@ -401,7 +445,7 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 
 ## 版本与兼容性
 
-当前插件版本：**0.21.0**。
+当前插件版本：**0.22.0**。
 
 | 宿主 | 团队段 | 说明 |
 |---|---|---|
@@ -455,15 +499,20 @@ node _scratch/preview.mjs
 | 文件 | 作用 |
 |---|---|
 | `lib/index.js` | 宿主半边：注册「团队协作」策略段落（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、四个 `whales_visit_*` 串门工具（可运行时开关）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
-| `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层与设置页；**含内联的精灵图数据** |
+| `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层、设置页、状态表情状态机、素材 loader（**不含图片数据**，运行期从宿主路由按皮肤拉） |
 | `cordis.patch.yml` | 默认层（**唯一真相**）：插入 `agent-whales` + 团队服务/工具/面板三行，并 `disabled` 掉旧 subagent 四行 |
-| `assets/*.webp` | 14 张精灵图（源，便于人工核对；另 2 张 Martty 像素小人的 PNG 源在 `assets/pet/`，见下） |
+| `assets/*.webp` | 28 张精灵图（**随包分发**，运行期由宿主路由按皮肤提供；另 2 张 Martty 像素小人的 PNG 源在 `assets/pet/`） |
+| `assets/manifest.json` | 运行期素材清单：`{version, keys:{key:{w,h,bytes,skin}}}`，宿主路由的白名单来源（2.8KB） |
 | `assets/pet/` | 经典皮肤的两张上游 PNG（Martty，MIT）+ 复现说明；`c-idle` / `c-work` 的唯一源 |
-| `assets/art.json` | 精灵图产物清单（data URI + 尺寸 + 来源变体号） |
+| `assets/art.json` | 素材构建产物（data URI + 尺寸 + 来源变体号），**不进 npm 包** |
 | `tools/build-assets.py` | 素材管线：下载 → 抠图 → 压缩 → 产出 webp 与 art.json |
-| `tools/ingest-generated.py` | 把新画的图接进 `art.json`（白底洪水填充 → 羽化 → 去溢色 → WebP） |
-| `tools/requirements.txt` | 上面两个脚本的 Python 依赖（numpy + Pillow） |
-| `tools/embed-art.mjs` | 把 art.json 内联进 `lib/client.js` |
+| `tools/build-manifest.mjs` | art.json → `assets/manifest.json`，并把 `assets/<key>.webp` 对齐到 art.json（`--check` 只校验） |
+| `tools/ingest-generated.py` | 把新画的插画接进 `art.json`（白底洪水填充 → 清投影 → 羽化 → 去溢色 → WebP） |
+| `tools/ingest-classic.py` | 经典像素皮肤专用管线（哨兵色转透明 + 最近邻 + 按 `c-idle` 画布对齐） |
+| `tools/qa-frames.py` | 帧验收：取景 IoU / 轮廓宽 / 眨眼带外位移 / 软边占比 |
+| `tools/requirements.txt` | 上面几个 Python 脚本的依赖（numpy + Pillow） |
+| `tools/embed-art.mjs` | **已弃用**：保留为 `build-manifest` 的兼容别名（旧命令不会再把图内联回去） |
+| `docs/state-signals.md` | 状态表情的信号采集设计（思考 / 失败 / 完成三类信号从哪来） |
 | `locale/*.json` | 插件管理页卡片文案 |
 | `icon.svg` | 插件管理页图标 |
 | `test/harness.mjs` | 离线测试用的最小 React 垫片与插件加载器 |
@@ -479,11 +528,18 @@ node _scratch/preview.mjs
 - 已验证 · 契约：注册 id === 包名、只 `require("react")`、`apply` 注册到 `shell.overlay` + `settings.section`、
   中英文键集合一致、`exports` 暴露 `./client` 与 `./locale/*.json`、`icon` 为 manifest 相对路径。
 - 已验证 · 逻辑：`npm test`（= `node --test test/`）全绿（断言数以 `test/` 下的文件为准）。
+- 已验证 · D1 素材出 bundle（2026-10-30）：`client.js` 由 566KB 降到 **127KB**（无 `data:image/*;base64`）；
+  素材清单 28 键（q13 / mature10 / classic5）由 `assets/manifest.json` 提供；宿主
+  `GET /agent-whales/api/art/manifest` + `GET|HEAD /agent-whales/api/art/<key>.webp` 按白名单供图
+  （manifest `no-store`、图片 `immutable` + etag、未知 key / 路径穿越 → 404、非 GET → 405）；
+  客户端按皮肤分波（L1 base → L2 常用 → L3 其余）、单帧失败只摘该帧、manifest 失败整层退矢量；
+  `npm pack` = 39 文件 / 425KB，`art.json` 与 `_contact.png` 不进包。测试 150/150。
+- 已验证 · 真机出现：用户截图确认角色、头顶气泡、计数徽章都正常渲染（当时还是 `data:` 内联方案）；
+  D1 改成宿主路由后，**真机渲染未复测**——见下面「未验证」。
 - 已验证 · 观感：`preview.still.html` 按 DSH 框架几何（40px 标题栏 + 240px 侧边栏 + 会话头 + `inset:0`
   的 overlay 层）截图核对——96px 下 Lead 头肩能看清脸、四个成员 Q 版尺度一致、`provisioning` 的三点与
   抱膝帧正确、名字带描边在浅底可读；`art.still.html` 在 220% 下核对边缘无白边。
-- 已验证 · 真机出现：用户截图确认角色、头顶气泡、计数徽章都正常渲染，`data:` 图片未被 CSP 拦截。
-- 已验证 · 经典皮肤：素材未内联时（`ART` 为空）整层自动退回矢量鲸鱼，摆尾与喷水动画在 CSS 里。
+- 已验证 · 经典皮肤：素材未就绪或加载失败时（`ART` 为空 / manifest 失败）整层自动退回矢量鲸鱼，摆尾与喷水动画在 CSS 里。
 - 已验证 · 默认层组合（2026-10-30，用真实 `composeEntries` + 真实 `dsh-base`/`dsh-web-app` 补丁复算）：
   叠加后**恰好触碰 8 行**（4 行 `disabled: true` + `agent-whales` + 团队三行 insert），**零 warning**，
   `agent-team` 的 config 与官方 profile 补丁逐字段一致。
