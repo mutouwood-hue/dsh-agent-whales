@@ -1420,3 +1420,52 @@ test("串门：默认插话（steer），config.visitMode=queue / visitSteer=fal
   assert.deepEqual(await run({ visitSteer: false }), { followup: 1, steer: 0 }, "兼容 config.visitSteer=false");
   assert.deepEqual(await run({ visitMode: "nonsense" }), { followup: 0, steer: 1 }, "脏配置退回插话");
 });
+
+test("计数只算真正在跑的：启动中单独标注，卡住超时降级为收工", () => {
+  const { buildPod, DEFAULTS, provisioningSince, PROVISIONING_GRACE_MS } = testApi();
+  const { plugin } = loadPlugin();
+  const state = listState();
+  const STUCK_A = "session-stuck-a";
+  const STUCK_B = "session-stuck-b";
+  state.projectionsBySession[LEAD].values.agentTeam.members = [
+    { id: LEAD, name: "lead", role: "lead", phase: "active" },
+    { id: MATE_A, name: MATE_A, role: "teammate", phase: "active" },
+    { id: STUCK_A, name: "stuck-a", role: "teammate", phase: "provisioning" },
+    { id: STUCK_B, name: "stuck-b", role: "teammate", phase: "provisioning" }
+  ];
+  const status = statusMap({ [LEAD]: true, [MATE_A]: true, [STUCK_A]: false, [STUCK_B]: false });
+
+  // 刚 spawn、还在启动窗口内：它们仍要画出来，但不计入「在干活」
+  delete provisioningSince[STUCK_A];
+  delete provisioningSince[STUCK_B];
+  const fresh = buildPod(state, status, DEFAULTS, (id) => id);
+  assert.deepEqual(
+    fresh.whales.map((w) => [w.key, w.phase]),
+    [[LEAD, "running"], [MATE_A, "running"], [STUCK_A, "provisioning"], [STUCK_B, "provisioning"], [MATE_B, "idle"]]
+  );
+
+  // 界面上：只报 2 只在干活 + 2 只启动中（而不是笼统的 4 只在干活）
+  const { WhaleLayer, settings } = plugin.__test;
+  settings.set({ labels: true });
+  const tree = WhaleLayer({
+    useSessions: (selector) => selector(state),
+    useSessionStatus: (selector) => selector(status),
+    leadIdOf: (id) => id,
+    t: (key, params) => (params ? key + ":" + params.count : key)
+  });
+  const chips = findByClass(tree, "daw-count");
+  assert.ok(chips.length >= 1, "标签开启时应有计数条");
+  const texts = chips.map((chip) => chip.props.children.join(""));
+  assert.ok(texts.includes("count:2 · starting:2"), "计数必须区分在干活与启动中，实际：" + JSON.stringify(texts));
+
+  // 超过宽限期仍没起来的，降级为 idle（灰显），不再挂「启动中」
+  provisioningSince[STUCK_A] = Date.now() - PROVISIONING_GRACE_MS - 1000;
+  provisioningSince[STUCK_B] = Date.now() - PROVISIONING_GRACE_MS - 1000;
+  const aged = buildPod(state, status, DEFAULTS, (id) => id);
+  assert.deepEqual(
+    aged.whales.map((w) => [w.key, w.phase]),
+    [[LEAD, "running"], [MATE_A, "running"], [STUCK_A, "idle"], [STUCK_B, "idle"], [MATE_B, "idle"]]
+  );
+  delete provisioningSince[STUCK_A];
+  delete provisioningSince[STUCK_B];
+});
