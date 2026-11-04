@@ -1567,3 +1567,135 @@ test("图形面板：POST /api/send 校验 token 并把话投给 agent", async (
   await route.handler(fakeReq("POST", "/agent-whales/api/send", { "x-whales-token": token }, JSON.stringify({ sessionId: "s-live", text: "  " })), missing);
   assert.equal(missing.statusCode, 400, "空文本必须 400");
 });
+test("任务命令路由：Lead 校验、CAS、分段结果、幂等与阻塞拒绝", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const routes = [];
+  const calls = { update: [], send: [] };
+  const lead = { id: "lead-session", status: "running", session: { events: [] } };
+  const teammate = { id: "mate-b", status: "inactive", session: { events: [] } };
+  let task = { id: "t1", revision: 1, subject: "干活", description: "", status: "pending", blockedBy: [], writeScopes: [], ready: true, writeScopeWarnings: [] };
+
+  const teams = {
+    tryMembership: (agent) => (agent && agent.id === lead.id ? { root: lead, id: "team-1", role: "lead", name: "lead" } : agent && agent.id === teammate.id ? { root: lead, id: "team-1", role: "teammate", name: "mate-b" } : undefined),
+    listTasks: () => [task],
+    listMembers: () => [{ id: lead.id, name: "lead", role: "lead", status: "running", diagnostics: [] }],
+    getTask: (_caller, id) => {
+      if (id !== task.id) throw new Error("team task not found");
+      return task;
+    },
+    updateTask: async (_caller, request) => {
+      calls.update.push(request);
+      if (task.status === "completed") throw new Error("only an in-progress task can complete");
+      if (request.expectedRevision !== task.revision) throw new Error("team task revision conflict");
+      if (task.ready === false && task.blockedBy.length > 0) throw new Error(`team task ${task.id} is blocked`);
+      task = Object.assign({}, task, {
+        revision: task.revision + 1,
+        status: "in_progress",
+        ownerName: request.owner,
+        ready: false
+      });
+      return task;
+    },
+    sendMessage: async (_caller, request) => {
+      calls.send.push(request);
+      return { messageId: "msg-1" };
+    }
+  };
+
+  host.apply({
+    get: (name) => {
+      if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
+      if (name === "agents") return { get: (id) => (id === lead.id ? lead : id === teammate.id ? teammate : undefined) };
+      if (name === "agentTeams") return teams;
+      return undefined;
+    },
+    on: () => () => {},
+    effect: (run) => { run(); return () => {}; }
+  });
+  const route = routes.find((item) => item && typeof item.handler === "function");
+  assert.ok(route, "必须注册 /agent-whales/api 前缀路由");
+
+  function fakeReq(method, url, headers, body) {
+    const listeners = {};
+    const req = { method, url, headers: headers || {}, on(event, fn) { (listeners[event] = listeners[event] || []).push(fn); return req; } };
+    setTimeout(() => {
+      if (body !== undefined) (listeners.data || []).forEach((fn) => fn(Buffer.from(body)));
+      (listeners.end || []).forEach((fn) => fn());
+    }, 0);
+    return req;
+  }
+  function fakeRes() {
+    return { statusCode: 0, headers: {}, body: "", setHeader(k, v) { this.headers[k] = v; }, end(chunk) { if (chunk !== undefined) this.body += String(chunk); } };
+  }
+  const probe = fakeRes();
+  await route.handler(fakeReq("GET", "/agent-whales/api/activity", {}, undefined), probe);
+  const token = JSON.parse(probe.body).controlToken;
+  assert.equal(typeof token, "string");
+
+  // 只读快照
+  const snapshot = fakeRes();
+  await route.handler(fakeReq("GET", "/agent-whales/api/tasks?leadSessionId=" + lead.id, {}, undefined), snapshot);
+  assert.equal(snapshot.statusCode, 200);
+  assert.equal(JSON.parse(snapshot.body).tasks.length, 1);
+
+  // 非 Lead / 不在团队 → 拒绝
+  const notLead = fakeRes();
+  await route.handler(fakeReq("GET", "/agent-whales/api/tasks?leadSessionId=" + teammate.id, {}, undefined), notLead);
+  assert.equal(notLead.statusCode, 409);
+  assert.equal(JSON.parse(notLead.body).error, "caller-not-lead");
+
+  // 无 token 的写命令 → 403
+  const denied = fakeRes();
+  await route.handler(fakeReq("POST", "/agent-whales/api/tasks/t1/commands", {}, JSON.stringify({})), denied);
+  assert.equal(denied.statusCode, 403);
+
+  const command = (body) => [fakeReq("POST", "/agent-whales/api/tasks/t1/commands", { "x-whales-token": token }, JSON.stringify(body)), fakeRes()];
+
+  // 首次分配：只改任务板，不派发
+  let [req1, res1] = command({ leadSessionId: lead.id, requestId: "r1", action: "assign", owner: "mate-b", expectedRevision: 1 });
+  await route.handler(req1, res1);
+  assert.equal(res1.statusCode, 200, res1.body);
+  const first = JSON.parse(res1.body);
+  assert.equal(first.ok, true);
+  assert.equal(first.dispatch.status, "not-requested");
+  assert.equal(first.task.ownerName, "mate-b");
+  assert.equal(calls.send.length, 0, "assign 不允许派发");
+
+  // 同 requestId 重放：不再写任务板
+  let [req2, res2] = command({ leadSessionId: lead.id, requestId: "r1", action: "assign", owner: "mate-b", expectedRevision: 1 });
+  await route.handler(req2, res2);
+  assert.equal(res2.statusCode, 200);
+  assert.equal(JSON.parse(res2.body).replayed, true);
+  assert.equal(calls.update.length, 1, "重放不得重复写");
+
+  // 同 requestId 不同 payload → 409
+  let [req3, res3] = command({ leadSessionId: lead.id, requestId: "r1", action: "assign", owner: "lead", expectedRevision: 2 });
+  await route.handler(req3, res3);
+  assert.equal(res3.statusCode, 409);
+  assert.equal(JSON.parse(res3.body).error, "request-id-reused");
+
+  // 分配并派发
+  let [req4, res4] = command({ leadSessionId: lead.id, requestId: "r2", action: "assign-and-dispatch", owner: "readme-auditor", expectedRevision: 2 });
+  await route.handler(req4, res4);
+  assert.equal(res4.statusCode, 200, res4.body);
+  const dispatched = JSON.parse(res4.body);
+  assert.equal(dispatched.dispatch.status, "sent");
+  assert.equal(calls.send.length, 1, "必须真的派发一次");
+  assert.equal(calls.send[0].target, "readme-auditor");
+
+  // revision 冲突 → 409 + maybeApplied
+  let [req5, res5] = command({ leadSessionId: lead.id, requestId: "r3", action: "assign", owner: "lead", expectedRevision: 1 });
+  await route.handler(req5, res5);
+  assert.equal(res5.statusCode, 409);
+  const conflict = JSON.parse(res5.body);
+  assert.equal(conflict.error, "revision-conflict");
+  assert.equal(conflict.maybeApplied, true, "冲突必须标可能已生效，不能宣称失败");
+
+  // 被阻塞任务 → 宿主拒绝，且绝不派发
+  task = Object.assign({}, task, { id: "t2", revision: 1, status: "pending", ownerName: undefined, ready: false, blockedBy: ["t9"] });
+  let [req6, res6] = [fakeReq("POST", "/agent-whales/api/tasks/t2/commands", { "x-whales-token": token }, JSON.stringify({ leadSessionId: lead.id, requestId: "r4", action: "assign-and-dispatch", owner: "mate-b", expectedRevision: 1 })), fakeRes()];
+  await route.handler(req6, res6);
+  assert.equal(res6.statusCode, 409);
+  assert.equal(JSON.parse(res6.body).error, "task-blocked");
+  assert.equal(calls.send.length, 1, "阻塞任务不得派发");
+});
