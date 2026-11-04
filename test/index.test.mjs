@@ -18,9 +18,19 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+/** 串门工具的身份只取执行上下文（P2 修法），测试里统一用这个假身份。 */
+const VISIT_EXEC = { agent: { id: "caller-visit" } };
 import { pathToFileURL } from "node:url";
 
 import * as host from "../lib/index.js";
+
+// 汇总执行时（test/index.js 把所有文件 import 进同一进程）会与其它测试文件共享模块状态：
+// 这里把 store 指到本文件专属的临时目录，避免被别的用例的项目数据影响。
+const ISOLATED_STORE_DIR = mkdtempSync(join(tmpdir(), "aw-index-"));
+host.setProjectStorePathForTests(join(ISOLATED_STORE_DIR, "projects.json"));
+host.setProposalStorePathForTests(join(ISOLATED_STORE_DIR, "proposals.json"));
+host.setHandoffsStorePathForTests(join(ISOLATED_STORE_DIR, "handoffs.json"));
 
 const KNOWN_TOOLS = [
   "whales_visit_list",
@@ -674,7 +684,7 @@ test("宿主工具：whales_visit_send 真的等到回话时，reply.text 是字
   const sent = await tools.whales_visit_send.execute(
     // 默认已是插话；这条用例要验的是「等回话」，显式走 queue 保持原语义
     { sessionId: "s-reply", message: "来串门", mode: "queue", waitForReply: true, timeoutMs: 2000 },
-    {}
+    VISIT_EXEC
   );
   assert.equal(followups.length, 1, "送信走 followup");
   assert.equal(sent.timedOut, false);
@@ -700,20 +710,20 @@ test("宿主工具：whales_visit_read 的 limit 夹到 1..100，默认 20，tot
     agents: { get: (id) => (id === "s-read" ? agent : undefined), list: () => [agent] }
   });
 
-  const byDefault = await tools.whales_visit_read.execute({ sessionId: "s-read" }, {});
+  const byDefault = await tools.whales_visit_read.execute({ sessionId: "s-read" }, VISIT_EXEC);
   assert.equal(byDefault.total, 150);
   assert.equal(byDefault.messages.length, 20, "默认最近 20 行");
   assert.equal(byDefault.messages.at(-1).seq, 150, "取的是最近的行");
   assertLossless(byDefault, "whales_visit_read");
 
-  const capped = await tools.whales_visit_read.execute({ sessionId: "s-read", limit: 1000 }, {});
+  const capped = await tools.whales_visit_read.execute({ sessionId: "s-read", limit: 1000 }, VISIT_EXEC);
   assert.equal(capped.messages.length, 100, "上限 100");
   assert.equal(capped.messages[0].seq, 51);
 
-  const floored = await tools.whales_visit_read.execute({ sessionId: "s-read", limit: 1.9 }, {});
+  const floored = await tools.whales_visit_read.execute({ sessionId: "s-read", limit: 1.9 }, VISIT_EXEC);
   assert.equal(floored.messages.length, 1, "limit 向下取整");
 
-  const negative = await tools.whales_visit_read.execute({ sessionId: "s-read", limit: -5 }, {});
+  const negative = await tools.whales_visit_read.execute({ sessionId: "s-read", limit: -5 }, VISIT_EXEC);
   assert.equal(negative.messages.length, 20, "非正数按默认 20 处理");
   assert.equal(negative.messages.at(-1).seq, 150);
 });
@@ -732,7 +742,7 @@ test("宿主工具：whales_visit_list 在 agents.list 抛错时回落到工作�
     workspaceRegistry: { list: () => [{ id: "w1", sessionIds: ["off-1", "live-1"] }] }
   });
 
-  const result = await tools.whales_visit_list.execute({}, {});
+  const result = await tools.whales_visit_list.execute({}, VISIT_EXEC);
   assert.equal(result.count, 2, "工作区里的两个会话都要列出来");
   assert.deepEqual(result.sessions.map((row) => row.sessionId).sort(), ["live-1", "off-1"]);
   const row = result.sessions.find((entry) => entry.sessionId === "live-1");
@@ -744,7 +754,7 @@ test("宿主工具：whales_visit_list 在 agents.list 抛错时回落到工作�
     agents: { list: () => [live], get: (id) => (id === "live-1" ? live : undefined) },
     workspaceRegistry: { list() { throw new Error("registry boom"); } }
   });
-  const second = await fallback.whales_visit_list.execute({}, {});
+  const second = await fallback.whales_visit_list.execute({}, VISIT_EXEC);
   assert.equal(second.count, 1, "工作区表抛错时至少还能列活会话");
 });
 
@@ -756,7 +766,7 @@ test("宿主工具：whales_visit_resume 拿不到 agent 时如实回 live:false
       resume: async () => ({ agent: undefined })
     }
   });
-  const offline = await tools.whales_visit_resume.execute({ sessionId: "off-1" }, {});
+  const offline = await tools.whales_visit_resume.execute({ sessionId: "off-1" }, VISIT_EXEC);
   assert.deepEqual(offline, { sessionId: "off-1", live: false, resumed: true }, "拿不到 agent 不能谎报 live:true");
   assertLossless(offline, "whales_visit_resume");
 
@@ -768,7 +778,7 @@ test("宿主工具：whales_visit_resume 拿不到 agent 时如实回 live:false
     }
   });
   await assert.rejects(
-    () => failing.whales_visit_resume.execute({ sessionId: "off-2" }, {}),
+    () => failing.whales_visit_resume.execute({ sessionId: "off-2" }, VISIT_EXEC),
     /resume boom/,
     "resume 拒绝必须以工具错误收场，不能静默成功"
   );
@@ -789,11 +799,11 @@ test("宿主工具：followup/steer 同步抛错时转成工具错误，不能�
     agents: { get: (id) => (id === "s-boom" ? agent : undefined), list: () => [agent] }
   });
   await assert.rejects(
-    () => tools.whales_visit_send.execute({ sessionId: "s-boom", message: "hi" }, {}),
+    () => tools.whales_visit_send.execute({ sessionId: "s-boom", message: "hi" }, VISIT_EXEC),
     /送信失败|inbox disposed/
   );
   await assert.rejects(
-    () => tools.whales_visit_send.execute({ sessionId: "s-boom", message: "hi", mode: "steer" }, {}),
+    () => tools.whales_visit_send.execute({ sessionId: "s-boom", message: "hi", mode: "steer" }, VISIT_EXEC),
     /送信失败|steer disposed/
   );
 });

@@ -906,27 +906,27 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
     assert.equal(tool.output.schema.type, "object", name + " 的 output.schema 必须是 object schema");
   }
 
-  const list = await registered.whales_visit_list.execute({}, {});
+  const list = await registered.whales_visit_list.execute({}, { agent: { id: "caller-client" } });
   assert.equal(list.sessions.length, 1);
   assert.equal(list.sessions[0].title, "隔壁的活", "标题取自 session/title 事件");
   assert.equal(list.sessions[0].workspaceId, "w1");
 
   // 2026-10-31 用户决定：默认「插话」（steer），排队要显式指定。
-  await registered.whales_visit_send.execute({ sessionId: "s2", message: "来串门" }, {});
+  await registered.whales_visit_send.execute({ sessionId: "s2", message: "来串门" }, { agent: { id: "caller-client" } });
   assert.equal(steers.length, 1, "省略 mode → 默认插话（steer）");
   assert.equal(steers[0].role, "user");
   assert.equal(steers[0].content[0].text, "来串门");
 
-  await registered.whales_visit_send.execute({ sessionId: "s2", message: "排队说", mode: "queue" }, {});
+  await registered.whales_visit_send.execute({ sessionId: "s2", message: "排队说", mode: "queue" }, { agent: { id: "caller-client" } });
   assert.equal(followups.length, 1, "显式 queue 走 followup");
   assert.equal(followups[0].content[0].text, "排队说");
 
-  const read = await registered.whales_visit_read.execute({ sessionId: "s2" }, {});
+  const read = await registered.whales_visit_read.execute({ sessionId: "s2" }, { agent: { id: "caller-client" } });
   assert.deepEqual(read.messages.map((row) => row.role), ["user", "assistant"]);
   assert.equal(read.messages[1].text, "看过了");
 
-  await assert.rejects(() => registered.whales_visit_send.execute({ sessionId: "nope", message: "x" }, {}), /不活着/);
-  await assert.rejects(() => registered.whales_visit_send.execute({ sessionId: "s2", message: "  " }, {}), /不能为空/);
+  await assert.rejects(() => registered.whales_visit_send.execute({ sessionId: "nope", message: "x" }, { agent: { id: "caller-client" } }), /不活着/);
+  await assert.rejects(() => registered.whales_visit_send.execute({ sessionId: "s2", message: "  " }, { agent: { id: "caller-client" } }), /不能为空/);
 });
 test("心情帧：每 3 个 tick 换一次表情，收工只走抱膝", async () => {
   const { pickMoodKey } = await testApiWithArt(["q", "mature"]);
@@ -998,15 +998,15 @@ test("串门：工具返回值必须是 lossless JSON（不能带 undefined 键�
     for (const [key, child] of Object.entries(value)) assertLossless(child, path + "." + key);
   }
 
-  const list = await registered.whales_visit_list.execute({}, {});
+  const list = await registered.whales_visit_list.execute({}, { agent: { id: "caller-client" } });
   assertLossless(list);
-  const read = await registered.whales_visit_read.execute({ sessionId: "s3" }, {});
+  const read = await registered.whales_visit_read.execute({ sessionId: "s3" }, { agent: { id: "caller-client" } });
   assertLossless(read);
 
   // 关键回归：等回复超时时不能把 { text: undefined } 带出来
   const sent = await registered.whales_visit_send.execute(
     { sessionId: "s3", message: "测试", waitForReply: true, timeoutMs: 1 },
-    {}
+    { agent: { id: "caller-client" } }
   );
   assert.equal(sent.timedOut, true, "1ms 预算必然超时");
   assert.ok(sent.reply, "超时也要回一个 reply 对象");
@@ -1418,7 +1418,7 @@ test("串门：默认插话（steer），config.visitMode=queue / visitSteer=fal
       on: () => () => {},
       effect: (fn) => { fn(); return () => {}; }
     }, config);
-    await registered.whales_visit_send.execute({ sessionId: "s9", message: "hi" }, {});
+    await registered.whales_visit_send.execute({ sessionId: "s9", message: "hi" }, { agent: { id: "caller-client" } });
     return calls;
   }
 
@@ -1997,9 +1997,10 @@ function m1Harness(host, fs, os, pathMod) {
   const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), "aw-m1-"));
   host.setProjectStorePathForTests(pathMod.join(dir, "projects.json"));
   host.setProposalStorePathForTests(pathMod.join(dir, "proposals.json"));
+  host.setHandoffsStorePathForTests(pathMod.join(dir, "handoffs.json"));
   const routes = [];
   const tools = {};
-  const live = new Set(["session-a", "session-b", "session-x", "session-y", "session-hang"]);
+  const live = new Set(["session-a", "session-b", "session-x", "session-y", "session-hang", "session-ok"]);
   const archived = new Set(["session-old"]);
   const followups = [];
   host.apply({
@@ -2498,7 +2499,7 @@ test("M3 P1 并发：同 expectedVersion 两个 PUT 只能一个成功；跨实�
   assert.equal(projectAfter.body.data.project.links.some((link) => (link.a === "session-a" && link.b === "session-b") || (link.a === "session-b" && link.b === "session-a")), true, "关联线不得被覆盖");
 });
 
-test("M4 访问闸：四个入口都走同一校验；双方都不在项目里保持旧行为", async () => {
+test("M4 访问闸：对话侧入口都走校验；HTTP 与派发按人处理并如实标 user；双方不在项目里保持旧行为", async () => {
   const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
   const fs = await import("node:fs");
   const os = await import("node:os");
@@ -2509,46 +2510,74 @@ test("M4 访问闸：四个入口都走同一校验；双方都不在项目里�
   const created = await post("/agent-whales/api/projects", { name: "闸", mainSessionId: "session-a" });
   const projectId = created.body.data.project.projectId;
   await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
-  await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-hang" });
+  await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-ok" });
 
-  // 入口 1：whales_visit_send —— 项目内 → 项目外，必须拒绝
+  // 1) 对话侧入口：visit_send —— 项目内 → 项目外，拒绝 40703
   await assert.rejects(
     () => h.tools.whales_visit_send.execute({ sessionId: "session-x", message: "hi" }, { agent: { id: "session-a" } }),
     /40703/,
     "visit_send：一方在项目里就必须同项目"
   );
-  // 入口 2：whales_visit_read —— 同一道闸
+  // 2) 对话侧入口：同项目、成员、但无关联线 → 40707
+  await assert.rejects(
+    () => h.tools.whales_visit_send.execute({ sessionId: "session-ok", message: "hi" }, { agent: { id: "session-b" } }),
+    /40707/,
+    "visit_send：同项目成员无关联线必须拒绝"
+  );
+  // 3) 对话侧入口：visit_read 与 send 同权
   await assert.rejects(
     () => h.tools.whales_visit_read.execute({ sessionId: "session-x" }, { agent: { id: "session-a" } }),
     /40703/,
     "visit_read：与 send 同权"
   );
-  // 入口 3：/api/send 带 fromSessionId —— 403 + 业务码
-  const apiSend = await h.raw("POST", "/agent-whales/api/send", { "x-whales-token": tk }, JSON.stringify({ sessionId: "session-x", text: "hi", fromSessionId: "session-a" }));
-  assert.equal(apiSend.status, 403, "api/send 必须被访问闸拒绝");
-  assert.match(apiSend.text, /40703/, "api/send 拒绝原因必须带稳定业务码");
+  // 4) P2：拿不到执行上下文身份 → 40301（不再静默跳过闸）
+  await assert.rejects(
+    () => h.tools.whales_visit_send.execute({ sessionId: "session-y", message: "hi" }, {}),
+    /40301/,
+    "对话侧入口必须有执行上下文身份"
+  );
 
-  // 入口 4：派发 —— 删掉关联线后，主对话派发给成员必须被拒（failed / access-denied / 40707）
+  // 5) HTTP /api/send：调用方是人 → 不过闸、200、来源标 user（带任何参数都不改变这一点）
+  const beforeHttp = h.followups.length;
+  const apiSend = await h.raw("POST", "/agent-whales/api/send", { "x-whales-token": tk }, JSON.stringify({ sessionId: "session-x", text: "hi", fromSessionId: "session-a", viaCard: "session-a" }));
+  assert.equal(apiSend.status, 200, "HTTP 发送按人处理，必须放行");
+  assert.equal(h.followups.length, beforeHttp + 1);
+  assert.equal(h.followups[h.followups.length - 1].source.kind, "user", "HTTP 发送必须如实标 user");
+  const handoffsFile = pathMod.join(h.dir, "handoffs.json");
+  const ledgerAfterHttp = JSON.parse(fs.readFileSync(handoffsFile, "utf8")).entries;
+  const httpEntry = ledgerAfterHttp[ledgerAfterHttp.length - 1];
+  assert.equal(httpEntry.from, "user", "账本 from 必须是 user");
+  assert.equal(httpEntry.kind, "visit");
+
+  // 6) 派发：人发起 → 不过闸、来源标 user、消息带任务引用（taskId/revision/projectId）
   const proposed = await h.tools.whales_propose_tasks.execute({ projectId, items: [{ key: "T1", title: "闸任务" }] }, { agent: { id: "session-a" } });
   const confirmed = await post(`/agent-whales/api/proposals/${proposed.proposalId}/confirm`, { leadSessionId: "session-a", version: 1, requestId: "g1" });
   const taskId = confirmed.body.data.created[0].taskId;
-  const assigned = await post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-b", expectedRevision: 1, requestId: "g2" });
+  const assigned = await post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-ok", expectedRevision: 1, requestId: "g2" });
   assert.equal(assigned.body.code, 200, JSON.stringify(assigned.body));
-  await h.call("DELETE", `/agent-whales/api/projects/${projectId}/links`, { "x-whales-token": tk }, JSON.stringify({ a: "session-a", b: "session-b" }));
+  await h.call("DELETE", `/agent-whales/api/projects/${projectId}/links`, { "x-whales-token": tk }, JSON.stringify({ a: "session-a", b: "session-ok" }));
   const dispatched = await post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "dispatch", requestId: "g3" });
   assert.equal(dispatched.body.code, 200, JSON.stringify(dispatched.body));
-  assert.equal(dispatched.body.data.dispatch.status, "failed");
-  assert.equal(dispatched.body.data.dispatch.reason, "access-denied");
-  assert.equal(dispatched.body.data.dispatch.code, 40707);
+  assert.equal(dispatched.body.data.dispatch.status, "sent", "UI 派发不受关联线影响，必须照常发出");
+  const dispatchMsg = h.followups[h.followups.length - 1];
+  assert.equal(dispatchMsg.source.kind, "user", "派发来源必须如实标 user");
+  assert.match(dispatchMsg.text, new RegExp(taskId), "派发消息必须带 taskId");
+  assert.match(dispatchMsg.text, /revision \d+/, "派发消息必须带 revision");
+  assert.match(dispatchMsg.text, new RegExp(projectId), "派发消息必须带 projectId");
+  const ledgerAfterDispatch = JSON.parse(fs.readFileSync(handoffsFile, "utf8")).entries;
+  const dispatchEntry = ledgerAfterDispatch[ledgerAfterDispatch.length - 1];
+  assert.equal(dispatchEntry.kind, "dispatch");
+  assert.equal(dispatchEntry.from, "user");
+  assert.equal(dispatchEntry.taskId, taskId);
 
-  // 旧行为：双方都不在任何项目里 → 照常发送（不拦）
+  // 7) 旧行为：双方都不在任何项目里 → 照常发送、来源真实（dialogue 侧）
   const before = h.followups.length;
   const legacy = await h.tools.whales_visit_send.execute({ sessionId: "session-y", message: "旧串门" }, { agent: { id: "session-x" } });
   assert.equal(legacy.accepted, true, "非项目会话之间的串门必须保持旧行为");
   assert.equal(h.followups.length, before + 1, "旧串门必须真的投递");
-  assert.equal(h.followups[h.followups.length - 1].source.senderSessionId, "session-x", "消息必须带真实来源");
+  assert.equal(h.followups[h.followups.length - 1].source.kind, "agent-message");
+  assert.equal(h.followups[h.followups.length - 1].source.senderSessionId, "session-x", "对话发送必须带真实来源");
 });
-
 test("M4 P2 锁粒度：dispatch 挂起期间简报写入不被阻塞", async () => {
   const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
   const fs = await import("node:fs");
@@ -2576,4 +2605,29 @@ test("M4 P2 锁粒度：dispatch 挂起期间简报写入不被阻塞", async ()
   const dispatched = await dispatchPromise;
   assert.equal(dispatched.body.code, 200, JSON.stringify(dispatched.body));
   assert.equal(dispatched.body.data.dispatch.status, "unknown", "挂起应超时标 unknown");
+});
+
+test("M4 P2：store 损坏后仍按最后一次成功快照判定项目边界", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const created = await post("/agent-whales/api/projects", { name: "降级", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+  // 先成功读一次，进入 last-good 快照
+  await h.call("GET", `/agent-whales/api/projects/${projectId}`);
+  // 把 projects.json 写坏
+  fs.writeFileSync(pathMod.join(h.dir, "projects.json"), "not-json", "utf8");
+  // 降级期间：对话侧闸仍按快照判定（项目内 → 项目外 仍然 40703）
+  await assert.rejects(
+    () => h.tools.whales_visit_send.execute({ sessionId: "session-x", message: "hi" }, { agent: { id: "session-a" } }),
+    /40703/,
+    "降级期间不能把项目边界全放开"
+  );
+  // 写操作仍是 503（不覆盖损坏文件）
+  const write = await post("/agent-whales/api/projects", { name: "另一个", mainSessionId: "session-y" });
+  assert.equal(write.status, 503, "降级期间写操作必须 503");
 });
