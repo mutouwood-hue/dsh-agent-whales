@@ -896,7 +896,7 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
     effect: (run) => { run(); return () => {}; }
   });
 
-  assert.deepEqual(Object.keys(registered).sort(), ["whales_propose_tasks", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send"]);
+  assert.deepEqual(Object.keys(registered).sort(), ["whales_brief_read", "whales_brief_write", "whales_propose_tasks", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send"]);
   assert.equal(typeof registered.whales_visit_send.output.render, "function", "工具必须带 output.render");
   // 网关按 OpenAI function calling 校验：parameters 必须是 { type: "object", properties } 的 JSON Schema。
   // 传「属性表」或空对象会让整轮请求 400（真实事故：whales_visit_list 变成 type: null）。
@@ -2349,4 +2349,77 @@ test("P1 提案身份：冒充 leadSessionId 被拒、非主对话带 projectId 
     /40301/,
     "没有执行上下文身份时必须拒绝"
   );
+});
+test("M3 简报：项目简报 CAS、对话简报仅本人写、跨读要关联线", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const put = (url, body) => h.call("PUT", url, { "x-whales-token": tk }, JSON.stringify(body));
+
+  const created = await post("/agent-whales/api/projects", { name: "简报", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+
+  // 1) 项目简报：默认 v1；CAS 成功 +1；陈旧版本 → 40902
+  const initial = await h.call("GET", `/agent-whales/api/projects/${projectId}/brief`);
+  assert.equal(initial.body.data.brief.version, 1);
+  const updated = await put(`/agent-whales/api/projects/${projectId}/brief`, { expectedVersion: 1, goal: "上线体检", decisions: ["先体检"] });
+  assert.equal(updated.body.code, 200, JSON.stringify(updated.body));
+  assert.equal(updated.body.data.brief.version, 2);
+  const stale = await put(`/agent-whales/api/projects/${projectId}/brief`, { expectedVersion: 1, goal: "旧版本" });
+  assert.equal(stale.body.code, 40902, "陈旧版本必须 40902");
+
+  // 2) 人代写对话简报：updatedBy=user 且标 proxy
+  const proxyWrite = await put("/agent-whales/api/briefs/session-b", { duty: "负责浏览器半边", conclusions: ["已验证"] });
+  assert.equal(proxyWrite.body.code, 200, JSON.stringify(proxyWrite.body));
+  assert.equal(proxyWrite.body.data.brief.updatedBy, "user");
+  assert.equal(proxyWrite.body.data.brief.proxy, true, "人代写必须标记 proxy");
+  assert.equal(proxyWrite.body.data.brief.version, 1);
+
+  // 3) 对话工具：只能写自己；项目简报只有主对话能写
+  const briefWrite = h.tools.whales_brief_write;
+  await assert.rejects(
+    () => briefWrite.execute({ projectId, goal: "member 写项目简报" }, { agent: { id: "session-b" } }),
+    /40706/,
+    "member 不能写项目简报"
+  );
+  const own = await briefWrite.execute({ duty: "会话 b 自己的职责" }, { agent: { id: "session-b" } });
+  assert.equal(own.brief.version, 2, "本轮写入应在上一次代写之后 +1");
+  assert.equal(own.brief.updatedBy, "session-b");
+
+  // 4) 跨读：加入前（不是成员）→ 40703；加入后自动与主对话建线 → 放行；
+  //    删掉关联线后再读 → 40707（同项目但无关联）。
+  const notMemberYet = await h.call("GET", "/agent-whales/api/briefs/session-a/peer?peer=session-b");
+  assert.equal(notMemberYet.body.code, 40703, JSON.stringify(notMemberYet.body));
+  const joined = await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+  assert.equal(joined.body.code, 200, JSON.stringify(joined.body));
+  const allowed = await h.call("GET", "/agent-whales/api/briefs/session-a/peer?peer=session-b");
+  assert.equal(allowed.body.code, 200, JSON.stringify(allowed.body));
+  assert.equal(allowed.body.data.readerSessionId, "session-b");
+  const removed = await h.call("DELETE", `/agent-whales/api/projects/${projectId}/links`, { "x-whales-token": tk }, JSON.stringify({ a: "session-a", b: "session-b" }));
+  assert.equal(removed.body.code, 200, JSON.stringify(removed.body));
+  const denied = await h.call("GET", "/agent-whales/api/briefs/session-a/peer?peer=session-b");
+  assert.equal(denied.body.code, 40707, JSON.stringify(denied.body));
+
+  // 5) 工具读自己永远放行；读别的项目成员在无关联时被拒
+  const selfRead = await h.tools.whales_brief_read.execute({}, { agent: { id: "session-b" } });
+  assert.equal(selfRead.target, "conversation");
+  assert.equal(selfRead.brief.sessionId, "session-b");
+});
+
+test("P2 提案 schema：leadSessionId 可选（身份以执行上下文为准）", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tool = h.tools.whales_propose_tasks;
+  assert.ok(tool, "提案工具必须注册");
+  assert.deepEqual(tool.parameters.required, ["items"], "leadSessionId 必须改成可选");
+  assert.equal(tool.parameters.properties.leadSessionId !== undefined, true, "字段仍保留（可选）");
+  assert.match(tool.parameters.properties.leadSessionId.description, /可省略/, "description 必须写明可省略");
+  assert.match(tool.parameters.properties.leadSessionId.description, /必须等于当前会话/, "description 必须写明填了要一致");
 });
