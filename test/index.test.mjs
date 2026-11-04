@@ -114,7 +114,7 @@ function callRoute(route, request) {
  */
 function mountControlHost(config) {
   const registry = new Map();
-  const stats = { registerCalls: 0, disposeCalls: 0 };
+  const stats = { registerCalls: 0, disposeCalls: 0, registerNames: [], disposeNames: [] };
   const routes = [];
   host.apply({
     get(name) {
@@ -122,9 +122,11 @@ function mountControlHost(config) {
         return {
           register(definition) {
             stats.registerCalls += 1;
+            stats.registerNames.push(definition.name);
             registry.set(definition.name, definition);
             return () => {
               stats.disposeCalls += 1;
+              stats.disposeNames.push(definition.name);
               if (registry.get(definition.name) === definition) registry.delete(definition.name);
             };
           }
@@ -204,6 +206,11 @@ function postVisitTools(route, options = {}) {
 
 function visitToolNames(registry) {
   return [...registry.keys()].filter((name) => name.startsWith("whales_visit_")).sort();
+}
+
+/** 只统计串门工具的注册/注销次数（提案工具不归串门开关管）。 */
+function visitOnly(names) {
+  return names.filter((name) => name.startsWith("whales_visit_"));
 }
 
 // ── 1. activityPayload：工具活动快照 ───────────────────────────────────────
@@ -884,8 +891,8 @@ test("串门工具开关：无 token / 错 token 一律 403，且失败调用不
   assert.equal(emptyToken.status, 403, "空 token 必须 403");
 
   assert.deepEqual(visitToolNames(registry), KNOWN_TOOLS.slice().sort(), "403 之后 4 个工具必须原样在册");
-  assert.equal(stats.registerCalls, 4, "403 不得触发注册");
-  assert.equal(stats.disposeCalls, 0, "403 不得触发注销");
+  assert.equal(visitOnly(stats.registerNames).length, 4, "403 不得触发串门工具注册");
+  assert.equal(visitOnly(stats.disposeNames).length, 0, "403 不得触发串门工具注销");
   assert.equal(getActivity(route).visitTools, true, "403 不得改变开关真相");
 
   const wrongMethod = await postVisitTools(route, { token, method: "GET" });
@@ -914,15 +921,16 @@ test("串门工具开关：{enabled:false} → 204 且 4 个工具全部注销�
   const turnedOff = await postVisitTools(route, { token, body: JSON.stringify({ enabled: false }) });
   assert.equal(turnedOff.status, 204);
   assert.deepEqual(visitToolNames(registry), [], "关闭后串门工具必须从注册表消失");
-  assert.equal(stats.registerCalls, 4, "关闭不应重复注册");
-  assert.equal(stats.disposeCalls, 4, "关闭必须逐个注销");
+  assert.ok(registry.has("whales_propose_tasks"), "提案工具不受串门开关控制，关闭后必须仍在");
+  assert.equal(visitOnly(stats.registerNames).length, 4, "关闭不应重复注册");
+  assert.equal(visitOnly(stats.disposeNames).length, 4, "关闭必须逐个注销");
   assert.equal(getActivity(route).visitTools, false, "GET 必须立刻反映关闭状态");
 
   const turnedOn = await postVisitTools(route, { token, body: JSON.stringify({ enabled: true }) });
   assert.equal(turnedOn.status, 204);
   assert.deepEqual(visitToolNames(registry), KNOWN_TOOLS.slice().sort(), "开启后 4 个工具必须回来");
-  assert.equal(stats.registerCalls, 8, "重开只注册一次");
-  assert.equal(stats.disposeCalls, 4, "重开不应额外注销");
+  assert.equal(visitOnly(stats.registerNames).length, 8, "重开只注册一次");
+  assert.equal(visitOnly(stats.disposeNames).length, 4, "重开不应额外注销");
   for (const [name, tool] of registry) {
     assert.equal(tool.parameters.type, "object", name + " 重注册后 parameters 仍是 object schema");
     assert.equal(tool.parameters.properties !== undefined, true, name + " 必须带 properties");
@@ -935,27 +943,27 @@ test("串门工具开关：{enabled:false} → 204 且 4 个工具全部注销�
 test("串门工具开关：连续 toggle 幂等，不产生重复注册/重复注销", async () => {
   const { registry, stats, route } = mountControlHost();
   const token = getActivity(route).controlToken;
-  assert.equal(stats.registerCalls, 4);
-  assert.equal(stats.disposeCalls, 0);
+  assert.equal(visitOnly(stats.registerNames).length, 4);
+  assert.equal(visitOnly(stats.disposeNames).length, 0);
 
   await postVisitTools(route, { token, body: JSON.stringify({ enabled: false }) });
   await postVisitTools(route, { token, body: JSON.stringify({ enabled: false }) });
-  assert.equal(stats.disposeCalls, 4, "重复关闭不得重复注销");
+  assert.equal(visitOnly(stats.disposeNames).length, 4, "重复关闭不得重复注销");
   assert.deepEqual(visitToolNames(registry), []);
 
   await postVisitTools(route, { token, body: JSON.stringify({ enabled: true }) });
   await postVisitTools(route, { token, body: JSON.stringify({ enabled: true }) });
-  assert.equal(stats.registerCalls, 8, "重复开启不得重复注册");
+  assert.equal(visitOnly(stats.registerNames).length, 8, "重复开启不得重复注册");
   assert.deepEqual(visitToolNames(registry), KNOWN_TOOLS.slice().sort());
 
   await postVisitTools(route, { token, body: JSON.stringify({ enabled: false }) });
-  assert.equal(stats.disposeCalls, 8, "再关一次恰好再注销一轮");
+  assert.equal(visitOnly(stats.disposeNames).length, 8, "再关一次恰好再注销一轮");
 });
 
 test("串门工具开关：config.visitTools=false 时初始不注册，POST 仍可开启", async () => {
   const { registry, stats, route } = mountControlHost({ visitTools: false });
   assert.deepEqual(visitToolNames(registry), [], "初始化关闭时一个工具都不该注册");
-  assert.equal(stats.registerCalls, 0);
+  assert.equal(visitOnly(stats.registerNames).length, 0);
   let snapshot = getActivity(route);
   assert.equal(snapshot.visitTools, false);
   assert.equal(typeof snapshot.controlToken, "string");
@@ -1405,7 +1413,9 @@ test("宿主 apply：服务晚到时用 ctx.inject 等就绪再注册，而不�
   assert.equal(injectHost.state.sections.length, 0, "服务没就绪前不得注册提示段");
 
   flushInjected(injectHost);
-  assert.equal(Object.keys(injectHost.state.tools).length, 4, "tools 就绪后四个工具必须全部注册");
+  const injectedToolNames = Object.keys(injectHost.state.tools);
+  assert.equal(injectedToolNames.filter((name) => name.startsWith("whales_visit_")).length, 4, "tools 就绪后四个串门工具必须全部注册");
+  assert.ok(injectedToolNames.includes("whales_propose_tasks"), "tools 就绪后提案工具也必须注册");
   assert.equal(injectHost.state.routes.length, 1, "webServer 就绪后路由必须注册");
   assert.equal(injectHost.state.sections.length, 1, "systemPrompt 就绪后策略段必须注册");
   assert.equal(injectHost.state.sections[0].name, "agent-whales/team-policy");
@@ -1445,7 +1455,9 @@ test("宿主 apply：ctx.inject 抛错时退回立即注册，不把异常抛给
     },
   };
   assert.doesNotThrow(() => host.apply(ctx));
-  assert.equal(Object.keys(registered).length, 4, "inject 不可用时必须退化为立即注册");
+  const fallbackNames = Object.keys(registered);
+  assert.equal(fallbackNames.filter((name) => name.startsWith("whales_visit_")).length, 4, "inject 不可用时四个串门工具必须退化为立即注册");
+  assert.ok(fallbackNames.includes("whales_propose_tasks"), "inject 不可用时提案工具也要注册");
   assert.equal(routes.length, 1, "inject 不可用时路由也要立即注册");
 });
 
@@ -1454,7 +1466,7 @@ test("宿主 apply：服务重载（作用域释放 + 重新注入）不重复�
   host.apply(injectHost.ctx);
   flushInjected(injectHost);
   const toolCount = Object.keys(injectHost.state.tools).length;
-  assert.equal(toolCount, 4);
+  assert.equal(toolCount, 5, "4 个串门工具 + 提案工具");
   assert.equal(injectHost.state.routes.length, 1);
 
   disposeInjected(injectHost);
