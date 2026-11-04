@@ -2390,22 +2390,34 @@ test("M3 简报：项目简报 CAS、对话简报仅本人写、跨读要关联�
   assert.equal(own.brief.version, 2, "本轮写入应在上一次代写之后 +1");
   assert.equal(own.brief.updatedBy, "session-b");
 
-  // 4) 跨读：加入前（不是成员）→ 40703；加入后自动与主对话建线 → 放行；
-  //    删掉关联线后再读 → 40707（同项目但无关联）。
-  const notMemberYet = await h.call("GET", "/agent-whales/api/briefs/session-a/peer?peer=session-b");
-  assert.equal(notMemberYet.body.code, 40703, JSON.stringify(notMemberYet.body));
+  // 4) HTTP 读取：调用方是人（单用户），本来就能读所有简报；previewAs 只做展示，不是鉴权
+  const httpRead = await h.call("GET", "/agent-whales/api/briefs/session-a");
+  assert.equal(httpRead.body.code, 200, JSON.stringify(httpRead.body));
+  const preview = await h.call("GET", "/agent-whales/api/briefs/session-a?previewAs=session-b");
+  assert.equal(preview.body.code, 200);
+  assert.equal(preview.body.data.previewAs, "session-b", "previewAs 只回展示字段");
+
+  // 5) 跨读权限只在工具侧（exec 身份）：非成员 → 40703；加入建线后可读；删线后 40707
+  const briefRead = h.tools.whales_brief_read;
+  await assert.rejects(
+    () => briefRead.execute({ sessionId: "session-a" }, { agent: { id: "session-b" } }),
+    /40703/,
+    "非项目成员不能跨读"
+  );
   const joined = await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
   assert.equal(joined.body.code, 200, JSON.stringify(joined.body));
-  const allowed = await h.call("GET", "/agent-whales/api/briefs/session-a/peer?peer=session-b");
-  assert.equal(allowed.body.code, 200, JSON.stringify(allowed.body));
-  assert.equal(allowed.body.data.readerSessionId, "session-b");
+  const allowed = await briefRead.execute({ sessionId: "session-a" }, { agent: { id: "session-b" } });
+  assert.equal(allowed.brief.sessionId, "session-a");
   const removed = await h.call("DELETE", `/agent-whales/api/projects/${projectId}/links`, { "x-whales-token": tk }, JSON.stringify({ a: "session-a", b: "session-b" }));
   assert.equal(removed.body.code, 200, JSON.stringify(removed.body));
-  const denied = await h.call("GET", "/agent-whales/api/briefs/session-a/peer?peer=session-b");
-  assert.equal(denied.body.code, 40707, JSON.stringify(denied.body));
+  await assert.rejects(
+    () => briefRead.execute({ sessionId: "session-a" }, { agent: { id: "session-b" } }),
+    /40707/,
+    "同项目但无关联线不能跨读"
+  );
 
-  // 5) 工具读自己永远放行；读别的项目成员在无关联时被拒
-  const selfRead = await h.tools.whales_brief_read.execute({}, { agent: { id: "session-b" } });
+  // 6) 工具读自己永远放行
+  const selfRead = await briefRead.execute({}, { agent: { id: "session-b" } });
   assert.equal(selfRead.target, "conversation");
   assert.equal(selfRead.brief.sessionId, "session-b");
 });
@@ -2422,4 +2434,56 @@ test("P2 提案 schema：leadSessionId 可选（身份以执行上下文为准�
   assert.equal(tool.parameters.properties.leadSessionId !== undefined, true, "字段仍保留（可选）");
   assert.match(tool.parameters.properties.leadSessionId.description, /可省略/, "description 必须写明可省略");
   assert.match(tool.parameters.properties.leadSessionId.description, /必须等于当前会话/, "description 必须写明填了要一致");
+});
+
+
+test("M3 P1 并发：同 expectedVersion 两个 PUT 只能一个成功；跨实体并发不丢更新", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const put = (url, body) => h.call("PUT", url, { "x-whales-token": tk }, JSON.stringify(body));
+
+  const created = await post("/agent-whales/api/projects", { name: "并发", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+
+  // ① 同一个 expectedVersion 并发两次 PUT：只能一个成功，另一个 40902
+  const [first, second] = await Promise.all([
+    put(`/agent-whales/api/projects/${projectId}/brief`, { expectedVersion: 1, goal: "A" }),
+    put(`/agent-whales/api/projects/${projectId}/brief`, { expectedVersion: 1, goal: "B" })
+  ]);
+  const codes = [first.body.code, second.body.code].sort();
+  assert.deepEqual(codes, [200, 40902], "CAS 必须只有一个成功，实际 " + JSON.stringify(codes));
+  const afterCas = await h.call("GET", `/agent-whales/api/projects/${projectId}/brief`);
+  assert.equal(afterCas.body.data.brief.version, 2, "只应成功一次 → v2");
+
+  // ② 并发「加成员 + 写简报」：两处修改都要保留
+  const [, briefWrite] = await Promise.all([
+    post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" }),
+    put(`/agent-whales/api/projects/${projectId}/brief`, { expectedVersion: 2, goal: "并发简报" })
+  ]);
+  assert.equal(briefWrite.body.code, 200, JSON.stringify(briefWrite.body));
+  const afterBoth = await h.call("GET", `/agent-whales/api/projects/${projectId}`);
+  assert.equal(afterBoth.body.data.project.members.some((m) => m.sessionId === "session-b"), true, "成员修改不得被覆盖");
+  assert.equal(afterBoth.body.data.project.brief.goal, "并发简报", "简报修改不得被覆盖");
+
+  // ③ 并发「建关联 + 改任务」：两处修改都要保留
+  const proposed = await h.tools.whales_propose_tasks.execute({ projectId, items: [{ key: "T1", title: "并发任务" }] }, { agent: { id: "session-a" } });
+  const confirmed = await post(`/agent-whales/api/proposals/${proposed.proposalId}/confirm`, { leadSessionId: "session-a", version: 1, requestId: "cc1" });
+  const taskId = confirmed.body.data.created[0].taskId;
+  await h.call("DELETE", `/agent-whales/api/projects/${projectId}/links`, { "x-whales-token": tk }, JSON.stringify({ a: "session-a", b: "session-b" }));
+  const [linkWrite, assignWrite] = await Promise.all([
+    post(`/agent-whales/api/projects/${projectId}/links`, { a: "session-a", b: "session-b" }),
+    post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-b", expectedRevision: 1, requestId: "cc2" })
+  ]);
+  assert.equal(linkWrite.body.code, 200, JSON.stringify(linkWrite.body));
+  assert.equal(assignWrite.body.code, 200, JSON.stringify(assignWrite.body));
+  const afterTask = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
+  const taskAfter = afterTask.body.data.tasks.find((task) => task.taskId === taskId);
+  assert.equal(taskAfter.ownerSessionId, "session-b", "任务改派不得被覆盖");
+  const projectAfter = await h.call("GET", `/agent-whales/api/projects/${projectId}`);
+  assert.equal(projectAfter.body.data.project.links.some((link) => (link.a === "session-a" && link.b === "session-b") || (link.a === "session-b" && link.b === "session-a")), true, "关联线不得被覆盖");
 });
