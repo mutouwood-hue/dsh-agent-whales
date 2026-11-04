@@ -1999,8 +1999,9 @@ function m1Harness(host, fs, os, pathMod) {
   host.setProposalStorePathForTests(pathMod.join(dir, "proposals.json"));
   const routes = [];
   const tools = {};
-  const live = new Set(["session-a", "session-b"]);
+  const live = new Set(["session-a", "session-b", "session-x", "session-y", "session-hang"]);
   const archived = new Set(["session-old"]);
+  const followups = [];
   host.apply({
     get: (name) => {
       if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
@@ -2010,8 +2011,13 @@ function m1Harness(host, fs, os, pathMod) {
           id,
           status: "running",
           session: { events: [] },
-          followup: () => {
+          followup: (message) => {
+            followups.push({ id: id, text: message && message.content && message.content[0] ? message.content[0].text : "", source: message && message.source });
+            if (id === "session-hang") return new Promise(() => {});
             if (id === "session-b") throw new Error("timed out while dispatching");
+          },
+          steer: (message) => {
+            followups.push({ id: id, text: message && message.content && message.content[0] ? message.content[0].text : "", source: message && message.source, steer: true });
           }
         } : undefined),
         list: () => []
@@ -2049,7 +2055,11 @@ function m1Harness(host, fs, os, pathMod) {
     return { status: res.statusCode, body: json };
   }
   let token;
-  return { dir, tools, call, async token() {
+  return { dir, tools, call, followups, async raw(method, url, headers, body) {
+    const res = fakeRes();
+    await route.handler(fakeReq(method, url, headers, body), res);
+    return { status: res.statusCode, text: res.body };
+  }, async token() {
     if (token === undefined) {
       const res = await call("GET", "/agent-whales/api/activity");
       token = res.body.controlToken;
@@ -2486,4 +2496,84 @@ test("M3 P1 并发：同 expectedVersion 两个 PUT 只能一个成功；跨实�
   assert.equal(taskAfter.ownerSessionId, "session-b", "任务改派不得被覆盖");
   const projectAfter = await h.call("GET", `/agent-whales/api/projects/${projectId}`);
   assert.equal(projectAfter.body.data.project.links.some((link) => (link.a === "session-a" && link.b === "session-b") || (link.a === "session-b" && link.b === "session-a")), true, "关联线不得被覆盖");
+});
+
+test("M4 访问闸：四个入口都走同一校验；双方都不在项目里保持旧行为", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const created = await post("/agent-whales/api/projects", { name: "闸", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+  await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+  await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-hang" });
+
+  // 入口 1：whales_visit_send —— 项目内 → 项目外，必须拒绝
+  await assert.rejects(
+    () => h.tools.whales_visit_send.execute({ sessionId: "session-x", message: "hi" }, { agent: { id: "session-a" } }),
+    /40703/,
+    "visit_send：一方在项目里就必须同项目"
+  );
+  // 入口 2：whales_visit_read —— 同一道闸
+  await assert.rejects(
+    () => h.tools.whales_visit_read.execute({ sessionId: "session-x" }, { agent: { id: "session-a" } }),
+    /40703/,
+    "visit_read：与 send 同权"
+  );
+  // 入口 3：/api/send 带 fromSessionId —— 403 + 业务码
+  const apiSend = await h.raw("POST", "/agent-whales/api/send", { "x-whales-token": tk }, JSON.stringify({ sessionId: "session-x", text: "hi", fromSessionId: "session-a" }));
+  assert.equal(apiSend.status, 403, "api/send 必须被访问闸拒绝");
+  assert.match(apiSend.text, /40703/, "api/send 拒绝原因必须带稳定业务码");
+
+  // 入口 4：派发 —— 删掉关联线后，主对话派发给成员必须被拒（failed / access-denied / 40707）
+  const proposed = await h.tools.whales_propose_tasks.execute({ projectId, items: [{ key: "T1", title: "闸任务" }] }, { agent: { id: "session-a" } });
+  const confirmed = await post(`/agent-whales/api/proposals/${proposed.proposalId}/confirm`, { leadSessionId: "session-a", version: 1, requestId: "g1" });
+  const taskId = confirmed.body.data.created[0].taskId;
+  const assigned = await post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-b", expectedRevision: 1, requestId: "g2" });
+  assert.equal(assigned.body.code, 200, JSON.stringify(assigned.body));
+  await h.call("DELETE", `/agent-whales/api/projects/${projectId}/links`, { "x-whales-token": tk }, JSON.stringify({ a: "session-a", b: "session-b" }));
+  const dispatched = await post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "dispatch", requestId: "g3" });
+  assert.equal(dispatched.body.code, 200, JSON.stringify(dispatched.body));
+  assert.equal(dispatched.body.data.dispatch.status, "failed");
+  assert.equal(dispatched.body.data.dispatch.reason, "access-denied");
+  assert.equal(dispatched.body.data.dispatch.code, 40707);
+
+  // 旧行为：双方都不在任何项目里 → 照常发送（不拦）
+  const before = h.followups.length;
+  const legacy = await h.tools.whales_visit_send.execute({ sessionId: "session-y", message: "旧串门" }, { agent: { id: "session-x" } });
+  assert.equal(legacy.accepted, true, "非项目会话之间的串门必须保持旧行为");
+  assert.equal(h.followups.length, before + 1, "旧串门必须真的投递");
+  assert.equal(h.followups[h.followups.length - 1].source.senderSessionId, "session-x", "消息必须带真实来源");
+});
+
+test("M4 P2 锁粒度：dispatch 挂起期间简报写入不被阻塞", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const put = (url, body) => h.call("PUT", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const created = await post("/agent-whales/api/projects", { name: "锁粒度", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+  await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-hang" });
+  const proposed = await h.tools.whales_propose_tasks.execute({ projectId, items: [{ key: "T1", title: "挂起任务" }] }, { agent: { id: "session-a" } });
+  const confirmed = await post(`/agent-whales/api/proposals/${proposed.proposalId}/confirm`, { leadSessionId: "session-a", version: 1, requestId: "h1" });
+  const taskId = confirmed.body.data.created[0].taskId;
+  await post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-hang", expectedRevision: 1, requestId: "h2" });
+
+  const startedAt = Date.now();
+  const dispatchPromise = post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "dispatch", requestId: "h3", dispatchTimeoutMs: 300 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const briefWrite = await put(`/agent-whales/api/projects/${projectId}/brief`, { expectedVersion: 1, goal: "挂起期间写入" });
+  const briefMs = Date.now() - startedAt;
+  assert.equal(briefWrite.body.code, 200, JSON.stringify(briefWrite.body));
+  assert.ok(briefMs < 250, "简报写入不得等待派发超时，实际 " + briefMs + "ms");
+  const dispatched = await dispatchPromise;
+  assert.equal(dispatched.body.code, 200, JSON.stringify(dispatched.body));
+  assert.equal(dispatched.body.data.dispatch.status, "unknown", "挂起应超时标 unknown");
 });
