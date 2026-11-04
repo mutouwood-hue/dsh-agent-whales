@@ -1469,3 +1469,101 @@ test("计数只算真正在跑的：启动中单独标注，卡住超时降级�
   delete provisioningSince[STUCK_A];
   delete provisioningSince[STUCK_B];
 });
+test("图形面板：分层布局、偏移叠加与脏数据兜底", () => {
+  const { graphLayout } = testApi();
+  const rows = [
+    { whale: { key: "lead", label: "Lead", phase: "running" }, depth: 0 },
+    { whale: { key: "a", label: "A", phase: "running" }, depth: 1, parent: "lead" },
+    { whale: { key: "b", label: "B", phase: "idle" }, depth: 1, parent: "lead" }
+  ];
+  const layout = graphLayout(rows);
+  assert.equal(layout.nodes.length, 3);
+  assert.equal(layout.edges.length, 2, "每个有父节点的都画一条边");
+  assert.equal(layout.nodes[0].y, 0);
+  assert.equal(layout.nodes[1].y, 84, "第二层下移一行");
+  assert.equal(layout.nodes[1].parent, "lead");
+  assert.ok(layout.width >= 248, "两层各两个节点时画布够宽");
+  assert.equal(layout.nodes[2].phase, "idle", "idle 保留给面板做灰显");
+
+  const moved = graphLayout(rows, { a: { x: 40, y: -10 } });
+  const a = moved.nodes.find((n) => n.key === "a");
+  const base = layout.nodes.find((n) => n.key === "a");
+  assert.equal(a.x, base.x + 40, "拖动偏移叠加在自动布局上");
+  assert.equal(a.y, base.y - 10);
+
+  assert.equal(graphLayout(null).nodes.length, 0, "空数据不炸");
+  const deep = graphLayout([{ whale: { key: "x" }, depth: 99, parent: "nope" }]);
+  assert.equal(deep.nodes[0].depth, 8, "过深夹到 8");
+  assert.equal(deep.edges.length, 0, "父节点不在图里就不画边");
+});
+
+test("图形面板：POST /api/send 校验 token 并把话投给 agent", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const routes = [];
+  const delivered = [];
+  const agent = {
+    id: "s-live",
+    status: "running",
+    session: { events: [] },
+    followup(message) { delivered.push(message); },
+    steer(message) { delivered.push(message); }
+  };
+  host.apply({
+    get: (name) => {
+      if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
+      if (name === "agents") return { get: (id) => (id === "s-live" ? agent : undefined) };
+      return undefined;
+    },
+    on: () => () => {},
+    effect: (run) => { run(); return () => {}; }
+  });
+  const route = routes.find((item) => item && typeof item.handler === "function");
+  assert.ok(route, "必须注册了 /agent-whales/api 前缀路由");
+
+  function fakeReq(method, url, headers, body) {
+    const listeners = {};
+    const req = {
+      method,
+      url,
+      headers: headers || {},
+      on(event, fn) {
+        (listeners[event] = listeners[event] || []).push(fn);
+        return req;
+      }
+    };
+    setTimeout(() => {
+      if (body !== undefined) (listeners.data || []).forEach((fn) => fn(Buffer.from(body)));
+      (listeners.end || []).forEach((fn) => fn());
+    }, 0);
+    return req;
+  }
+  function fakeRes() {
+    return {
+      statusCode: 0,
+      headers: {},
+      body: "",
+      setHeader(key, value) { this.headers[key] = value; },
+      end(chunk) { if (chunk !== undefined) this.body += String(chunk); }
+    };
+  }
+
+  const probe = fakeRes();
+  await route.handler(fakeReq("GET", "/agent-whales/api/activity", {}, undefined), probe);
+  const token = JSON.parse(probe.body).controlToken;
+  assert.equal(typeof token, "string");
+
+  const denied = fakeRes();
+  await route.handler(fakeReq("POST", "/agent-whales/api/send", {}, JSON.stringify({ sessionId: "s-live", text: "hi" })), denied);
+  assert.equal(denied.statusCode, 403, "没有 token 必须 403");
+
+  const ok = fakeRes();
+  await route.handler(fakeReq("POST", "/agent-whales/api/send", { "x-whales-token": token }, JSON.stringify({ sessionId: "s-live", text: "来串门", mode: "queue" })), ok);
+  assert.equal(ok.statusCode, 200);
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].content[0].text, "来串门");
+  assert.deepEqual(JSON.parse(ok.body), { ok: true, sessionId: "s-live", mode: "queue" });
+
+  const missing = fakeRes();
+  await route.handler(fakeReq("POST", "/agent-whales/api/send", { "x-whales-token": token }, JSON.stringify({ sessionId: "s-live", text: "  " })), missing);
+  assert.equal(missing.statusCode, 400, "空文本必须 400");
+});
