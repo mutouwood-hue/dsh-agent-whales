@@ -1894,3 +1894,266 @@ test("提案：确认按拓扑序创建任务；版本不符拒绝；重放不�
   await route.handler(fakeReq("POST", "/agent-whales/api/proposals/p1/confirm", { "x-whales-token": token }, JSON.stringify({ leadSessionId: lead.id, version: 2, requestId: "c2" })), again);
   assert.equal(created.length, 2, "已确认的版本不得重复创建");
 });
+test("提案：确认后锁定；部分失败可补建；前置未建标 blocked；旧提案不再接受新版本", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), "aw-lock-"));
+  const storeFile = pathMod.join(dir, "proposals.json");
+  host.setProposalStorePathForTests(storeFile);
+
+  const routes = [];
+  const created = [];
+  let failNext = false;
+  const lead = { id: "lead-session", status: "running", session: { events: [] } };
+  const tools = {};
+  const teams = {
+    tryMembership: () => ({ root: lead, id: "team-1", role: "lead", name: "lead" }),
+    listTasks: () => [],
+    listMembers: () => [],
+    createTask: async (_caller, request) => {
+      if (request.subject === "B" && failNext) { failNext = false; throw new Error("boom: cannot create"); }
+      created.push(request.subject);
+      return { id: "task-" + (20 + created.length), revision: 1 };
+    }
+  };
+  host.apply({
+    get: (name) => {
+      if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
+      if (name === "agents") return { get: (id) => (id === lead.id ? lead : undefined), list: () => [lead] };
+      if (name === "agentTeams") return teams;
+      if (name === "tools") return { register: (tool) => { tools[tool.name] = tool; return () => {}; } };
+      return undefined;
+    },
+    on: () => () => {},
+    effect: (run) => { run(); return () => {}; }
+  });
+  const propose = tools.whales_propose_tasks;
+  assert.ok(propose, "必须注册提案工具");
+
+  const submitted = await propose.execute({
+    leadSessionId: lead.id,
+    items: [
+      { key: "a", title: "A" },
+      { key: "b", title: "B", blockedByKeys: ["a"] },
+      { key: "c", title: "C", blockedByKeys: ["b"] }
+    ]
+  }, {});
+  assert.equal(submitted.version, 1);
+
+  const route = routes.find((item) => item && typeof item.handler === "function");
+  function fakeReq(method, url, headers, body) {
+    const listeners = {};
+    const req = { method, url, headers: headers || {}, on(event, fn) { (listeners[event] = listeners[event] || []).push(fn); return req; } };
+    setTimeout(() => {
+      if (body !== undefined) (listeners.data || []).forEach((fn) => fn(Buffer.from(body)));
+      (listeners.end || []).forEach((fn) => fn());
+    }, 0);
+    return req;
+  }
+  function fakeRes() {
+    return { statusCode: 0, headers: {}, body: "", setHeader(k, v) { this.headers[k] = v; }, end(chunk) { if (chunk !== undefined) this.body += String(chunk); } };
+  }
+  const probe = fakeRes();
+  await route.handler(fakeReq("GET", "/agent-whales/api/activity", {}, undefined), probe);
+  const token = JSON.parse(probe.body).controlToken;
+  const confirmUrl = "/agent-whales/api/proposals/" + submitted.proposalId + "/confirm";
+  const post = (body) => [fakeReq("POST", confirmUrl, { "x-whales-token": token }, JSON.stringify(body)), fakeRes()];
+
+  // 第一次：B 失败 → A 已建；B failed；C 因前置未建标 blocked
+  failNext = true;
+  let [req1, res1] = post({ leadSessionId: lead.id, version: 1, requestId: "k1" });
+  await route.handler(req1, res1);
+  const first = JSON.parse(res1.body);
+  assert.equal(first.code, 200, res1.body);
+  assert.deepEqual(first.data.created.map((row) => row.key), ["a"]);
+  assert.deepEqual(first.data.failed.map((row) => row.key).sort(), ["b", "c"]);
+  const cState = first.data.failed.find((row) => row.key === "c");
+  assert.equal(cState.status, "blocked", "C 的前置未建 → blocked，不应尝试创建");
+  assert.equal(created.length, 1, "只应真正创建 A");
+
+  // 重试（新 requestId、同版本）：跳过已建 A，补建 B/C
+  let [req2, res2] = post({ leadSessionId: lead.id, version: 1, requestId: "k2" });
+  await route.handler(req2, res2);
+  const retried = JSON.parse(res2.body);
+  assert.equal(retried.code, 200, res2.body);
+  assert.deepEqual(retried.data.created.map((row) => row.key), ["a", "b", "c"], "重试后应补齐并保留已建项");
+  assert.equal(created.length, 3, "重试不得重复创建 A");
+
+  // 锁：确认后再提交 → 新提案（新 id、v1），旧提案不升版本
+  const second = await propose.execute({ leadSessionId: lead.id, items: [{ key: "d", title: "D" }] }, {});
+  assert.notEqual(second.proposalId, submitted.proposalId, "已锁定后必须开新提案");
+  assert.equal(second.version, 1);
+
+  // 新提案提交后，旧提案的记录被替换：旧确认入口一律失效（notFound 也是失效的一种）
+  let [req3, res3] = post({ leadSessionId: lead.id, version: 2, requestId: "k3" });
+  await route.handler(req3, res3);
+  const staleBody = JSON.parse(res3.body);
+  assert.ok(staleBody.code === 40401 || staleBody.code === 40904, "旧提案确认必须被拒，实际 " + staleBody.code);
+});
+// ── M1：通用 store 层 + 项目注册表 ────────────────────────────────────────────
+function m1Harness(host, fs, os, pathMod) {
+  const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), "aw-m1-"));
+  host.setProjectStorePathForTests(pathMod.join(dir, "projects.json"));
+  host.setProposalStorePathForTests(pathMod.join(dir, "proposals.json"));
+  const routes = [];
+  const tools = {};
+  const live = new Set(["session-a", "session-b"]);
+  const archived = new Set(["session-old"]);
+  host.apply({
+    get: (name) => {
+      if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
+      if (name === "sessions") return { get: (id) => (live.has(id) ? { id } : undefined) };
+      if (name === "agents") return { get: (id) => (live.has(id) ? { id, status: "running", session: { events: [] } } : undefined), list: () => [] };
+      if (name === "sessionPersistence") return { stat: (id) => (archived.has(id) ? { id } : undefined) };
+      if (name === "tools") return { register: (tool) => { tools[tool.name] = tool; return () => {}; } };
+      return undefined;
+    },
+    on: () => () => {},
+    effect: (run) => { run(); return () => {}; }
+  });
+  const route = routes.find((item) => item && typeof item.handler === "function");
+  function fakeReq(method, url, headers, body) {
+    const listeners = {};
+    const req = { method, url, headers: headers || {}, on(event, fn) { (listeners[event] = listeners[event] || []).push(fn); return req; } };
+    setTimeout(() => {
+      if (body !== undefined) (listeners.data || []).forEach((fn) => fn(Buffer.from(body)));
+      (listeners.end || []).forEach((fn) => fn());
+    }, 0);
+    return req;
+  }
+  function fakeRes() {
+    return { statusCode: 0, headers: {}, body: "", setHeader(k, v) { this.headers[k] = v; }, end(chunk) { if (chunk !== undefined) this.body += String(chunk); } };
+  }
+  async function call(method, url, headers, body) {
+    const res = fakeRes();
+    await route.handler(fakeReq(method, url, headers, body), res);
+    let json;
+    try { json = JSON.parse(res.body); } catch { json = undefined; }
+    return { status: res.statusCode, body: json };
+  }
+  let token;
+  return { dir, tools, call, async token() {
+    if (token === undefined) {
+      const res = await call("GET", "/agent-whales/api/activity");
+      token = res.body.controlToken;
+    }
+    return token;
+  } };
+}
+
+test("M1 项目注册表：创建/加入/关联/移除，40701/40702/40401 与归档会话", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+
+  // 1) 创建项目（主对话 = session-a）
+  const created = await post("/agent-whales/api/projects", { name: "鲸鱼上线", mainSessionId: "session-a" });
+  assert.equal(created.body.code, 200, JSON.stringify(created.body));
+  const projectId = created.body.data.project.projectId;
+  assert.equal(created.body.data.project.members.length, 1);
+
+  // 2) 主对话已在别的项目 → 40701
+  const dup = await post("/agent-whales/api/projects", { name: "第二个", mainSessionId: "session-a" });
+  assert.equal(dup.body.code, 40701);
+
+  // 3) 加入不存在的会话 → 40401
+  const missing = await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-ghost" });
+  assert.equal(missing.body.code, 40401);
+
+  // 4) 加入已有会话 → 成功，且自动与主对话建关联
+  const joined = await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+  assert.equal(joined.body.code, 200, JSON.stringify(joined.body));
+  assert.deepEqual(joined.body.data.project.links.map((l) => [l.a, l.b]), [["session-a", "session-b"]]);
+
+  // 5) 加入归档会话（live 之外，persistence.stat 命中）→ 成功
+  const archivedJoin = await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+  assert.equal(archivedJoin.body.code, 200, JSON.stringify(archivedJoin.body));
+
+  // 6) 关联线：a===b 拒绝；非成员拒绝；重复创建幂等
+  const selfLink = await post(`/agent-whales/api/projects/${projectId}/links`, { a: "session-a", b: "session-a" });
+  assert.equal(selfLink.body.code, 40000);
+  const outsiderLink = await post(`/agent-whales/api/projects/${projectId}/links`, { a: "session-a", b: "session-ghost" });
+  assert.equal(outsiderLink.body.code, 40000);
+  const before = (await h.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project.links.length;
+  const again = await post(`/agent-whales/api/projects/${projectId}/links`, { a: "session-b", b: "session-a" });
+  assert.equal(again.body.code, 200);
+  assert.equal(again.body.data.already, true);
+  assert.equal((await h.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project.links.length, before, "重复创建不得增加");
+
+  // 7) 移除成员：主对话 → 40702；普通成员 → 连带删除它的关联线
+  const removeMain = await h.call("DELETE", `/agent-whales/api/projects/${projectId}/members/session-a`, { "x-whales-token": tk }, undefined);
+  assert.equal(removeMain.body.code, 40702);
+  const removeOld = await h.call("DELETE", `/agent-whales/api/projects/${projectId}/members/session-old`, { "x-whales-token": tk }, undefined);
+  assert.equal(removeOld.body.code, 200);
+  assert.equal(removeOld.body.data.project.members.some((m) => m.sessionId === "session-old"), false);
+  assert.equal(removeOld.body.data.project.links.some((l) => l.a === "session-old" || l.b === "session-old"), false, "关联线必须连带删除");
+
+  // 8) 并发创建两个项目：串行化后都保留（不丢更新）
+  const [p1, p2] = await Promise.all([
+    post("/agent-whales/api/projects", { name: "并发一", mainSessionId: "session-a" }),
+    post("/agent-whales/api/projects", { name: "并发二", mainSessionId: "session-b" })
+  ]);
+  // session-a 已属于原项目 → 40701；session-b 也已是成员 → 40701；两者都应被拒而不是丢数据
+  assert.ok([p1.body.code, p2.body.code].every((code) => code === 40701), "已占用会话必须 40701");
+  const listed = await h.call("GET", "/agent-whales/api/projects");
+  assert.equal(listed.body.data.projects.length, 1);
+});
+
+test("M1 store：损坏文件备份 + 只读降级 + 不覆盖原文件 + 并发写串行", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const projectsFile = pathMod.join(h.dir, "projects.json");
+  const proposalsFile = pathMod.join(h.dir, "proposals.json");
+
+  // 1) 项目 store 损坏
+  fs.writeFileSync(projectsFile, "{ this is not json", "utf8");
+  const brokenRead = await h.call("GET", "/agent-whales/api/projects");
+  assert.equal(brokenRead.status, 200, "只读降级后读仍可用");
+  assert.deepEqual(brokenRead.body.data.projects, []);
+  const backups = fs.readdirSync(h.dir).filter((name) => name.includes("projects.json.corrupt-"));
+  assert.equal(backups.length, 1, "损坏文件必须被备份一次，实际 " + fs.readdirSync(h.dir).join(","));
+  const backupText = fs.readFileSync(pathMod.join(h.dir, backups[0]), "utf8");
+  assert.equal(backupText, "{ this is not json", "备份必须是原始内容");
+
+  const blocked = await h.call("POST", "/agent-whales/api/projects", { "x-whales-token": tk }, JSON.stringify({ name: "x", mainSessionId: "session-a" }));
+  assert.equal(blocked.status, 503, "只读降级下写入必须是 503");
+  assert.equal(blocked.body.code, 50302);
+  assert.equal(fs.existsSync(projectsFile), false, "降级后不得重建/覆盖原文件");
+  assert.equal(fs.existsSync(pathMod.join(h.dir, "projects.json")), false);
+
+  // 2) 提案 store 同样处理：工具写入失败，但原文件不被覆盖
+  fs.writeFileSync(proposalsFile, "not-json-at-all", "utf8");
+  const propose = h.tools.whales_propose_tasks;
+  assert.ok(propose, "提案工具必须注册");
+  let threw = false;
+  try {
+    await propose.execute({ leadSessionId: "session-a", items: [{ key: "a", title: "A" }] }, {});
+  } catch (error) {
+    threw = true;
+  }
+  assert.equal(threw, true, "只读降级下提案写入必须失败，而不是静默覆盖");
+  assert.equal(fs.existsSync(proposalsFile), false, "损坏的提案文件不得被覆盖");
+  assert.equal(fs.readdirSync(h.dir).filter((name) => name.includes("proposals.json.corrupt-")).length, 1);
+
+  // 3) 新目录下并发写入：两个项目都要保留（读-改-写也串行）
+  const dir2 = fs.mkdtempSync(pathMod.join(os.tmpdir(), "aw-m1b-"));
+  host.setProjectStorePathForTests(pathMod.join(dir2, "projects.json"));
+  const [x, y] = await Promise.all([
+    h.call("POST", "/agent-whales/api/projects", { "x-whales-token": tk }, JSON.stringify({ name: "并发A", mainSessionId: "session-a" })),
+    h.call("POST", "/agent-whales/api/projects", { "x-whales-token": tk }, JSON.stringify({ name: "并发B", mainSessionId: "session-b" }))
+  ]);
+  assert.equal(x.body.code, 200, JSON.stringify(x.body));
+  assert.equal(y.body.code, 200, JSON.stringify(y.body));
+  const stored = JSON.parse(fs.readFileSync(pathMod.join(dir2, "projects.json"), "utf8"));
+  assert.equal(Object.keys(stored.projects).length, 2, "并发创建不得丢更新");
+});
