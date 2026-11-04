@@ -896,7 +896,7 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
     effect: (run) => { run(); return () => {}; }
   });
 
-  assert.deepEqual(Object.keys(registered).sort(), ["whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send"]);
+  assert.deepEqual(Object.keys(registered).sort(), ["whales_propose_tasks", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send"]);
   assert.equal(typeof registered.whales_visit_send.output.render, "function", "工具必须带 output.render");
   // 网关按 OpenAI function calling 校验：parameters 必须是 { type: "object", properties } 的 JSON Schema。
   // 传「属性表」或空对象会让整轮请求 400（真实事故：whales_visit_list 变成 type: null）。
@@ -1770,4 +1770,127 @@ test("画布视图：渲染任务/成员；缺数据时给空态而不是崩", (
   // 槽位没给 hook 也不崩
   const bare = render(WhaleCanvasView({ t: (key) => key }));
   assert.equal(findByClass(bare, "daw-canvas").length, 1);
+});
+test("提案：校验 key 唯一 / 前置存在 / 无环 / 拓扑序稳定", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const ok = host.validateProposal({
+    leadSessionId: "s1",
+    items: [
+      { key: "a", title: "A" },
+      { key: "b", title: "B", blockedByKeys: ["a"] },
+      { key: "c", title: "C", blockedByKeys: ["b"] }
+    ]
+  });
+  assert.equal(ok.error, undefined);
+  assert.deepEqual(ok.order, ["a", "b", "c"]);
+
+  assert.match(host.validateProposal({ leadSessionId: "s1", items: [{ key: "a", title: "A" }, { key: "a", title: "B" }] }).error, /duplicate/);
+  assert.match(host.validateProposal({ leadSessionId: "s1", items: [{ key: "a", title: "A", blockedByKeys: ["x"] }] }).error, /unknown/);
+  assert.match(host.validateProposal({ leadSessionId: "s1", items: [{ key: "a", title: "A", blockedByKeys: ["b"] }, { key: "b", title: "B", blockedByKeys: ["a"] }] }).error, /cycle/);
+  assert.match(host.validateProposal({ leadSessionId: "", items: [{ key: "a", title: "A" }] }).error, /leadSessionId/);
+  assert.match(host.validateProposal({ leadSessionId: "s1", items: [] }).error, /non-empty/);
+
+  // 同层按声明顺序（稳定）
+  const stable = host.validateProposal({ leadSessionId: "s1", items: [{ key: "z", title: "Z" }, { key: "y", title: "Y" }] });
+  assert.deepEqual(stable.order, ["z", "y"]);
+});
+
+test("提案：确认按拓扑序创建任务；版本不符拒绝；重放不重复", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), "aw-proposal-"));
+  const storeFile = pathMod.join(dir, "proposals.json");
+  host.setProposalStorePathForTests(storeFile);
+
+  const record = {
+    proposalId: "p1",
+    version: 2,
+    leadSessionId: "lead-session",
+    items: [
+      { key: "a", title: "A", description: "", blockedByKeys: [], expectedOutput: "" },
+      { key: "b", title: "B", description: "", blockedByKeys: ["a"], expectedOutput: "" }
+    ],
+    order: ["a", "b"],
+    createdAt: Date.now()
+  };
+  fs.writeFileSync(storeFile, JSON.stringify({ "lead-session": record }), "utf8");
+
+  const routes = [];
+  const created = [];
+  const lead = { id: "lead-session", status: "running", session: { events: [] } };
+  const teams = {
+    tryMembership: () => ({ root: lead, id: "team-1", role: "lead", name: "lead" }),
+    listTasks: () => [],
+    listMembers: () => [{ id: lead.id, name: "lead", role: "lead", status: "running", diagnostics: [] }],
+    createTask: async (_caller, request) => {
+      created.push({ subject: request.subject, blockedBy: request.blockedBy });
+      return { id: "task-" + (10 + created.length), revision: 1 };
+    }
+  };
+  host.apply({
+    get: (name) => {
+      if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
+      if (name === "agents") return { get: (id) => (id === lead.id ? lead : undefined), list: () => [lead] };
+      if (name === "agentTeams") return teams;
+      return undefined;
+    },
+    on: () => () => {},
+    effect: (run) => { run(); return () => {}; }
+  });
+  const route = routes.find((item) => item && typeof item.handler === "function");
+  assert.ok(route, "必须有 api 前缀路由");
+
+  function fakeReq(method, url, headers, body) {
+    const listeners = {};
+    const req = { method, url, headers: headers || {}, on(event, fn) { (listeners[event] = listeners[event] || []).push(fn); return req; } };
+    setTimeout(() => {
+      if (body !== undefined) (listeners.data || []).forEach((fn) => fn(Buffer.from(body)));
+      (listeners.end || []).forEach((fn) => fn());
+    }, 0);
+    return req;
+  }
+  function fakeRes() {
+    return { statusCode: 0, headers: {}, body: "", setHeader(k, v) { this.headers[k] = v; }, end(chunk) { if (chunk !== undefined) this.body += String(chunk); } };
+  }
+  const probe = fakeRes();
+  await route.handler(fakeReq("GET", "/agent-whales/api/activity", {}, undefined), probe);
+  const token = JSON.parse(probe.body).controlToken;
+
+  // 读取提案
+  const read = fakeRes();
+  await route.handler(fakeReq("GET", "/agent-whales/api/proposals?leadSessionId=" + lead.id, {}, undefined), read);
+  assert.equal(read.statusCode, 200);
+  const readBody = JSON.parse(read.body);
+  assert.equal(readBody.code, 200);
+  assert.equal(readBody.data.proposal.version, 2);
+  assert.deepEqual(readBody.data.proposal.items.map((item) => item.key), ["a", "b"]);
+
+  // 版本不符 → 40902
+  const stale = fakeRes();
+  await route.handler(fakeReq("POST", "/agent-whales/api/proposals/p1/confirm", { "x-whales-token": token }, JSON.stringify({ leadSessionId: lead.id, version: 1, requestId: "c0" })), stale);
+  assert.equal(JSON.parse(stale.body).code, 40902);
+
+  // 正常确认：按拓扑序创建，blockedBy 用真实 taskId
+  const ok = fakeRes();
+  await route.handler(fakeReq("POST", "/agent-whales/api/proposals/p1/confirm", { "x-whales-token": token }, JSON.stringify({ leadSessionId: lead.id, version: 2, requestId: "c1" })), ok);
+  const okBody = JSON.parse(ok.body);
+  assert.equal(okBody.code, 200, ok.body);
+  assert.deepEqual(okBody.data.created.map((row) => row.key), ["a", "b"]);
+  assert.equal(created.length, 2);
+  assert.equal(created[0].subject, "A");
+  assert.equal(created[1].blockedBy.length, 1, "第二项必须引用第一项的真实 taskId");
+  assert.equal(created[1].blockedBy[0], okBody.data.created[0].taskId);
+
+  // 同 requestId 重放：不重复创建
+  const replay = fakeRes();
+  await route.handler(fakeReq("POST", "/agent-whales/api/proposals/p1/confirm", { "x-whales-token": token }, JSON.stringify({ leadSessionId: lead.id, version: 2, requestId: "c1" })), replay);
+  assert.equal(created.length, 2, "重放不得重复创建");
+  assert.equal(JSON.parse(replay.body).data.replayed, true);
+
+  // 换 requestId 再确认同一版本：已确认则返回既有结果
+  const again = fakeRes();
+  await route.handler(fakeReq("POST", "/agent-whales/api/proposals/p1/confirm", { "x-whales-token": token }, JSON.stringify({ leadSessionId: lead.id, version: 2, requestId: "c2" })), again);
+  assert.equal(created.length, 2, "已确认的版本不得重复创建");
 });
