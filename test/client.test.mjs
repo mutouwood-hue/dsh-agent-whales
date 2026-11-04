@@ -1939,7 +1939,7 @@ test("提案：确认后锁定；部分失败可补建；前置未建标 blocked
       { key: "b", title: "B", blockedByKeys: ["a"] },
       { key: "c", title: "C", blockedByKeys: ["b"] }
     ]
-  }, {});
+  }, { agent: { id: lead.id } });
   assert.equal(submitted.version, 1);
 
   const route = routes.find((item) => item && typeof item.handler === "function");
@@ -1982,7 +1982,7 @@ test("提案：确认后锁定；部分失败可补建；前置未建标 blocked
   assert.equal(created.length, 3, "重试不得重复创建 A");
 
   // 锁：确认后再提交 → 新提案（新 id、v1），旧提案不升版本
-  const second = await propose.execute({ leadSessionId: lead.id, items: [{ key: "d", title: "D" }] }, {});
+  const second = await propose.execute({ leadSessionId: lead.id, items: [{ key: "d", title: "D" }] }, { agent: { id: lead.id } });
   assert.notEqual(second.proposalId, submitted.proposalId, "已锁定后必须开新提案");
   assert.equal(second.version, 1);
 
@@ -2152,7 +2152,7 @@ test("M1 store：损坏文件备份 + 只读降级 + 不覆盖原文件 + 并发
   assert.ok(propose, "提案工具必须注册");
   let threw = false;
   try {
-    await propose.execute({ leadSessionId: "session-a", items: [{ key: "a", title: "A" }] }, {});
+    await propose.execute({ leadSessionId: "session-a", items: [{ key: "a", title: "A" }] }, { agent: { id: "session-a" } });
   } catch (error) {
     threw = true;
   }
@@ -2193,7 +2193,7 @@ test("M1 store：损坏文件备份 + 只读降级 + 不覆盖原文件 + 并发
       { key: "T2", title: "体检浏览器", blockedByKeys: ["T1"] },
       { key: "T3", title: "打包", blockedByKeys: ["T2"] }
     ]
-  }, {});
+  }, { agent: { id: "session-a" } });
   const confirm = await post(`/agent-whales/api/proposals/${proposed.proposalId}/confirm`, { leadSessionId: "session-a", version: proposed.version, requestId: "m2c1" });
   assert.equal(confirm.body.code, 200, JSON.stringify(confirm.body));
   assert.equal(confirm.body.data.source, "project");
@@ -2219,7 +2219,7 @@ test("M1 store：损坏文件备份 + 只读降级 + 不覆盖原文件 + 并发
   assert.equal(both.body.code, 40000, "两个参数同时出现必须拒绝");
 
   // 锁定：确认后再提交 → 新提案
-  const second = await h.tools.whales_propose_tasks.execute({ leadSessionId: "session-a", projectId: projectId, items: [{ key: "X", title: "新增项" }] }, {});
+  const second = await h.tools.whales_propose_tasks.execute({ leadSessionId: "session-a", projectId: projectId, items: [{ key: "X", title: "新增项" }] }, { agent: { id: "session-a" } });
   assert.notEqual(second.proposalId, proposed.proposalId, "已确认后必须开新提案");
 });
 
@@ -2234,7 +2234,7 @@ test("M2 项目任务：owner 非成员 40703、跨项目依赖 40704、成环�
   const created = await post("/agent-whales/api/projects", { name: "P", mainSessionId: "session-a" });
   const projectId = created.body.data.project.projectId;
   await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
-  const proposed = await h.tools.whales_propose_tasks.execute({ leadSessionId: "session-a", projectId: projectId, items: [{ key: "T1", title: "任务一" }] }, {});
+  const proposed = await h.tools.whales_propose_tasks.execute({ leadSessionId: "session-a", projectId: projectId, items: [{ key: "T1", title: "任务一" }] }, { agent: { id: "session-a" } });
   const confirm = await post(`/agent-whales/api/proposals/${proposed.proposalId}/confirm`, { leadSessionId: "session-a", version: 1, requestId: "o1" });
   const taskId = confirm.body.data.created[0].taskId;
 
@@ -2311,4 +2311,42 @@ test("M2 项目任务：部分成功后重试只补缺失项（retry）", async 
   const after = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
   const t2 = after.body.data.tasks.find((task) => task.subject === "T2");
   assert.deepEqual(t2.blockedBy, ["ptask-done1"], "补建项必须引用已建前置的真实 id");
+});
+test("P1 提案身份：冒充 leadSessionId 被拒、非主对话带 projectId 被拒、主对话正常提交", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const created = await post("/agent-whales/api/projects", { name: "身份", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+  await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+  const propose = h.tools.whales_propose_tasks;
+
+  // 1) 冒充：exec=session-b，参数声明 session-a
+  await assert.rejects(
+    () => propose.execute({ leadSessionId: "session-a", projectId: projectId, items: [{ key: "X", title: "X" }] }, { agent: { id: "session-b" } }),
+    /40301/,
+    "参数自报的 leadSessionId 与执行上下文不一致必须拒绝"
+  );
+
+  // 2) 非主对话带 projectId：exec=session-b（是成员，不是主对话）
+  await assert.rejects(
+    () => propose.execute({ projectId: projectId, items: [{ key: "X", title: "X" }] }, { agent: { id: "session-b" } }),
+    /40706/,
+    "member 不能提交提案"
+  );
+
+  // 3) 主对话正常提交（exec=session-a）
+  const submitted = await propose.execute({ projectId: projectId, items: [{ key: "T1", title: "正常" }] }, { agent: { id: "session-a" } });
+  assert.ok(typeof submitted.proposalId === "string" && submitted.proposalId.startsWith("prop-"));
+
+  // 4) 拿不到身份 → 拒绝
+  await assert.rejects(
+    () => propose.execute({ items: [{ key: "X", title: "X" }] }, {}),
+    /40301/,
+    "没有执行上下文身份时必须拒绝"
+  );
 });
