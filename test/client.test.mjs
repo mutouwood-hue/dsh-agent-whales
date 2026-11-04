@@ -2005,8 +2005,23 @@ function m1Harness(host, fs, os, pathMod) {
     get: (name) => {
       if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
       if (name === "sessions") return { get: (id) => (live.has(id) ? { id } : undefined) };
-      if (name === "agents") return { get: (id) => (live.has(id) ? { id, status: "running", session: { events: [] } } : undefined), list: () => [] };
+      if (name === "agents") return {
+        get: (id) => (live.has(id) ? {
+          id,
+          status: "running",
+          session: { events: [] },
+          followup: () => {
+            if (id === "session-b") throw new Error("timed out while dispatching");
+          }
+        } : undefined),
+        list: () => []
+      };
       if (name === "sessionPersistence") return { stat: (id) => (archived.has(id) ? { id } : undefined) };
+      if (name === "agentTeams") return {
+        tryMembership: (agent) => ({ root: agent, id: "team-1", role: "lead", name: "lead" }),
+        listTasks: () => [],
+        listMembers: () => [{ id: "session-a", name: "lead", role: "lead", status: "running", diagnostics: [] }]
+      };
       if (name === "tools") return { register: (tool) => { tools[tool.name] = tool; return () => {}; } };
       return undefined;
     },
@@ -2156,4 +2171,144 @@ test("M1 store：损坏文件备份 + 只读降级 + 不覆盖原文件 + 并发
   assert.equal(y.body.code, 200, JSON.stringify(y.body));
   const stored = JSON.parse(fs.readFileSync(pathMod.join(dir2, "projects.json"), "utf8"));
   assert.equal(Object.keys(stored.projects).length, 2, "并发创建不得丢更新");
+});test("M2 项目任务来源语义：projectId 只返回项目表、leadSessionId 只返回宿主板", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+
+  const created = await post("/agent-whales/api/projects", { name: "上线", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+  await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+
+  // 提案绑定项目 → 确认写入项目任务表
+  const proposed = await h.tools.whales_propose_tasks.execute({
+    leadSessionId: "session-a",
+    projectId: projectId,
+    items: [
+      { key: "T1", title: "体检宿主" },
+      { key: "T2", title: "体检浏览器", blockedByKeys: ["T1"] },
+      { key: "T3", title: "打包", blockedByKeys: ["T2"] }
+    ]
+  }, {});
+  const confirm = await post(`/agent-whales/api/proposals/${proposed.proposalId}/confirm`, { leadSessionId: "session-a", version: proposed.version, requestId: "m2c1" });
+  assert.equal(confirm.body.code, 200, JSON.stringify(confirm.body));
+  assert.equal(confirm.body.data.source, "project");
+  assert.deepEqual(confirm.body.data.created.map((row) => row.key), ["T1", "T2", "T3"]);
+
+  const byProject = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
+  assert.equal(byProject.body.code, 200);
+  assert.equal(byProject.body.data.source, "project");
+  assert.equal(byProject.body.data.tasks.length, 3);
+  assert.equal(byProject.body.data.members, undefined, "项目查询不得混入宿主成员数据");
+  const t2 = byProject.body.data.tasks.find((task) => task.subject === "体检浏览器");
+  const t1 = byProject.body.data.tasks.find((task) => task.subject === "体检宿主");
+  assert.deepEqual(t2.blockedBy, [t1.taskId], "blockedBy 必须指向项目内的真实 taskId");
+  assert.equal(t2.ready, false);
+  assert.equal(t1.ready, true);
+
+  const byLead = await h.call("GET", "/agent-whales/api/tasks?leadSessionId=session-a");
+  assert.equal(byLead.body.data.source, "host", "leadSessionId 只返回宿主板");
+  assert.deepEqual(byLead.body.data.tasks, [], "宿主板里没有项目任务");
+  assert.ok(Array.isArray(byLead.body.data.members), "宿主语义保留 members");
+
+  const both = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}&leadSessionId=session-a`);
+  assert.equal(both.body.code, 40000, "两个参数同时出现必须拒绝");
+
+  // 锁定：确认后再提交 → 新提案
+  const second = await h.tools.whales_propose_tasks.execute({ leadSessionId: "session-a", projectId: projectId, items: [{ key: "X", title: "新增项" }] }, {});
+  assert.notEqual(second.proposalId, proposed.proposalId, "已确认后必须开新提案");
+});
+
+test("M2 项目任务：owner 非成员 40703、跨项目依赖 40704、成环检测、前置已删除", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const created = await post("/agent-whales/api/projects", { name: "P", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+  await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+  const proposed = await h.tools.whales_propose_tasks.execute({ leadSessionId: "session-a", projectId: projectId, items: [{ key: "T1", title: "任务一" }] }, {});
+  const confirm = await post(`/agent-whales/api/proposals/${proposed.proposalId}/confirm`, { leadSessionId: "session-a", version: 1, requestId: "o1" });
+  const taskId = confirm.body.data.created[0].taskId;
+
+  // owner 不是项目成员 → 40703
+  const bad = await post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-ghost", expectedRevision: 1, requestId: "a1" });
+  assert.equal(bad.body.code, 40703, JSON.stringify(bad.body));
+
+  // 跨项目依赖 → 40704（用导出函数直接构造：其他项目的 task）
+  const store = host.ensureProjectTasks({});
+  store["ptask-other"] = { taskId: "ptask-other", projectId: "proj-other", blockedBy: [], status: "pending", revision: 1, subject: "外部" };
+  const cross = host.createProjectTaskInStore({ tasks: store }, { projectId: "proj-1" }, { subject: "X", blockedBy: ["ptask-other"] });
+  assert.equal(cross.code, 40704, "跨项目依赖必须拒绝");
+
+  // 成环检测（改依赖时使用）：a←b、b←a
+  const cyclic = {
+    "t-a": { taskId: "t-a", blockedBy: ["t-b"] },
+    "t-b": { taskId: "t-b", blockedBy: ["t-a"] }
+  };
+  assert.equal(host.projectBlockedByWouldCycle(cyclic, "t-a", ["t-b"]), true, "成环必须被识别");
+  assert.equal(host.projectBlockedByWouldCycle(cyclic, "t-c", ["t-a"]), false, "无环必须放行");
+
+  // 前置已删除：依赖视图标「前置已删除」，且不算 ready
+  const deletedStore = {
+    "t-done": { taskId: "t-done", projectId: "p", status: "deleted", blockedBy: [] },
+    "t-wait": { taskId: "t-wait", projectId: "p", status: "pending", blockedBy: ["t-done"], revision: 1 }
+  };
+  const view = host.projectTaskView({ tasks: deletedStore }, deletedStore["t-wait"]);
+  assert.equal(view.blockedReason, "前置已删除");
+  assert.equal(view.ready, false);
+
+  // unknown：派发时 owner 侧超时 → status=unknown（不是失败）
+  const assignmentB = await post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-b", expectedRevision: 1, requestId: "a2" });
+  assert.equal(assignmentB.body.code, 200, JSON.stringify(assignmentB.body));
+  const dispatch = await post(`/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "dispatch", requestId: "a3" });
+  assert.equal(dispatch.body.code, 200, JSON.stringify(dispatch.body));
+  assert.equal(dispatch.body.data.dispatch.status, "unknown", "超时必须标 unknown");
+});
+
+test("M2 项目任务：部分成功后重试只补缺失项（retry）", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const created = await post("/agent-whales/api/projects", { name: "R", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+  const projectsFile = pathMod.join(h.dir, "projects.json");
+  const proposalsFile = pathMod.join(h.dir, "proposals.json");
+
+  // 造一个"部分成功"的现场：T1 已建，T2 待补
+  const store = JSON.parse(fs.readFileSync(projectsFile, "utf8"));
+  store.tasks = store.tasks || {};
+  store.tasks["ptask-done1"] = { taskId: "ptask-done1", projectId: projectId, subject: "T1", description: "", blockedBy: [], writeScopes: [], status: "pending", ownerSessionId: null, revision: 1, createdAt: Date.now(), updatedAt: Date.now() };
+  fs.writeFileSync(projectsFile, JSON.stringify(store), "utf8");
+  const record = {
+    proposalId: "prop-retry",
+    version: 1,
+    leadSessionId: "session-a",
+    projectId: projectId,
+    items: [{ key: "T1", title: "T1", description: "", blockedByKeys: [] }, { key: "T2", title: "T2", description: "", blockedByKeys: ["T1"] }],
+    order: ["T1", "T2"],
+    createdAt: Date.now(),
+    confirmed: { version: 1, created: [{ key: "T1", taskId: "ptask-done1", revision: 1 }], failed: [{ key: "T2", status: "failed", message: "boom" }], lockedAt: Date.now() }
+  };
+  fs.writeFileSync(proposalsFile, JSON.stringify({ "session-a": record }), "utf8");
+
+  const retried = await post("/agent-whales/api/proposals/prop-retry/confirm", { leadSessionId: "session-a", version: 1, requestId: "retry-1" });
+  assert.equal(retried.body.code, 200, JSON.stringify(retried.body));
+  assert.equal(retried.body.data.retried, true);
+  assert.deepEqual(retried.body.data.created.map((row) => row.key), ["T1", "T2"], "重试必须保留已建项并补齐缺失项");
+  assert.equal(retried.body.data.failed, undefined, "补齐后不应再有 failed");
+  const after = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
+  const t2 = after.body.data.tasks.find((task) => task.subject === "T2");
+  assert.deepEqual(t2.blockedBy, ["ptask-done1"], "补建项必须引用已建前置的真实 id");
 });
