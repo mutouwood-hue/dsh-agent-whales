@@ -187,14 +187,21 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
 
   plugin.apply(ctx);
 
-  assert.deepEqual(injections, ["shell.overlay", "settings.section"]);
-  assert.equal(registrations.length, 2);
-  for (const entry of registrations) {
+  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view"]);
+  assert.equal(registrations.length, 3);
+  for (const entry of registrations.slice(0, 2)) {
     assert.equal(entry.options.id, "agent-whales");
     assert.equal(typeof entry.component, "function");
     assert.equal(typeof entry.options.inject, "function");
     assert.equal(typeof entry.options.inject().leadIdOf, "function");
   }
+  // P0 画布：注册成与 Chat 并列的 view，且不影子官方渲染（不设 priority）
+  const canvasSeat = registrations[2];
+  assert.equal(canvasSeat.options.name, "conversation.view");
+  assert.equal(canvasSeat.options.id, "whales-canvas");
+  assert.equal(canvasSeat.options.priority, undefined, "不得影子官方 UI");
+  assert.ok(String(canvasSeat.options.label).length > 0);
+  assert.equal(typeof canvasSeat.component, "function");
   assert.equal(appended.length, 1, "样式标签注入一次");
   assert.equal(appended[0].id, "dsh-agent-whales-styles");
   assert.equal(dictionary.namespace, "agent-whales");
@@ -1732,4 +1739,35 @@ test("任务命令路由 v2：信封、鉴权、五个 action、并发去重、�
   const u1Body = JSON.parse(u1Res.body);
   assert.equal(u1Body.code, 200, u1Res.body);
   assert.equal(u1Body.data.task.ownerName === undefined, true, "unassign 必须清空 owner");
+});
+test("画布视图：渲染任务/成员；缺数据时给空态而不是崩", () => {
+  const { plugin } = loadPlugin();
+  const { WhaleCanvasView } = plugin.__test;
+  assert.equal(typeof WhaleCanvasView, "function");
+
+  const full = render(WhaleCanvasView({
+    useSessions: (selector) => selector(listState()),
+    useSessionStatus: (selector) => selector(statusMap({ [LEAD]: true })),
+    leadIdOf: (id) => id,
+    t: (key, params) => (params ? key + ":" + params.members + "/" + params.tasks : key)
+  }));
+  assert.equal(findByClass(full, "daw-canvas").length, 1, "必须有画布根节点");
+  assert.equal(findByClass(full, "daw-canvas-head").length, 1);
+  const cards = findByClass(full, "daw-canvas-card");
+  assert.ok(cards.length >= 3, "任务与成员都要出卡片，实际 " + cards.length);
+  assert.ok(findByClass(full, "daw-canvas-foot").length === 1, "必须有只读提示");
+
+  // 没有团队投影时：空态文案，且不抛
+  const empty = render(WhaleCanvasView({
+    useSessions: (selector) => selector(listState({ projectionsBySession: {} })),
+    useSessionStatus: (selector) => selector(statusMap({ [LEAD]: false })),
+    leadIdOf: (id) => id,
+    t: (key) => key
+  }));
+  assert.equal(findByClass(empty, "daw-canvas-card").length, 0);
+  assert.equal(findByClass(empty, "daw-canvas-empty").length, 2, "任务与成员各一条空态");
+
+  // 槽位没给 hook 也不崩
+  const bare = render(WhaleCanvasView({ t: (key) => key }));
+  assert.equal(findByClass(bare, "daw-canvas").length, 1);
 });
