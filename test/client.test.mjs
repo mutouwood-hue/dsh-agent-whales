@@ -2669,3 +2669,52 @@ test("M5 简报按需读取：无参返回项目简报+自己的简报；项目�
   assert.ok(truncated.brief.goal.endsWith("[简报已截断]"), "超限必须标注截断：" + JSON.stringify({ len: truncated.brief.goal.length, tail: truncated.brief.goal.slice(-20), ver: truncated.brief.version }));
   assert.ok(truncated.brief.goal.length < longGoal.length, "必须真的截短");
 });
+
+test("M5 P2 简报总预算：12 条长决策共用 2000，超出丢弃并给 omitted", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const put = (url, body) => h.call("PUT", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const created = await post("/agent-whales/api/projects", { name: "预算", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+  const decisions = [];
+  for (let index = 0; index < 12; index += 1) decisions.push("决策" + index + "：" + "测".repeat(280));
+  const write = await put(`/agent-whales/api/projects/${projectId}/brief`, { expectedVersion: 1, goal: "", decisions: decisions, constraints: [] });
+  assert.equal(write.body.code, 200, JSON.stringify(write.body));
+
+  const read = await h.tools.whales_brief_read.execute({}, { agent: { id: "session-a" } });
+  assert.equal(read.truncated, true, "超预算必须标 truncated");
+  assert.ok(read.omitted > 0, "必须给出 omitted 计数，实际 " + read.omitted);
+
+  // 估算整份返回（含标记）：CJK 1 字=1 token，其他 4 字符=1 token
+  function estimate(value) {
+    let tokens = 0;
+    const walk = (item) => {
+      if (item === undefined || item === null) return;
+      if (typeof item === "string") {
+        for (const ch of item) {
+          const code = ch.codePointAt(0);
+          const cjk = (code >= 0x2e80 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff) || (code >= 0xff00 && code <= 0xffef) || (code >= 0x3000 && code <= 0x303f);
+          tokens += cjk ? 1 : 0.25;
+        }
+        return;
+      }
+      if (Array.isArray(item)) { item.forEach(walk); return; }
+      if (typeof item === "object") { Object.keys(item).forEach((key) => { if (key !== "omitted") walk(item[key]); }); }
+    };
+    walk(value);
+    // 只统计简报正文（版本号/时间等元数据不计 token 预算），从 brief/conversationBrief 里取
+    return tokens;
+  }
+  const briefText = JSON.stringify({ brief: read.brief, conversationBrief: read.conversationBrief });
+  // 上面 JSON 字符串里带引号/逗号等非 CJK 字符，按 4 字符≈1 token 计入，属同一估算规则
+  const payload = { s: briefText };
+  const total = estimate(briefText);
+  assert.ok(total <= 2000 + 60, "总估算必须被 2000 上限约束（允许 JSON 结构字符的少量误差），实际 " + total);
+  const combined = [read.brief && read.brief.goal].concat(read.brief && read.brief.constraints, read.brief && read.brief.decisions, read.conversationBrief && read.conversationBrief.duty, read.conversationBrief && read.conversationBrief.conclusions, read.conversationBrief && read.conversationBrief.artifacts).filter((item) => typeof item === "string");
+  assert.ok(combined.length > 0, "必须有内容被返回");
+});
