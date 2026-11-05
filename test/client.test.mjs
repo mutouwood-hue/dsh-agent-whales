@@ -2428,7 +2428,7 @@ test("M3 简报：项目简报 CAS、对话简报仅本人写、跨读要关联�
   );
 
   // 6) 工具读自己永远放行
-  const selfRead = await briefRead.execute({}, { agent: { id: "session-b" } });
+  const selfRead = await briefRead.execute({ sessionId: "session-b" }, { agent: { id: "session-b" } });
   assert.equal(selfRead.target, "conversation");
   assert.equal(selfRead.brief.sessionId, "session-b");
 });
@@ -2630,4 +2630,42 @@ test("M4 P2：store 损坏后仍按最后一次成功快照判定项目边界", 
   // 写操作仍是 503（不覆盖损坏文件）
   const write = await post("/agent-whales/api/projects", { name: "另一个", mainSessionId: "session-y" });
   assert.equal(write.status, 503, "降级期间写操作必须 503");
+});
+
+test("M5 简报按需读取：无参返回项目简报+自己的简报；项目外明确回落；超限截断", async () => {
+  const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const h = m1Harness(host, fs, os, pathMod);
+  const tk = await h.token();
+  const post = (url, body) => h.call("POST", url, { "x-whales-token": tk }, JSON.stringify(body));
+  const created = await post("/agent-whales/api/projects", { name: "简报M5", mainSessionId: "session-a" });
+  const projectId = created.body.data.project.projectId;
+  await post(`/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+  // 写项目简报 + 自己的对话简报
+  await h.call("PUT", `/agent-whales/api/projects/${projectId}/brief`, { "x-whales-token": tk }, JSON.stringify({ expectedVersion: 1, goal: "上线前体检", decisions: ["先体检"], constraints: ["不碰 main"] }));
+  await h.call("PUT", "/agent-whales/api/briefs/session-b", { "x-whales-token": tk }, JSON.stringify({ duty: "负责浏览器半边", conclusions: ["已验证"] }));
+
+  const read = h.tools.whales_brief_read;
+  const noArg = await read.execute({}, { agent: { id: "session-b" } });
+  assert.equal(noArg.joinedProject, true);
+  assert.equal(noArg.brief.version, 2, "项目简报带 version");
+  assert.equal(typeof noArg.brief.updatedAt, "number", "项目简报带 updatedAt");
+  assert.equal(noArg.brief.goal, "上线前体检");
+  assert.equal(noArg.conversationBrief.sessionId, "session-b", "同时返回自己的对话简报");
+  assert.equal(noArg.conversationBrief.duty, "负责浏览器半边");
+
+  // 项目外会话：明确回落，不报错
+  const outsider = await read.execute({}, { agent: { id: "session-x" } });
+  assert.equal(outsider.joinedProject, false);
+  assert.match(outsider.message, /未加入项目/);
+
+  // 超限截断：写一份超过 2000 token 的 goal
+  const longGoal = "测".repeat(2600);
+  const longWrite = await h.call("PUT", `/agent-whales/api/projects/${projectId}/brief`, { "x-whales-token": tk }, JSON.stringify({ expectedVersion: 2, goal: longGoal }));
+  assert.equal(longWrite.body.code, 200, "长简报写入必须成功：" + JSON.stringify(longWrite.body));
+  const truncated = await read.execute({}, { agent: { id: "session-b" } });
+  assert.ok(truncated.brief.goal.endsWith("[简报已截断]"), "超限必须标注截断：" + JSON.stringify({ len: truncated.brief.goal.length, tail: truncated.brief.goal.slice(-20), ver: truncated.brief.version }));
+  assert.ok(truncated.brief.goal.length < longGoal.length, "必须真的截短");
 });

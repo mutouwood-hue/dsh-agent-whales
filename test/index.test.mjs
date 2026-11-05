@@ -1487,3 +1487,12 @@ test("宿主 apply：服务重载（作用域释放 + 重新注入）不重复�
   assert.equal(Object.keys(injectHost.state.tools).length, toolCount, "重新注入后工具数量不变（无重复注册残留）");
   assert.equal(injectHost.state.routes.length, 1, "重新注入后路由只有一条");
 });
+
+
+test("M5 系统提示：团队策略段含「项目简报（按需读取）」提示且只出现一次", () => {
+  const text = String(host.TEAM_POLICY_TEXT);
+  const hits = (text.match(/项目简报（按需读取）/g) || []).length;
+  assert.equal(hits, 1, "静态提示必须恰好出现一次");
+  assert.match(text, /whales_brief_read/, "提示里必须点名按需读取工具");
+  assert.match(text, /whales_brief_read` 读取项目简报/, "提示措辞必须完整");
+});
