@@ -2025,6 +2025,469 @@ describe("M6 POST /agent-whales/api/tasks（新建任务）", () => {
   });
 });
 
+// ── 12. W1.5 事件台：ingest / 规则 / 自激保护 / 噪声闸 / 三个动作 / 过滤 / 健康码 ──
+//
+// 这一组打的是宿主半边的 W1.5 事件面（T-11 事件台 + T-14 Source 健康面板）：
+// events.json 与 handoffs.json 同目录、同 store 层；三个 ingest 接线点都只 warn 不抛。
+
+/** W1.5 专用假宿主：m6Harness + 事件台账隔离到同一临时目录。 */
+async function eventsHarness() {
+  const h = await m6Harness();
+  host.setEventsStorePathForTests(join(h.dir, "events.json"));
+  return h;
+}
+
+/** 事件 ingest 用的假 ctx：收集 warn，便于断言「失败只 warn 不抛」。 */
+function ingestCtx() {
+  const warnings = [];
+  return { warnings, logger: { warn(message) { warnings.push(String(message)); } } };
+}
+
+/** 直接读事件台账（测试断言用）。 */
+function readEventsFile(dir) {
+  return JSON.parse(readFileSync(join(dir, "events.json"), "utf8"));
+}
+
+/** 把规则数组按 name 索引，方便逐条断言。 */
+function rulesByName(event) {
+  const rules = {};
+  for (const rule of event.rules) rules[rule.name] = rule;
+  return rules;
+}
+
+/** 等 fire-and-forget 的事件记账落盘（store 降级接线点在同步读路径里，只能异步）。 */
+async function waitForEventKind(dir, kind, count) {
+  for (let i = 0; i < 60; i += 1) {
+    let store;
+    try { store = JSON.parse(readFileSync(join(dir, "events.json"), "utf8")); } catch (error) { store = undefined; }
+    const found = store === undefined ? 0 : Object.values(store.events || {}).filter((event) => event.kind === kind).length;
+    if (found >= count) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail("事件记账没有落盘: " + kind);
+}
+
+describe("W1.5 事件台：ingest 四类 kind 与三条规则", () => {
+  test("四类 kind 各自落库；有项目时三条规则全命中", async () => {
+    const h = await eventsHarness();
+    const projectId = await createProject(h);
+    // session-b 进项目，并占上一个 in_progress 任务；main（session-a）空闲 → assignable 命中
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+    const busy = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "占着" });
+    const busyId = busy.body.data.task.taskId;
+    const busyStore = JSON.parse(readFileSync(join(h.dir, "projects.json"), "utf8"));
+    busyStore.tasks[busyId].status = "in_progress";
+    busyStore.tasks[busyId].ownerSessionId = "session-b";
+    writeFileSync(join(h.dir, "projects.json"), JSON.stringify(busyStore), "utf8");
+
+    const ctx = ingestCtx();
+    const submitted = await host.ingestEvent(ctx, { source: "plugin", kind: "proposal.submit", text: "T1 · 修 F-002\n逐字描述内容", evidence: "prop-1", projectId });
+    assert.equal(submitted.state, "pending");
+    const command = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "M6 项目：开工 session-a 修 F-002", evidence: "req-1", projectId });
+    const handoff = await host.ingestEvent(ctx, { source: "plugin", kind: "handoff.result", text: "dispatch msg-1", evidence: "msg-1", projectId });
+    const degraded = await host.ingestEvent(ctx, { source: "plugin", kind: "store.degraded", text: "projects.json 只读降级", evidence: "" });
+    assert.equal(degraded.projectId, null, "没有项目归属时 projectId 落 null");
+
+    const store = readEventsFile(h.dir);
+    assert.equal(store.version, 1);
+    assert.equal(Object.keys(store.events).length, 4, "四类 kind 各落一条");
+    assert.deepEqual(store.noise, {}, "没有屏蔽时 noise 是空表");
+    const rules = rulesByName(command);
+    assert.equal(rules["rule: scope.match"].hit, true, "原文出现项目名 → 命中");
+    assert.match(rules["rule: scope.match"].detail, /M6 项目/);
+    assert.equal(rules["rule: assignable"].hit, true, "session-a 没有 in_progress 任务 → 可分配");
+    assert.match(rules["rule: assignable"].detail, /1\/2 个成员/);
+    assert.equal(rules["rule: dedupe"].hit, true, "没有同 kind 的 pending → 命中");
+    assert.match(rules["rule: dedupe"].detail, /无同类/);
+    assert.equal(ctx.warnings.length, 0, "正常 ingest 不 warn");
+    // handoff/store.degraded 也是 pending（dedupe 各自独立计数）
+    assert.equal(handoff.state, "pending");
+    assert.equal(degraded.state, "pending");
+    assert.equal(store.events[submitted.eventId].text, "T1 · 修 F-002\n逐字描述内容", "原文逐字落库");
+    assert.match(store.events[submitted.eventId].fingerprint, /^proposal\.submit\|/);
+  });
+
+  test("无项目/项目不存在/全员忙 → scope 与 assignable 未命中；dedupe 照算", async () => {
+    const h = await eventsHarness();
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+    // 两个任务分别占住 main 与 member → 全员忙
+    const first = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "占 A" });
+    const second = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "占 B" });
+    const store = JSON.parse(readFileSync(join(h.dir, "projects.json"), "utf8"));
+    store.tasks[first.body.data.task.taskId].status = "in_progress";
+    store.tasks[first.body.data.task.taskId].ownerSessionId = "session-a";
+    store.tasks[second.body.data.task.taskId].status = "in_progress";
+    store.tasks[second.body.data.task.taskId].ownerSessionId = "session-b";
+    writeFileSync(join(h.dir, "projects.json"), JSON.stringify(store), "utf8");
+
+    const ctx = ingestCtx();
+    const noProject = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assign ptask-a", evidence: "ra" });
+    const noProjectRules = rulesByName(noProject);
+    assert.equal(noProjectRules["rule: scope.match"].hit, false);
+    assert.match(noProjectRules["rule: scope.match"].detail, /无项目上下文/);
+    assert.equal(noProjectRules["rule: assignable"].hit, false);
+    assert.match(noProjectRules["rule: assignable"].detail, /无项目上下文/);
+    assert.equal(noProjectRules["rule: dedupe"].hit, true);
+
+    // 同 kind 同口径（都无项目）的第二条 → dedupe 未命中
+    const secondSameKind = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assign ptask-b", evidence: "rb" });
+    const dedupeRules = rulesByName(secondSameKind);
+    assert.equal(dedupeRules["rule: dedupe"].hit, false, "已有同 kind 待评估 → 未命中");
+    assert.match(dedupeRules["rule: dedupe"].detail, /已有 1 条/);
+
+    // 项目不存在
+    const ghost = await host.ingestEvent(ctx, { source: "plugin", kind: "proposal.submit", text: "x", evidence: "e", projectId: "proj-ghost" });
+    const ghostRules = rulesByName(ghost);
+    assert.equal(ghostRules["rule: scope.match"].hit, false);
+    assert.match(ghostRules["rule: scope.match"].detail, /项目不存在/);
+    assert.equal(ghostRules["rule: assignable"].hit, false);
+    assert.match(ghostRules["rule: assignable"].detail, /项目不存在/);
+
+    // 全员忙 + 原文不出现项目名/成员 id
+    const allBusy = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assign ptask-c", evidence: "rc", projectId });
+    const busyRules = rulesByName(allBusy);
+    assert.equal(busyRules["rule: scope.match"].hit, false);
+    assert.match(busyRules["rule: scope.match"].detail, /原文未出现/);
+    assert.equal(busyRules["rule: assignable"].hit, false, "两个成员都有 in_progress 任务");
+    assert.match(busyRules["rule: assignable"].detail, /2 个成员全部有 in_progress 任务/);
+    assert.equal(busyRules["rule: dedupe"].hit, true, "项目口径不同，前面两条不算同类");
+  });
+});
+
+describe("W1.5 事件台：自激保护与噪声闸", () => {
+  test("同 fingerprint 10 分钟内第二条 suppressed（不算 pending）；过期后恢复", async () => {
+    const h = await eventsHarness();
+    const ctx = ingestCtx();
+    const first = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assign ptask-x", evidence: "r1" });
+    assert.equal(first.state, "pending");
+    // 空白归一化后同指纹（多个空格压成一格）→ 仍被抑制
+    const second = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assign   ptask-x", evidence: "r2" });
+    assert.equal(second.state, "suppressed", "同类 10 分钟内只评估一次");
+
+    const list = await h.call("GET", "/agent-whales/api/events");
+    assert.equal(list.body.code, 200, JSON.stringify(list.body));
+    assert.equal(list.body.data.stats.pending, 1, "suppressed 不算 pending");
+    assert.equal(list.body.data.events.filter((row) => row.state === "suppressed").length, 1);
+    assert.equal(readEventsFile(h.dir).events[second.eventId].state, "suppressed");
+
+    // 把两条的 at 都改到 11 分钟前 → 窗口过期，同指纹恢复 pending
+    const store = readEventsFile(h.dir);
+    store.events[first.eventId].at = Date.now() - 11 * 60 * 1000;
+    store.events[second.eventId].at = Date.now() - 11 * 60 * 1000;
+    writeFileSync(join(h.dir, "events.json"), JSON.stringify(store), "utf8");
+    const third = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assign ptask-x", evidence: "r3" });
+    assert.equal(third.state, "pending", "超过 10 分钟必须恢复评估");
+  });
+
+  test("噪声闸：noise 未过期时同 source 新事件直接 noise、不进 pending；过期后恢复", async () => {
+    const h = await eventsHarness();
+    const ctx = ingestCtx();
+    writeFileSync(join(h.dir, "events.json"), JSON.stringify({ version: 1, events: {}, noise: { plugin: Date.now() + 60 * 1000 } }), "utf8");
+    const muted = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assign ptask-m", evidence: "rm" });
+    assert.equal(muted.state, "noise", "屏蔽中的 Source 直接记 noise");
+    assert.deepEqual(muted.rules, [], "噪声事件不评估规则");
+    const list = await h.call("GET", "/agent-whales/api/events");
+    assert.equal(list.body.data.stats.pending, 0, "噪声事件不进待评估");
+
+    writeFileSync(join(h.dir, "events.json"), JSON.stringify({ version: 1, events: {}, noise: { plugin: Date.now() - 1000 } }), "utf8");
+    const revived = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assign ptask-m2", evidence: "rm2" });
+    assert.equal(revived.state, "pending", "屏蔽过期后恢复待评估");
+  });
+});
+
+describe("W1.5 事件台：三个处置动作", () => {
+  test("open：真建任务 + 事件 opened + ticketId；重复 open → 40904；requestId 回放", async () => {
+    const h = await eventsHarness();
+    const projectId = await createProject(h);
+    const ctx = ingestCtx();
+    const text = "M6 项目：把 F-002 修一下";
+    const event = await host.ingestEvent(ctx, { source: "plugin", kind: "proposal.submit", text: text, evidence: "prop-open", projectId });
+
+    const opened = await h.call("POST", `/agent-whales/api/events/${event.eventId}/actions`, { action: "open", projectId, requestId: "open-1" });
+    assert.equal(opened.body.code, 200, JSON.stringify(opened.body));
+    const ticketId = opened.body.data.ticket.taskId;
+    assert.equal(opened.body.data.event.state, "opened");
+    assert.equal(opened.body.data.event.ticketId, ticketId);
+    assert.equal(opened.body.data.event.decidedBy, "user");
+    assert.ok(typeof opened.body.data.event.decidedAt === "number" && opened.body.data.event.decidedAt > 0);
+
+    // 任务真在任务表里（subject = 原文前 60 字，description 带原文与证据，无 owner）
+    const listed = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
+    const ticket = listed.body.data.tasks.find((task) => task.taskId === ticketId);
+    assert.ok(ticket, "开工单必须真建任务");
+    assert.equal(ticket.subject, text.slice(0, 60));
+    assert.match(ticket.description, /把 F-002 修一下/);
+    assert.match(ticket.description, /prop-open/);
+    assert.equal(ticket.status, "pending");
+    assert.equal(ticket.ownerSessionId, null, "开工单不传 owner");
+
+    const store = readEventsFile(h.dir);
+    assert.equal(store.events[event.eventId].state, "opened");
+    assert.equal(store.events[event.eventId].ticketId, ticketId);
+
+    // 重复 open（新 requestId）→ 40904 已处置
+    const again = await h.call("POST", `/agent-whales/api/events/${event.eventId}/actions`, { action: "open", projectId, requestId: "open-2" });
+    assert.equal(again.body.code, 40904, JSON.stringify(again.body));
+
+    // 同 requestId → 进程内回放，不重复建单
+    const replayed = await h.call("POST", `/agent-whales/api/events/${event.eventId}/actions`, { action: "open", projectId, requestId: "open-1" });
+    assert.equal(replayed.body.code, 200);
+    assert.equal(replayed.body.data.replayed, true);
+    assert.equal(replayed.body.data.ticket.taskId, ticketId);
+    assert.equal(replayed.body.data.event.state, "opened");
+    const listedAgain = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
+    assert.equal(listedAgain.body.data.tasks.filter((task) => task.taskId === ticketId).length, 1, "回放不得再建一个");
+  });
+
+  test("ignore 留痕不建单；open 的 projectId 回退；noise 写 24h 屏蔽且 health 变 noise；边界码齐全", async () => {
+    const h = await eventsHarness();
+    const projectId = await createProject(h);
+    const ctx = ingestCtx();
+    const ignored = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assign ptask-i", evidence: "ri", projectId });
+    const fallback = await host.ingestEvent(ctx, { source: "plugin", kind: "proposal.submit", text: "回退项目口径", evidence: "pf", projectId });
+    const noised = await host.ingestEvent(ctx, { source: "plugin", kind: "handoff.result", text: "dispatch msg-n", evidence: "msg-n", projectId });
+    // 没有项目归属的事件：open 时两边都拿不到项目 → 40000
+    const orphan = await host.ingestEvent(ctx, { source: "plugin", kind: "store.degraded", text: "projects.json 只读降级", evidence: "" });
+
+    const ignoreResult = await h.call("POST", `/agent-whales/api/events/${ignored.eventId}/actions`, { action: "ignore" });
+    assert.equal(ignoreResult.body.code, 200, JSON.stringify(ignoreResult.body));
+    assert.equal(ignoreResult.body.data.event.state, "ignored");
+    assert.equal(ignoreResult.body.data.event.decidedBy, "user");
+    assert.ok(typeof ignoreResult.body.data.event.decidedAt === "number");
+    assert.equal(ignoreResult.body.data.event.ticketId, undefined, "忽略不建单");
+    const listed = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
+    assert.equal(listed.body.data.tasks.length, 0, "ignore 不建单");
+
+    // open 的边界：事件与 body 都没有项目 → 40000；项目不存在 → 40401
+    const noProject = await h.call("POST", `/agent-whales/api/events/${orphan.eventId}/actions`, { action: "open" });
+    assert.equal(noProject.body.code, 40000, JSON.stringify(noProject.body));
+    const ghostProject = await h.call("POST", `/agent-whales/api/events/${orphan.eventId}/actions`, { action: "open", projectId: "proj-ghost" });
+    assert.equal(ghostProject.body.code, 40401, JSON.stringify(ghostProject.body));
+
+    // projectId 回退：body 不给，用事件自己的 projectId 建单
+    const fallbackResult = await h.call("POST", `/agent-whales/api/events/${fallback.eventId}/actions`, { action: "open", requestId: "fallback-open" });
+    assert.equal(fallbackResult.body.code, 200, JSON.stringify(fallbackResult.body));
+    assert.equal(fallbackResult.body.data.event.state, "opened");
+    const fallbackTicketId = fallbackResult.body.data.ticket.taskId;
+    const afterFallback = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
+    assert.ok(afterFallback.body.data.tasks.some((task) => task.taskId === fallbackTicketId), "回退口径必须建在事件自己的项目里");
+
+    // 动作非法 / 事件不存在 / 缺 token / 方法
+    const bad = await h.call("POST", `/agent-whales/api/events/${noised.eventId}/actions`, { action: "weird" });
+    assert.equal(bad.body.code, 40000);
+    const ghostEvent = await h.call("POST", "/agent-whales/api/events/evt-ghost/actions", { action: "ignore" });
+    assert.equal(ghostEvent.body.code, 40401);
+    const noToken = await h.raw("POST", `/agent-whales/api/events/${noised.eventId}/actions`, {}, { action: "ignore" });
+    assert.equal(noToken.status, 403);
+    assert.equal(noToken.body.code, 40301);
+    const options = await h.call("OPTIONS", `/agent-whales/api/events/${noised.eventId}/actions`, undefined);
+    assert.equal(options.status, 204);
+    assert.equal(options.headers["allow"], "POST, OPTIONS");
+
+    // noise：事件置 noise + 该 Source 屏蔽 24 小时
+    const noiseResult = await h.call("POST", `/agent-whales/api/events/${noised.eventId}/actions`, { action: "noise" });
+    assert.equal(noiseResult.body.code, 200, JSON.stringify(noiseResult.body));
+    assert.equal(noiseResult.body.data.event.state, "noise");
+    const store = readEventsFile(h.dir);
+    assert.ok(store.noise.plugin > Date.now(), "noise 动作必须写屏蔽截止");
+    assert.ok(store.noise.plugin <= Date.now() + 24 * 60 * 60 * 1000, "屏蔽时长是 24 小时");
+
+    const health = await h.call("GET", "/agent-whales/api/events/health");
+    assert.equal(health.body.code, 200, JSON.stringify(health.body));
+    const plugin = health.body.data.health.find((row) => row.source === "plugin");
+    assert.equal(plugin.state, "noise", "被屏蔽的 Source 健康码必须是 noise");
+    assert.ok(typeof plugin.mutedUntil === "number" && plugin.mutedUntil > Date.now());
+
+    // 已处置事件再处置 → 40904
+    const reIgnore = await h.call("POST", `/agent-whales/api/events/${ignored.eventId}/actions`, { action: "ignore" });
+    assert.equal(reIgnore.body.code, 40904, JSON.stringify(reIgnore.body));
+  });
+});
+
+describe("W1.5 事件台：GET /api/events 过滤与统计", () => {
+  test("source/state/limit 过滤、stats、倒序、跨项目口径、非 GET 405", async () => {
+    const h = await eventsHarness();
+    const projectA = await createProject(h);
+    const projectB = await h.call("POST", "/agent-whales/api/projects", { name: "项目 B", mainSessionId: "session-b" });
+    const bId = projectB.body.data.project.projectId;
+    const now = Date.now();
+    writeFileSync(join(h.dir, "events.json"), JSON.stringify({
+      version: 1,
+      noise: {},
+      events: {
+        "evt-1": { eventId: "evt-1", projectId: projectA, source: "plugin", kind: "task.command", text: "t1", evidence: "e1", fingerprint: "task.command|t1", at: now - 3000, state: "pending", rules: [] },
+        "evt-2": { eventId: "evt-2", projectId: projectA, source: "plugin", kind: "proposal.submit", text: "t2", evidence: "e2", fingerprint: "proposal.submit|t2", at: now - 2000, state: "opened", ticketId: "ptask-1", decidedAt: now - 1000, decidedBy: "user", rules: [] },
+        "evt-3": { eventId: "evt-3", projectId: projectA, source: "plugin", kind: "handoff.result", text: "t3", evidence: "e3", fingerprint: "handoff.result|t3", at: now - 1000, state: "ignored", decidedAt: now - 500, decidedBy: "user", rules: [] },
+        "evt-4": { eventId: "evt-4", projectId: bId, source: "main-session", kind: "task.command", text: "t4", evidence: "e4", fingerprint: "task.command|t4", at: now - 500, state: "pending", rules: [] },
+        "evt-5": { eventId: "evt-5", projectId: null, source: "plugin", kind: "store.degraded", text: "t5", evidence: "", fingerprint: "store.degraded|t5", at: now - 26 * 60 * 60 * 1000, state: "pending", rules: [] }
+      }
+    }), "utf8");
+
+    const all = await h.call("GET", "/agent-whales/api/events");
+    assert.equal(all.body.code, 200, JSON.stringify(all.body));
+    assert.equal(all.body.data.source, "plugin");
+    assert.equal(all.body.data.projectId, null, "不带 projectId = 跨全部项目");
+    assert.deepEqual(all.body.data.events.map((row) => row.eventId), ["evt-4", "evt-3", "evt-2", "evt-1", "evt-5"], "必须按 at 倒序");
+    assert.deepEqual(all.body.data.stats, { pending: 3, today: 4, opened: 1, ignored: 1 }, "evt-5 是 26 小时前，不算今天");
+    assert.equal(all.body.data.events[2].ticketId, "ptask-1", "ticketId 原样带出");
+    assert.equal(all.body.data.events[2].decidedBy, "user");
+
+    const scoped = await h.call("GET", `/agent-whales/api/events?projectId=${projectA}`);
+    assert.deepEqual(scoped.body.data.events.map((row) => row.eventId), ["evt-3", "evt-2", "evt-1"]);
+    assert.deepEqual(scoped.body.data.stats, { pending: 1, today: 3, opened: 1, ignored: 1 });
+
+    // main-session 是词表值：本期不产事件，但筛选器必须能用
+    const bySource = await h.call("GET", "/agent-whales/api/events?source=main-session");
+    assert.deepEqual(bySource.body.data.events.map((row) => row.eventId), ["evt-4"]);
+    const byState = await h.call("GET", "/agent-whales/api/events?state=opened");
+    assert.deepEqual(byState.body.data.events.map((row) => row.eventId), ["evt-2"]);
+    const limited = await h.call("GET", "/agent-whales/api/events?limit=2");
+    assert.deepEqual(limited.body.data.events.map((row) => row.eventId), ["evt-4", "evt-3"]);
+    const capped = await h.call("GET", "/agent-whales/api/events?limit=9999");
+    assert.equal(capped.body.data.events.length, 5, "limit 最大 500");
+    // fingerprint 按契约下发（自激保护的内部依据，客户端可展示）
+    assert.equal(all.body.data.events[0].fingerprint, "task.command|t4");
+
+    const post = await h.call("POST", "/agent-whales/api/events", {});
+    assert.equal(post.status, 405);
+    assert.equal(post.headers["allow"], "GET, HEAD");
+  });
+});
+
+describe("W1.5 事件台：Source 健康面板固定词表", () => {
+  test("idle → ready → assessing → suppressed → noise 的递进与优先级", async () => {
+    const h = await eventsHarness();
+    await h.token();
+    // 空台账：四个词表 Source 全是 idle
+    const empty = await h.call("GET", "/agent-whales/api/events/health");
+    assert.equal(empty.body.code, 200, JSON.stringify(empty.body));
+    assert.deepEqual(empty.body.data.health.map((row) => row.source), ["plugin", "main-session", "workspace", "schedule"]);
+    for (const row of empty.body.data.health) {
+      assert.equal(row.state, "idle", "今天没有事件 → idle");
+      assert.equal(row.today, 0);
+      assert.equal(row.pending, 0);
+      assert.equal(row.lastAt, 0);
+      assert.equal(row.mutedUntil, undefined);
+    }
+
+    const ctx = ingestCtx();
+    // ready：今天有事件但都已处置
+    const done = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "ready-one", evidence: "r" });
+    await h.call("POST", `/agent-whales/api/events/${done.eventId}/actions`, { action: "ignore" });
+    const ready = await h.call("GET", "/agent-whales/api/events/health");
+    const readyRow = ready.body.data.health.find((row) => row.source === "plugin");
+    assert.equal(readyRow.state, "ready", "有今天的事件、无 pending、无抑制 → ready");
+    assert.equal(readyRow.today, 1);
+
+    // assessing：有 pending（同指纹第二条被 suppressed，但不抢 assessing）
+    const pendingOne = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assessing-one", evidence: "a" });
+    await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "assessing-one", evidence: "a2" });
+    const assessing = await h.call("GET", "/agent-whales/api/events/health");
+    const assessingRow = assessing.body.data.health.find((row) => row.source === "plugin");
+    assert.equal(assessingRow.state, "assessing", "有 pending → assessing");
+    assert.equal(assessingRow.pending, 1);
+    assert.equal(assessingRow.suppressed, 1, "近 10 分钟的 suppressed 计数");
+    assert.equal(assessingRow.today, 3);
+
+    // suppressed：pending 也处置掉，只剩近 10 分钟的 suppressed
+    await h.call("POST", `/agent-whales/api/events/${pendingOne.eventId}/actions`, { action: "ignore" });
+    const suppressed = await h.call("GET", "/agent-whales/api/events/health");
+    const suppressedRow = suppressed.body.data.health.find((row) => row.source === "plugin");
+    assert.equal(suppressedRow.state, "suppressed", "近 10 分钟有 suppressed → suppressed");
+
+    // noise：被标记噪声且未过期
+    const mutedOne = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "noise-one", evidence: "n" });
+    await h.call("POST", `/agent-whales/api/events/${mutedOne.eventId}/actions`, { action: "noise" });
+    const noised = await h.call("GET", "/agent-whales/api/events/health");
+    const noisedRow = noised.body.data.health.find((row) => row.source === "plugin");
+    assert.equal(noisedRow.state, "noise", "被标记噪声且未过期 → noise");
+    assert.ok(noisedRow.mutedUntil > Date.now());
+    // 其余三个词表 Source 始终 idle
+    for (const row of noised.body.data.health) {
+      if (row.source === "plugin") continue;
+      assert.equal(row.state, "idle");
+    }
+  });
+});
+
+describe("W1.5 事件台：接线点与失败兜底", () => {
+  test("三个 ingest 接线点各自落库；store 降级落一条且只落一条", async () => {
+    const h = await eventsHarness();
+    const projectId = await createProject(h);
+
+    // 1) 提案工具提交成功 → proposal.submit（原文逐字）
+    const proposal = await h.tools.whales_propose_tasks.execute({
+      leadSessionId: "session-a", projectId, items: [{ key: "T1", title: "修 F-002", description: "逐字描述内容" }]
+    }, { agent: { id: "session-a" } });
+
+    // 2) 任务命令写成功 → task.command
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "接线" });
+    const taskId = created.body.data.task.taskId;
+    await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-b", expectedRevision: 1, requestId: "wire-assign" });
+
+    // 3) 交接失败（session-worker 是 live 但没有 followup → dispatch-rejected）→ handoff.result
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-worker" });
+    const dispatched = await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign-and-dispatch", owner: "session-worker", expectedRevision: 2, requestId: "wire-dispatch" });
+    assert.equal(dispatched.body.code, 200, JSON.stringify(dispatched.body));
+    assert.equal(dispatched.body.data.dispatch.status, "failed", "假宿主没有 followup，交接必须失败");
+
+    let store = readEventsFile(h.dir);
+    let events = Object.values(store.events);
+    const submitted = events.find((event) => event.kind === "proposal.submit");
+    assert.ok(submitted, "提案提交必须落事件");
+    assert.equal(submitted.evidence, proposal.proposalId);
+    assert.equal(submitted.projectId, projectId);
+    assert.match(submitted.text, /T1 · 修 F-002/);
+    assert.match(submitted.text, /逐字描述内容/);
+    const command = events.find((event) => event.kind === "task.command");
+    assert.ok(command, "任务命令必须落事件");
+    assert.equal(command.text, "assign " + taskId);
+    assert.equal(command.evidence, "wire-assign");
+    assert.equal(command.projectId, projectId);
+    const handoff = events.find((event) => event.kind === "handoff.result");
+    assert.ok(handoff, "交接失败必须落事件");
+    assert.match(handoff.text, /^dispatch /);
+    assert.equal(handoff.projectId, projectId);
+
+    // 4) projects.json 损坏 → 读一次落一条 store.degraded，再读不重复
+    writeFileSync(join(h.dir, "projects.json"), "{ 坏", "utf8");
+    await h.call("GET", "/agent-whales/api/projects");
+    await waitForEventKind(h.dir, "store.degraded", 1);
+    store = readEventsFile(h.dir);
+    const degraded = Object.values(store.events).filter((event) => event.kind === "store.degraded");
+    assert.equal(degraded.length, 1, "一次降级 episode 只落一条");
+    assert.equal(degraded[0].text, "projects.json 只读降级");
+    assert.equal(degraded[0].projectId, null);
+    assert.ok(typeof degraded[0].evidence === "string" && degraded[0].evidence !== "", "evidence 是备份路径");
+    assert.ok(existsSync(degraded[0].evidence), "备份文件必须真实存在");
+    await h.call("GET", "/agent-whales/api/projects");
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(Object.values(readEventsFile(h.dir).events).filter((event) => event.kind === "store.degraded").length, 1, "恢复前不重复登记");
+  });
+
+  test("ingest 失败不抛：events.json 损坏时 ingest 静默、主流程不受影响", async () => {
+    const h = await eventsHarness();
+    const projectId = await createProject(h);
+    writeFileSync(join(h.dir, "events.json"), "{ 不是 json", "utf8");
+    const ctx = ingestCtx();
+    const result = await host.ingestEvent(ctx, { source: "plugin", kind: "task.command", text: "x", evidence: "y", projectId });
+    assert.equal(result, undefined, "台账损坏时 ingest 必须静默收场");
+    assert.equal(ctx.warnings.length, 1, "失败要 warn 一次");
+    assert.match(ctx.warnings[0], /event ingest/);
+
+    // 主流程不受影响：建任务、读事件台都正常
+    const task = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "照常" });
+    assert.equal(task.body.code, 200, JSON.stringify(task.body));
+    const list = await h.call("GET", "/agent-whales/api/events");
+    assert.equal(list.body.code, 200);
+    assert.deepEqual(list.body.data.events, [], "损坏的事件台账回空表");
+    assert.equal(list.body.data.health.length, 4, "健康面板仍给四个词表 Source");
+    assert.deepEqual(list.body.data.stats, { pending: 0, today: 0, opened: 0, ignored: 0 });
+  });
+});
+
 describe("W1 worker preset 安装器", () => {
   test("首次安装两个文件、二次 apply 不覆盖、目标已存在时不动", () => {
     const presetRoot = mkdtempSync(join(tmpdir(), "aw-preset-"));
