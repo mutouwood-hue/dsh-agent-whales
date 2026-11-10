@@ -265,6 +265,67 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 `controlToken` 只出现在同源 GET 的响应体里——跨源页面受 CORS 限制读不到响应体，因此拿不到 token，
 伪造的 POST 会被 403。这是**同源证明（CSRF 防护）而不是身份认证**，别把它当鉴权用。
 
+## 项目工作台（M6 · 节点图画布）
+
+2026-11-09 上线的主形态：侧栏多一个「🐋 项目」入口，点进去是插件自己的**独立主面板**
+（`main` 槽新增 key `whales-canvas`，**不覆盖** `conversation`，顶栏可一键切回官方 Chat）。
+里面是十屏：项目列表、项目工作台（画布 / 任务 / 简报 / 执行四个 Tab）、需要我处理、发送记录、
+事件台、首次体验、设置。
+
+**画布**只承载三类节点：上下文（仓库 / 文件夹，来自任务落点）、Agent（项目成员对话）、
+Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links`，只表示允许互发 / 互读）；
+上下文 → Agent 是**有向数据流**（虚线）。任务依赖 `blockedBy` **不上画布**，只在任务板。
+支持拖拽挪位、Ctrl+滚轮缩放、小地图、拖锚点建线、点选后确认删除；删除成员节点只解除画布引用，
+进行中的工单标记 `handed_back` 且**不自动取消**（PRD §53.9.12）。
+
+**任务板**走插件自建任务表（`~/.dsh/agent-whales/projects.json`，与宿主任务板共存不混），
+列 = 任务 / owner / 依赖 / 落点 / report / 状态；`report` 四态 `done` / `draft` /
+`handed_back` / `human_action`——前两个 worker 可写，后两个**只能人关**（worker 只能发起），
+写入口径与任务同一条 CAS（冲突 = 重报，不覆盖、无强制写）。
+
+**简报**两层：项目简报（人 / 主对话可写，版本 CAS）+ 对话简报（本人可写，人可代写并标「代写」），
+两者**共用 2000 token 总预算**（CJK 1 字 = 1 token，其他 4 字符 = 1 token），超出按序丢弃并返回
+`truncated` / `omitted`。每轮自动注入全量上下文已被否决，改为**按需读取** + 系统提示静态提示。
+
+**主题**默认浅色，设置里可切暗色；两套 token 一一对应（`WB_TOKENS`），组件只引用
+`var(--daw-*)`，切主题即换色，没有第二套组件。
+
+### 工作台新增的路由（都在 `/agent-whales/api` 前缀下，读操作不需要 token）
+
+| 路由 | 方法 | 作用 |
+|---|---|---|
+| `/projects` · `/projects/:id` | `GET` | 项目列表 / 单项目（成员、关联线、简报） |
+| `/projects/:id/members` · `/members/:sid` | `POST` / `DELETE` | 加入 / 移除项目对话（一个对话只能属于一个项目，`40701`） |
+| `/projects/:id/links` | `POST` / `DELETE` | 建 / 删无向关联线（同项目、无向、幂等） |
+| `/projects/:id/brief` | `GET` / `PUT` | 项目简报读写（`expectedVersion` CAS） |
+| `/briefs/:sessionId` | `GET` / `PUT` | 对话简报读写（人可代写，标 `proxy`） |
+| `/tasks?projectId=` | `GET` | 项目任务表快照（`source:"project"`，不混宿主任务板） |
+| `/tasks` | `POST` | 新建项目任务（落点字段一起给） |
+| `/tasks/:taskId/report` | `PUT` | 写 report 四态（CAS + 人机边界） |
+| `/tasks/:taskId/commands` | `POST` | 既有五动作：assign / assign-and-dispatch / dispatch / unassign / reopen |
+| `/handoffs?projectId=` | `GET` | 发送记录（交接账本只读，`at` 倒序） |
+| `/inbox?projectId=` | `GET` | 需要我处理四组：提案待确认 / worker 求人 / 超 scope 退回 / 系统提醒 |
+| `/sessions` | `GET` | 会话目录（加入对话列表、owner 显示名、画布 Agent 节点用） |
+| `/proposals` · `/proposals/:id/confirm` | `GET` / `POST` | 提案只读展示 + 确认后逐条建任务 |
+
+写操作一律带 `x-whales-token`（同源证明，与 `/visit-tools` 同一把 `controlToken`）；
+信封统一 `{code,msg,data}`，业务码见 `lib/index.js` 里的 `TASK_CODE` / `PROJECT_CODE` /
+`PROJECT_TASK_EXTRA`（report 冲突 = `40902`，worker 越权 = `40708`，跨项目 = `40701`，
+主对话不可移除 = `40702`，提案须主对话提交 = `40706`，store 只读降级 = `50302`）。
+
+### worker preset（执行器专用）
+
+`presets/dsh-agent-whales-worker/` 随包分发；插件 `apply` 时把它复制到
+`~/.dsh/.agent-presets/dsh-agent-whales-worker/`（**已存在则整目录跳过，绝不覆盖用户改过的版本**；
+源文件不齐时不建目标目录，避免半安装）。 composition 逐行与官方 `standard` 母本比对：
+保留 13 行全等，删掉 `tool-ask-user` / `present` / plan-mode / goal ×2 / delegation 全组 / `tool-web`，
+**无新增行**。`name` / `description` 写明「执行器专用，不供手动选择」；用户手动会话仍用 `standard`。
+
+> 为什么不像 PRD 字面写的那样「落 `cordis.patch.yml`」：patch 是往**宿主组合**插行，
+> 进程全局、对每个 agent 生效；而 preset 必须是可按名字选择、挂在 agent plane 独立 realm 的组合，
+> 用户 preset 根才是它受支持的分发通道（落 patch 还会重犯 `cordis.patch.yml` 文件头已经警告过的
+> duplicate loader entry id 类启动失败）。
+
 ## 素材重建
 
 ```powershell
@@ -450,7 +511,7 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 
 ## 版本与兼容性
 
-当前插件版本：**0.22.0**。
+当前插件版本：**0.24.0**（M6 项目工作台：节点画画布 + 任务表 report 四态 + 简报按需读取 + worker preset）。
 
 | 宿主 | 团队段 | 说明 |
 |---|---|---|
@@ -476,8 +537,13 @@ npm test          # = node --test test/，跑 test/ 下全部 *.test.mjs
 
 四个文件分工：`client.test.mjs`（基线：契约/计数/素材/排布/家族树/气泡/拖拽/设置/渲染）、
 `index.test.mjs`（宿主半边）、`client-robustness.test.mjs`（对抗性：畸形输入、缺服务、边界值）、
+`workbench.test.mjs`（M6 工作台纯逻辑 + 十屏渲染冒烟）、
 `meta.test.mjs`（发布门禁：清单契约、`files` 覆盖 `exports` 目标、patch 无 BOM/可解析、
 默认 patch 只增量插入自己、`npm test` 覆盖全部用例）。
+
+开发期预览（不进包、不进测试目录）：`node _scratch/wb-preview.mjs` 用假宿主数据把工作台十屏
+渲染成静态 HTML（`_scratch/wb-preview/`），配 `_scratch/wb-preview-check.mjs`（逐屏数元素）与
+`_scratch/wb-css-check.mjs`（CSS 括号配对 / token 两套主题齐全 / 无硬编码 hex）自检。
 
 覆盖：信封/清单契约（注册 id === 包名、只 `require("react")`、注册到 `shell.overlay` +
 `settings.section`、中英文键集合一致）、计数口径（状态表优先、provisioning/failed、挂 Lead 团队、无团队退化、
@@ -504,8 +570,9 @@ node _scratch/preview.mjs
 | 文件 | 作用 |
 |---|---|
 | `lib/index.js` | 宿主半边：注册「团队协作」策略段落（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、四个 `whales_visit_*` 串门工具（可运行时开关）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
-| `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层、设置页、状态表情状态机、素材 loader（**不含图片数据**，运行期从宿主路由按皮肤拉） |
+| `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层、设置页、状态表情状态机、素材 loader（**不含图片数据**，运行期从宿主路由按皮肤拉）；**M6 项目工作台**（十屏 + 节点画布 + 设计 token，纯逻辑可离线测） |
 | `cordis.patch.yml` | 默认层（**唯一真相**）：插入 `agent-whales` + 团队服务/工具/面板三行，并 `disabled` 掉旧 subagent 四行 |
+| `presets/dsh-agent-whales-worker/` | 执行器 preset（随包分发，`apply` 时装到用户 preset 根；执行 Session 专用，不供手动选择） |
 | `assets/*.webp` | 28 张精灵图（**随包分发**，运行期由宿主路由按皮肤提供；另 2 张 Martty 像素小人的 PNG 源在 `assets/pet/`） |
 | `assets/manifest.json` | 运行期素材清单：`{version, keys:{key:{w,h,bytes,skin}}}`，宿主路由的白名单来源（2.8KB） |
 | `assets/pet/` | 经典皮肤的两张上游 PNG（Martty，MIT）+ 复现说明；`c-idle` / `c-work` 的唯一源 |
@@ -522,7 +589,8 @@ node _scratch/preview.mjs
 | `icon.svg` | 插件管理页图标 |
 | `test/harness.mjs` | 离线测试用的最小 React 垫片与插件加载器 |
 | `test/client.test.mjs` | 基线用例（契约 / 计数 / 素材 / 家族树 / 气泡 / 拖拽 / 设置 / 渲染） |
-| `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具、活动接口） |
+| `test/workbench.test.mjs` | M6 工作台纯逻辑用例（路由 / token 估算 / 简报预算 / 任务行派生 / report 人机边界 / 待办聚合 / 画布图 / 十屏渲染冒烟 / 只读缓存） |
+| `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具、活动接口、项目任务表、简报、提案、report、handoffs、inbox、sessions、preset 安装器） |
 | `test/client-robustness.test.mjs` | 对抗性用例（畸形输入、缺服务、边界值） |
 | `test/meta.test.mjs` | 发布门禁用例（清单契约、`files`/`exports`、patch BOM 与结构、`npm test` 覆盖面） |
 | `test/index.js` | `node --test test/` 的目录入口，导入全部 `*.test.mjs` |
@@ -539,6 +607,10 @@ node _scratch/preview.mjs
   （manifest `no-store`、图片 `immutable` + etag、未知 key / 路径穿越 → 404、非 GET → 405）；
   客户端按皮肤分波（L1 base → L2 常用 → L3 其余）、单帧失败只摘该帧、manifest 失败整层退矢量；
   `npm pack` = 39 文件 / 425KB，`art.json` 与 `_contact.png` 不进包。测试 150/150。
+- 已验证 · 体积门禁随 M6 上调（2026-11-09）：`dsh.client` 只认一个 `./client` 导出，装饰层与
+  十屏工作台共用同一个单文件 bundle，`client.js` 到 **约 308KB**（素材依旧出包、不内联）。
+  上限从 200KB 提到 **420KB**（`prepack` + `test/meta.test.mjs` + `test/client.test.mjs` 三处同改），
+  上限的意义是「别无声膨胀」，不是「永远 127KB」。
 - 已验证 · 真机出现：用户截图确认角色、头顶气泡、计数徽章都正常渲染（当时还是 `data:` 内联方案）；
   D1 改成宿主路由后，**真机渲染未复测**——见下面「未验证」。
 - 已验证 · 观感：`preview.still.html` 按 DSH 框架几何（40px 标题栏 + 240px 侧边栏 + 会话头 + `inset:0`
@@ -574,3 +646,21 @@ node _scratch/preview.mjs
   客户端下一次轮询会如实显示 `visitTools:false`，重新打开即可自愈；未在真机复现。
 - 未验证 · 在缺少 `@deepseek-ai/dsh-experimental-*` 的 DSH 上安装：按代码推断会拒绝启动
   （`assertEntriesLoaded` 抛 `plugin(s) failed to load`），未在真机上复现。
+- 已验证 · M6 工作台逻辑：`npm test` 全绿（其中 `test/workbench.test.mjs` 18 个用例专测工作台：
+  路由 round-trip 与非法回落、CJK token 估算、简报预算按序填充/超限丢弃/`omitted`、
+  任务行 `ready` 与「前置已删除 / 等待前置」、report 人机边界（worker 只能写 done/draft 或发起退回）、
+  待办四组计数、画布节点三类派生与落点去重、画布连线跳过自连/缺失端、深浅主题 token 键集合一致）。
+- 已验证 · M6 十屏都渲染得出东西：`_scratch/wb-preview.mjs` 用假宿主数据把十屏渲染成静态 HTML，
+  `_scratch/wb-preview-check.mjs` 逐屏数关键元素（列表 4 统计 + 3 项目卡、画布 10 节点、
+  任务表 7 行、简报 4 张对话简报卡、执行台 3 张工单卡、待办 4 条、发送记录 6 行），
+  `_scratch/wb-css-check.mjs` 校验 CSS 花括号配对、16 个 token 两套主题都在、组件无硬编码 hex。
+- 已验证 · M6 宿主路由：`test/index.test.mjs` 覆盖 report 四态 + CAS 40902 + worker 越权 40708 +
+  人可关、落点字段落库、handoffs 项目过滤与倒序、inbox 四组聚合（含只读降级）、
+  sessions 目录形状、POST /tasks 新建与 requestId 回放、preset 安装器（首装 / 幂等 / 不覆盖 / 源不齐不建目录）。
+- 未验证 · M6 画布交互手感：拖拽挪位、Ctrl+滚轮缩放、拖锚点建线、点选删除——垫片里
+  `useState` 的 setter 是空函数，只能验证几何换算（`wbCanvasEdges` / `wbCanvasNodes`）与渲染，
+  真实指针事件的手感与「拖出边界」未跑。
+- 未验证 · M6 真机对位：工作台跑在 `main` 槽里，与官方会话页的切换、侧栏 `panellist` 入口的
+  实际图标位姿、以及「记住上次选择」未在真实 DSH 里验证（当前是插件内部路由，不写浏览器 history）。
+- 未验证 · 事件台交互：本期只做「最小版」——数据来自待办聚合（提案 / report / 系统提醒），
+  开工单 / 忽略 / 标记噪声三个动作与 Source 健康面板留 W1.5；`event_replay` 完整时间线归 W2。
