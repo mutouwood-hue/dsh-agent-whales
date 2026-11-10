@@ -169,7 +169,7 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
   const { appended } = installDocumentStub();
   const injections = [];
   const registrations = [];
-  let dictionary = null;
+  const dictionaries = [];
   const effects = [];
 
   const ctx = {
@@ -182,13 +182,16 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
       register(options, component) { return { options, component }; }
     },
     sessions: { binding: () => undefined },
-    locale: { register(namespace, dict) { dictionary = { namespace, dict }; return () => {}; } }
+    locale: {
+      // 装饰层与工作台各注册一个命名空间；测试要把两份都收下来，不能只留最后一个。
+      register(namespace, dict) { dictionaries.push({ namespace, dict }); return () => {}; }
+    }
   };
 
   plugin.apply(ctx);
 
-  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view"]);
-  assert.equal(registrations.length, 3);
+  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "sidebar.panellist"]);
+  assert.equal(registrations.length, 5);
   for (const entry of registrations.slice(0, 2)) {
     assert.equal(entry.options.id, "agent-whales");
     assert.equal(typeof entry.component, "function");
@@ -202,13 +205,34 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
   assert.equal(canvasSeat.options.priority, undefined, "不得影子官方 UI");
   assert.ok(String(canvasSeat.options.label).length > 0);
   assert.equal(typeof canvasSeat.component, "function");
+  // M6/P2：独立主面板只用我们自己的 key，绝不覆盖 conversation（PRD §45.4）
+  const workbenchSeat = registrations[3];
+  assert.equal(workbenchSeat.options.name, "main");
+  assert.equal(workbenchSeat.options.key, "whales-canvas");
+  assert.equal(workbenchSeat.options.priority, undefined, "keyed 槽按 key 选择，不需要影子优先级");
+  assert.equal(workbenchSeat.options.id, undefined, "keyed 槽不认 id（那是 list 槽的选项）");
+  assert.equal(workbenchSeat.options.order, undefined, "keyed 槽不认 order");
+  assert.equal(typeof workbenchSeat.component, "function");
+  const entrySeat = registrations[4];
+  assert.equal(entrySeat.options.name, "sidebar.panellist");
+  assert.equal(entrySeat.options.id, "whales-canvas");
+  assert.equal(typeof entrySeat.options.order, "number", "list 槽用 {id, order}");
+  assert.equal(typeof entrySeat.component, "function");
   assert.equal(appended.length, 1, "样式标签注入一次");
   assert.equal(appended[0].id, "dsh-agent-whales-styles");
-  assert.equal(dictionary.namespace, "agent-whales");
+  const dictionary = dictionaries.find((row) => row.namespace === "agent-whales");
+  assert.ok(dictionary, "必须注册 agent-whales 命名空间");
   assert.deepEqual(
     Object.keys(dictionary.dict.zh).sort(),
     Object.keys(dictionary.dict.en).sort(),
     "中英文键集合必须一致"
+  );
+  const workbenchDict = dictionaries.find((row) => row.namespace === "agent-whales-workbench");
+  assert.ok(workbenchDict, "M6 工作台文案必须注册自己的命名空间");
+  assert.deepEqual(
+    Object.keys(workbenchDict.dict.zh).sort(),
+    Object.keys(workbenchDict.dict.en).sort(),
+    "工作台中英文键集合必须一致"
   );
   assert.ok(effects.every((name) => typeof name === "string" && name.length > 0), "每个 effect 都要有名字");
   assert.ok(plugin.inject.includes("slots") && plugin.inject.includes("sessions"));
@@ -1385,11 +1409,13 @@ test("素材加载：重试耗尽后，activity 通了（宿主路由已就绪�
   assert.equal(artLoader.notifyHostAlive(), false, "hostAlive 信号只消费一次");
 });
 
-test("体积：client.js 不再内联 base64 素材，且控制在 200KB 以内", () => {
+test("体积：client.js 不再内联 base64 素材，且控制在 420KB 以内", () => {
+  // 上限 200KB → 420KB（M6 项目工作台，2026-11-09）：dsh.client 只认一个 ./client
+  // 导出，装饰层与十屏工作台共用同一个单文件 bundle；素材依旧出包、不内联。
   const source = readFileSync(join(pluginDir, "lib", "client.js"), "utf8");
   assert.equal(source.includes("data:image/webp;base64"), false, "bundle 里不得再出现内联 WebP");
   const bytes = Buffer.byteLength(source, "utf8");
-  assert.ok(bytes < 200 * 1024, "client.js 必须 ≤200KB（D1 目标），实际 " + Math.round(bytes / 1024) + "KB");
+  assert.ok(bytes < 420 * 1024, "client.js 必须 ≤420KB，实际 " + Math.round(bytes / 1024) + "KB");
   assert.ok(source.includes("var ART = {};"), "ART 必须保留空表占位，等运行时填充");
 });
 

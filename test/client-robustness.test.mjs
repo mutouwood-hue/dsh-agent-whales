@@ -555,13 +555,13 @@ test("串门开关：未就绪时点击不发请求（不能拿空 token 去打�
   }
 });
 
-test("i18n：串门开关的 visitTools/visitToolsHint 在 zh/en 两份词典里都存在且非空", () => {
+test("i18n：装饰层与工作台两份词典的 zh/en 键集合都必须一致且非空", () => {
   const { plugin } = loadPlugin();
   installDocumentStub();
-  let dictionary = null;
+  const dictionaries = [];
   const ctx = {
     effect(run) { return run(); },
-    locale: { register(namespace, dict) { dictionary = { namespace, dict }; return () => {}; } },
+    locale: { register(namespace, dict) { dictionaries.push({ namespace, dict }); return () => {}; } },
     slots: { inject() { return () => {}; }, register(options, component) { return { options, component }; } },
     sessions: { binding() { return undefined; } }
   };
@@ -570,15 +570,28 @@ test("i18n：串门开关的 visitTools/visitToolsHint 在 zh/en 两份词典里
   } finally {
     delete globalThis.document;
   }
-  assert.ok(dictionary, "apply 必须注册词典");
-  assert.equal(
-    Object.keys(dictionary.dict.zh).sort().join(","),
-    Object.keys(dictionary.dict.en).sort().join(","),
-    "中英文键集合必须一致"
-  );
+  // 装饰层（agent-whales）与 M6 工作台（agent-whales-workbench）各一份；
+  // 老宿主的 locale 服务可能只认第一个命名空间，所以两份都要自成一体。
+  assert.ok(dictionaries.length >= 2, "apply 必须注册两份词典（装饰层 + 工作台）");
+  for (const row of dictionaries) {
+    assert.ok(row.dict && row.dict.zh && row.dict.en, row.namespace + " 必须有 zh/en 两份");
+    assert.deepEqual(
+      Object.keys(row.dict.zh).sort(),
+      Object.keys(row.dict.en).sort(),
+      row.namespace + " 中英文键集合必须一致"
+    );
+    for (const lang of ["zh", "en"]) {
+      for (const key of Object.keys(row.dict[lang])) {
+        const value = row.dict[lang][key];
+        assert.equal(typeof value, "string", row.namespace + " " + lang + "." + key + " 必须是字符串");
+        assert.ok(value.length > 0, row.namespace + " " + lang + "." + key + " 不得为空");
+      }
+    }
+  }
+  const decoration = dictionaries.find((row) => row.namespace === "agent-whales");
   for (const key of ["visitTools", "visitToolsHint"]) {
     for (const lang of ["zh", "en"]) {
-      const value = dictionary.dict[lang][key];
+      const value = decoration.dict[lang][key];
       assert.equal(typeof value, "string", lang + "." + key + " 必须是字符串");
       assert.ok(value.length > 0, lang + "." + key + " 不得为空");
     }
