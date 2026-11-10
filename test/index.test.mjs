@@ -1514,6 +1514,12 @@ function m6Harness() {
   const routes = [];
   const tools = {};
   const followups = [];
+  // W2 观测用例专用（只加不改）：给指定会话喂一份会话日志（tool/call 事件）。
+  // 没有注入的会话保持原来的 { session: { id } }，既有用例行为不变。
+  const sessionLogs = new Map();
+  // W2 观测用例专用（只加不改）：捕获宿主事件监听器（tools/execute 等），
+  // 用来喂「当前工具」。既有用例从不触发这些事件，行为不变。
+  const listeners = {};
   // list() 里四个会话；live 由 get() 决定（session-old 只存在于持久化里）。
   const rows = [
     { id: "session-a", title: "主线会话", running: true, header: { origin: "user" } },
@@ -1531,7 +1537,14 @@ function m6Harness() {
         get: (id) => (live.has(id) ? rows.find((row) => row.id === id) : undefined)
       };
       if (name === "agents") return {
-        get: (id) => (live.has(id) ? { id, status: id === "session-a" ? "running" : "idle", session: { id } } : undefined),
+        get: (id) => {
+          if (!live.has(id)) return undefined;
+          const agent = { id, status: id === "session-a" ? "running" : "idle", session: { id } };
+          const events = sessionLogs.get(id);
+          // 注入了日志才挂 events：没注入时与旧 fixture 完全一致。
+          if (events !== undefined) agent.session = { id, events };
+          return agent;
+        },
         list: () => []
       };
       if (name === "sessionPersistence") return { stat: (id) => (archived.has(id) ? { id } : undefined) };
@@ -1539,7 +1552,7 @@ function m6Harness() {
       return undefined;
     },
     effect(run) { return run(); },
-    on() { return () => {}; }
+    on(name, listener) { listeners[name] = listener; return () => {}; }
   });
   const route = routes.find((item) => item && typeof item.handler === "function");
   assert.ok(route, "活动路由必须挂载");
@@ -1578,6 +1591,8 @@ function m6Harness() {
     tools,
     followups,
     route,
+    sessionLogs,
+    listeners,
     /** 带同源 token 的常规调用。 */
     call(method, url, body) {
       const headers = token === undefined ? {} : { "x-whales-token": token };
@@ -2535,6 +2550,554 @@ describe("W1 worker preset 安装器", () => {
       if (previous === undefined) delete process.env.DSH_AGENT_WHALES_PRESET_DIR;
       else process.env.DSH_AGENT_WHALES_PRESET_DIR = previous;
       rmSync(presetRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── 13. W2 观测：timeline 六步 / observations / 路由接线 ────────────────────
+//
+// 这一组打的是宿主半边的 W2 观测面（设计图 T-13 event_replay，帧 e6QPoS）：
+// 时间线六步 = Source → Trigger → Policy → Ticket → Worker → Report，一步一证据；
+// observations 给 Worker 侧最小可见性（当前工具 + 日志尾部）。两个路由都只读、
+// 无 token；projectId 宽松口径（项目不存在 → 回空 + note，不刷错误）。
+
+/** W2 专用假宿主：m6Harness + 事件台账隔离到同一临时目录（与 W1.5 同一规矩）。 */
+async function w2Harness() {
+  const h = await m6Harness();
+  host.setEventsStorePathForTests(join(h.dir, "events.json"));
+  return h;
+}
+
+/** 按 key 取时间线里的那一步（顺序错了也要能抓到，不断言具体下标）。 */
+function stepOf(body, key) {
+  const step = body.data.steps.find((item) => item.key === key);
+  assert.ok(step, "六步里必须存在 " + key + " 步：" + JSON.stringify(body.data.steps.map((s) => s.key)));
+  return step;
+}
+
+/** 读项目 store（测试断言/造事实用）。 */
+function readProjectsFile(h) {
+  return JSON.parse(readFileSync(join(h.dir, "projects.json"), "utf8"));
+}
+
+/** 改项目 store 后写回（测试里造 dispatch 事实 / completed 状态的唯一入口）。 */
+function writeProjectsFile(h, store) {
+  writeFileSync(join(h.dir, "projects.json"), JSON.stringify(store), "utf8");
+}
+
+/** 直接写发送账本（造 handoffs 事实；recordSend 只在派发成功时写，测试要能造任意态）。 */
+function writeHandoffsFile(h, entries) {
+  writeFileSync(join(h.dir, "handoffs.json"), JSON.stringify({ entries }), "utf8");
+}
+
+/** 提案提交 + 确认，返回 { proposalId, taskId }（sourceProposal 任务的唯一正规来路）。 */
+async function proposeAndConfirm(h, projectId, requestId) {
+  const proposal = await h.tools.whales_propose_tasks.execute({
+    leadSessionId: "session-a", projectId, items: [{ key: "T1", title: "修 F-002", description: "逐字描述内容" }]
+  }, { agent: { id: "session-a" } });
+  const confirmed = await h.call("POST", `/agent-whales/api/proposals/${proposal.proposalId}/confirm`, {
+    leadSessionId: "session-a", version: proposal.version, requestId: requestId || "w2-confirm"
+  });
+  assert.equal(confirmed.body.code, 200, JSON.stringify(confirmed.body));
+  return { proposalId: proposal.proposalId, taskId: confirmed.body.data.created[0].taskId };
+}
+
+describe("W2 观测：timeline 六步派生（T-13）", () => {
+  test("有来源提案：source/trigger 有据、policy 用确认时刻、未指派前 worker/report 待定", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    const { proposalId, taskId } = await proposeAndConfirm(h, projectId);
+
+    const timeline = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${projectId}`);
+    assert.equal(timeline.body.code, 200, JSON.stringify(timeline.body));
+    const data = timeline.body.data;
+    assert.equal(data.source, "project");
+    assert.equal(data.projectId, projectId);
+    assert.equal(data.taskId, taskId);
+    assert.deepEqual(data.steps.map((step) => step.key), ["source", "trigger", "policy", "ticket", "worker", "report"], "六步固定且按序");
+    for (const step of data.steps) {
+      assert.equal(typeof step.phase, "string", "每步都要有阶段词");
+      assert.equal(typeof step.title, "string", "每步都要有标题");
+      assert.ok(["done", "active", "pending", "skipped"].includes(step.state), "state 必须在词表内");
+    }
+
+    // 事实来源：events.json 里的 proposal.submit（evidence === proposalId）
+    const events = Object.values(readEventsFile(h.dir).events);
+    const submit = events.find((event) => event.kind === "proposal.submit" && event.evidence === proposalId);
+    assert.ok(submit, "提案提交必须落事件");
+    const proposals = JSON.parse(readFileSync(join(h.dir, "proposals.json"), "utf8"));
+    const lockedAt = proposals["session-a"].confirmed.lockedAt;
+    const store = readProjectsFile(h);
+    const task = store.tasks[taskId];
+
+    const source = stepOf(timeline.body, "source");
+    assert.equal(source.state, "done");
+    assert.equal(source.at, submit.at, "source 的时间就是事件落库时间");
+    assert.match(source.detail, /逐字原文，未摘要、未改写/);
+    assert.match(source.detail, /修 F-002/);
+    assert.equal(source.evidence, submit.eventId);
+
+    const trigger = stepOf(timeline.body, "trigger");
+    assert.equal(trigger.state, "done");
+    assert.equal(trigger.at, submit.at);
+    assert.match(trigger.detail, new RegExp(submit.eventId + " · source=plugin"));
+
+    const policy = stepOf(timeline.body, "policy");
+    assert.equal(policy.state, "done");
+    assert.equal(policy.at, lockedAt, "policy 的时间是提案确认那一刻");
+    assert.match(policy.detail, /提案 v1 确认 · 1 项建单/);
+    assert.equal(policy.evidence, proposalId);
+
+    const ticket = stepOf(timeline.body, "ticket");
+    assert.equal(ticket.state, "done");
+    assert.equal(ticket.at, task.createdAt, "ticket 的时间是任务创建时间");
+    assert.match(ticket.detail, /修 F-002/);
+    assert.match(ticket.detail, /未指派 owner/);
+    assert.equal(ticket.evidence, taskId);
+
+    assert.equal(stepOf(timeline.body, "worker").state, "pending", "没指派 owner → 执行步待定");
+    assert.equal(stepOf(timeline.body, "worker").detail, "未指派 owner");
+    assert.equal(stepOf(timeline.body, "report").state, "pending");
+    assert.equal(stepOf(timeline.body, "report").detail, "尚未回流");
+
+    // entries：来源提案的 proposal.submit 必须进来
+    const submitEntry = data.entries.find((entry) => entry.kind === "proposal.submit");
+    assert.ok(submitEntry, "明细里要能看到来源事件");
+    assert.equal(submitEntry.evidence, proposalId);
+  });
+
+  test("无来源提案：source/trigger skipped，policy=创建即通过", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "手动开的工单" });
+    const taskId = created.body.data.task.taskId;
+    const store = readProjectsFile(h);
+
+    const timeline = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${projectId}`);
+    assert.equal(timeline.body.code, 200, JSON.stringify(timeline.body));
+    const source = stepOf(timeline.body, "source");
+    assert.equal(source.state, "skipped");
+    assert.equal(source.detail, "手动创建，无来源提案");
+    assert.equal(source.evidence, undefined, "没有来源就不编证据");
+    const trigger = stepOf(timeline.body, "trigger");
+    assert.equal(trigger.state, "skipped");
+    assert.equal(trigger.detail, "手动创建，无 Trigger");
+    const policy = stepOf(timeline.body, "policy");
+    assert.equal(policy.state, "done");
+    assert.equal(policy.at, store.tasks[taskId].createdAt, "手动创建 = 创建即通过");
+    assert.equal(policy.detail, "手动创建，创建即通过");
+    assert.equal(policy.evidence, taskId, "没有提案时证据落任务自身");
+  });
+
+  test("被 blockedBy 挡过：policy detail 写前置 id 与解锁时间；仍在等待就明说", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    const first = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "前置任务" });
+    const second = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "后置任务", blockedBy: [first.body.data.task.taskId] });
+    const blockerId = first.body.data.task.taskId;
+    const taskId = second.body.data.task.taskId;
+
+    // 前置没完成：明说仍在等待，不猜解锁时间
+    const waiting = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${projectId}`);
+    const waitingPolicy = stepOf(waiting.body, "policy");
+    assert.match(waitingPolicy.detail, new RegExp("曾被 " + blockerId + " 挡住 · 仍在等待 " + blockerId));
+
+    // 前置完成了（store 直写 completed + completedAt）：解锁时间取最后一个前置的完成时间
+    const store = readProjectsFile(h);
+    const completedAt = Date.now() - 5000;
+    store.tasks[blockerId].status = "completed";
+    store.tasks[blockerId].completedAt = completedAt;
+    writeProjectsFile(h, store);
+
+    const unlocked = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${projectId}`);
+    const unlockedPolicy = stepOf(unlocked.body, "policy");
+    assert.match(unlockedPolicy.detail, new RegExp("曾被 " + blockerId + " 挡住 · 解锁于 " + completedAt));
+  });
+
+  test("dispatch 三态：failed（真实派发失败）/ sent / unknown 都进 worker 步 detail", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-worker" });
+
+    // ① failed：真派发（假宿主没有 followup → dispatch-rejected）
+    const failedTask = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "派发失败" });
+    const failedId = failedTask.body.data.task.taskId;
+    const dispatched = await h.call("POST", `/agent-whales/api/tasks/${failedId}/commands`, {
+      projectId, action: "assign-and-dispatch", owner: "session-worker", expectedRevision: 1, requestId: "w2-dispatch-failed"
+    });
+    assert.equal(dispatched.body.code, 200, JSON.stringify(dispatched.body));
+    assert.equal(dispatched.body.data.dispatch.status, "failed");
+    const failedTimeline = await h.call("GET", `/agent-whales/api/tasks/${failedId}/timeline?projectId=${projectId}`);
+    const failedWorker = stepOf(failedTimeline.body, "worker");
+    assert.equal(failedWorker.state, "active", "指派了还没回流 → 执行中");
+    assert.match(failedWorker.detail, /派发 failed（dispatch-rejected）/);
+    assert.match(failedWorker.detail, /owner session-worker（无单独指派时间戳，以任务 updatedAt 近似）/);
+    assert.equal(failedWorker.at, readProjectsFile(h).tasks[failedId].updatedAt);
+
+    // ② sent：任务上的最近一次 dispatch（store 直写，理由同上——成功派发需要 followup）
+    const sentTask = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "派发成功" });
+    const sentId = sentTask.body.data.task.taskId;
+    let store = readProjectsFile(h);
+    store.tasks[sentId].ownerSessionId = "session-worker";
+    store.tasks[sentId].status = "in_progress";
+    store.tasks[sentId].dispatch = { status: "sent", messageId: "msg-sent-1" };
+    writeProjectsFile(h, store);
+    const sentTimeline = await h.call("GET", `/agent-whales/api/tasks/${sentId}/timeline?projectId=${projectId}`);
+    assert.match(stepOf(sentTimeline.body, "worker").detail, /派发 sent/);
+
+    // ③ unknown：任务上没挂 dispatch，从 dispatchFacts 里取该 taskId 的最新一条
+    const unknownTask = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "派发超时" });
+    const unknownId = unknownTask.body.data.task.taskId;
+    const factAt = Date.now() - 1000;
+    store = readProjectsFile(h);
+    store.tasks[unknownId].ownerSessionId = "session-worker";
+    store.tasks[unknownId].status = "in_progress";
+    store.dispatchFacts = [{ taskId: unknownId, revision: 1, dispatch: { status: "unknown", reason: "dispatch-timeout" }, at: factAt, currentRevision: 2 }];
+    writeProjectsFile(h, store);
+    const unknownTimeline = await h.call("GET", `/agent-whales/api/tasks/${unknownId}/timeline?projectId=${projectId}`);
+    const unknownWorker = stepOf(unknownTimeline.body, "worker");
+    assert.match(unknownWorker.detail, new RegExp("派发 unknown · " + factAt + "（dispatch-timeout）"));
+  });
+
+  test("report 四态：done=回流关闭，draft/handed_back/human_action=active 且带 summary", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    const statuses = ["done", "draft", "handed_back", "human_action"];
+    const taskIds = [];
+    for (const status of statuses) {
+      const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "回流 " + status });
+      const taskId = created.body.data.task.taskId;
+      taskIds.push(taskId);
+      const reported = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, {
+        projectId, expectedRevision: 1, report: { status, summary: "这是 " + status + " 的说明", artifacts: [{ kind: "file", ref: "lib/index.js" }] }
+      });
+      assert.equal(reported.body.code, 200, JSON.stringify(reported.body));
+    }
+    for (let index = 0; index < statuses.length; index += 1) {
+      const status = statuses[index];
+      const timeline = await h.call("GET", `/agent-whales/api/tasks/${taskIds[index]}/timeline?projectId=${projectId}`);
+      const report = stepOf(timeline.body, "report");
+      assert.equal(report.state, status === "done" ? "done" : "active", status + " 的回流步状态");
+      assert.match(report.detail, new RegExp("^" + status + " · rev 2 · bySessionId user · artifacts 1"));
+      assert.ok(report.detail.includes("这是 " + status + " 的说明"), "summary 要进 detail");
+      assert.equal(report.evidence, "rev 2");
+      assert.equal(typeof report.at, "number", "回流有时间");
+      // 明细里也要有一条 report
+      const reportEntry = timeline.body.data.entries.find((entry) => entry.kind === "report");
+      assert.ok(reportEntry, "report 必须进明细");
+      assert.equal(reportEntry.by, "user");
+      assert.match(reportEntry.text, /这是/);
+    }
+  });
+
+  test("已完成：worker until=completedAt（无 report 也算执行结束）；worker 步计数来自会话日志", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-worker" });
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "已关闭" });
+    const taskId = created.body.data.task.taskId;
+    await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-worker", expectedRevision: 1, requestId: "w2-assign-close" });
+    const completedAt = Date.now() - 2000;
+    const store = readProjectsFile(h);
+    store.tasks[taskId].status = "completed";
+    store.tasks[taskId].completedAt = completedAt;
+    writeProjectsFile(h, store);
+    // owner 会话活着且有工具调用：worker 步 detail 要带「跑命令 N 次 · 写文件 N 个」
+    h.sessionLogs.set("session-worker", [
+      { seq: 1, type: "tool/call", data: { id: "k1", name: "bash", arguments: "{}" } },
+      { seq: 2, type: "tool/call", data: { id: "k2", name: "pwsh", arguments: "{}" } },
+      { seq: 3, type: "tool/call", data: { id: "k3", name: "str-replace-editor", arguments: "{}" } }
+    ]);
+
+    const timeline = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${projectId}`);
+    const worker = stepOf(timeline.body, "worker");
+    assert.equal(worker.state, "done", "任务已关闭 → 执行结束");
+    assert.equal(worker.until, completedAt, "until 是执行结束时间");
+    assert.match(worker.detail, /跑命令 2 次 · 写文件 1 个 · 其它 0 次/);
+    assert.equal(stepOf(timeline.body, "report").state, "pending", "没有 report 就是没回流");
+  });
+});
+
+describe("W2 观测：entries 三处聚合（events / handoffs / report）", () => {
+  test("三处聚合 + at 倒序 + 不相关事实被排除", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "明细任务" });
+    const taskId = created.body.data.task.taskId;
+    const now = Date.now();
+
+    // ① events.json：一条相关（text 含 taskId）、一条不相关（别的任务）
+    writeFileSync(join(h.dir, "events.json"), JSON.stringify({
+      version: 1,
+      noise: {},
+      events: {
+        "evt-mine": { eventId: "evt-mine", projectId, source: "plugin", kind: "task.command", text: "assign " + taskId, evidence: "req-mine", fingerprint: "task.command|mine", at: now - 3000, state: "pending", rules: [] },
+        "evt-other": { eventId: "evt-other", projectId, source: "plugin", kind: "task.command", text: "assign ptask-other", evidence: "req-other", fingerprint: "task.command|other", at: now - 2500, state: "pending", rules: [] }
+      }
+    }), "utf8");
+    // ② handoffs.json：一条 taskId 匹配、一条别的任务
+    writeHandoffsFile(h, [
+      { kind: "dispatch", from: "user", to: "session-worker", messageId: "msg-1", at: now - 2000, taskId, revision: 1, projectId },
+      { kind: "dispatch", from: "user", to: "session-worker", messageId: "msg-2", at: now - 1500, taskId: "ptask-other", revision: 1, projectId }
+    ]);
+    // ③ report（at ≈ now，最新）
+    const reported = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, { projectId, expectedRevision: 1, report: { status: "done", summary: "干完了" } });
+    assert.equal(reported.body.code, 200, JSON.stringify(reported.body));
+
+    const timeline = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${projectId}`);
+    const entries = timeline.body.data.entries;
+    assert.deepEqual(entries.map((entry) => entry.kind), ["report", "dispatch", "task.command"], "三处聚合 + at 倒序");
+    assert.equal(entries[1].by, "user", "handoff 明细带 from");
+    assert.match(entries[1].text, /派发到 session-worker · msg-1 · revision 1/);
+    assert.equal(entries[1].evidence, "msg-1");
+    assert.equal(entries[2].evidence, "req-mine");
+    assert.ok(entries.every((entry) => !String(entry.text).includes("ptask-other")), "别的任务的事实不能混进来");
+  });
+
+  test("limit：默认 50、硬上限 200、同一条记录记两遍只留一条", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "条数任务" });
+    const taskId = created.body.data.task.taskId;
+    const now = Date.now();
+    // 210 条互不相同的发送记录 + 一对完全相同的重复记录
+    const entries = [];
+    for (let index = 0; index < 210; index += 1) {
+      entries.push({ kind: "dispatch", from: "user", to: "session-worker", messageId: "msg-" + index, at: now - 100000 + index, taskId, revision: 1, projectId });
+    }
+    entries.push({ kind: "dispatch", from: "user", to: "session-worker", messageId: "msg-dup", at: now - 50000, taskId, revision: 1, projectId });
+    entries.push({ kind: "dispatch", from: "user", to: "session-worker", messageId: "msg-dup", at: now - 50000, taskId, revision: 1, projectId });
+    writeHandoffsFile(h, entries);
+
+    const byDefault = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${projectId}`);
+    assert.equal(byDefault.body.data.entries.length, 50, "默认 50 条");
+    const capped = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${projectId}&limit=9999`);
+    assert.equal(capped.body.data.entries.length, 200, "硬上限 200");
+    const dupes = capped.body.data.entries.filter((entry) => entry.evidence === "msg-dup");
+    assert.equal(dupes.length, 1, "完全相同的两条记录去重后只留一条");
+    const single = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${projectId}&limit=1`);
+    assert.equal(single.body.data.entries.length, 1, "limit=1 只给最新一条");
+  });
+});
+
+describe("W2 观测：observations（Worker 侧最小可见性）", () => {
+  test("owner 有当前工具：与 /activity 同一张表；结果事件后消失", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-worker" });
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "观测任务" });
+    const taskId = created.body.data.task.taskId;
+    await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-worker", expectedRevision: 1, requestId: "w2-obs-assign" });
+
+    // 执行台同源：/activity 与 observations 看到的是同一个当前工具
+    h.listeners["tools/execute"]({ agent: { id: "session-worker" }, name: "bash", callId: "call-1" }, () => Promise.resolve("ok"));
+    const activity = await h.call("GET", "/agent-whales/api/activity");
+    assert.equal(activity.body.active["session-worker"].tool, "bash");
+    const observed = await h.call("GET", `/agent-whales/api/tasks/${taskId}/observations?projectId=${projectId}`);
+    assert.equal(observed.body.code, 200, JSON.stringify(observed.body));
+    assert.equal(observed.body.data.sessionId, "session-worker");
+    assert.equal(observed.body.data.current.tool, "bash");
+    assert.ok(typeof observed.body.data.current.ageMs === "number" && observed.body.data.current.ageMs >= 0);
+
+    // 工具结束：当前工具消失（与 /activity 一致）
+    h.listeners["tools/result"]({ agent: { id: "session-worker" }, name: "bash", callId: "call-1" });
+    const after = await h.call("GET", `/agent-whales/api/tasks/${taskId}/observations?projectId=${projectId}`);
+    assert.equal(after.body.data.current, null);
+  });
+
+  test("无 owner：sessionId null + note；会话不在跑：tail 空 + note（绝不抛）", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+
+    // 没指派
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "没人管" });
+    const noOwner = await h.call("GET", `/agent-whales/api/tasks/${created.body.data.task.taskId}/observations?projectId=${projectId}`);
+    assert.equal(noOwner.body.code, 200, JSON.stringify(noOwner.body));
+    assert.equal(noOwner.body.data.sessionId, null);
+    assert.equal(noOwner.body.data.current, null);
+    assert.deepEqual(noOwner.body.data.tail, []);
+    assert.match(noOwner.body.data.note, /未指派 owner/);
+    assert.equal(noOwner.body.data.counts, undefined, "没有会话就没有 counts");
+
+    // 指派给一个已归档会话（不在跑）：读不到日志 → 空 + note
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+    const archived = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "归档执行器" });
+    const archivedId = archived.body.data.task.taskId;
+    const assigned = await h.call("POST", `/agent-whales/api/tasks/${archivedId}/commands`, { projectId, action: "assign", owner: "session-old", expectedRevision: 1, requestId: "w2-obs-archived" });
+    assert.equal(assigned.body.code, 200, JSON.stringify(assigned.body));
+    const offline = await h.call("GET", `/agent-whales/api/tasks/${archivedId}/observations?projectId=${projectId}`);
+    assert.equal(offline.body.code, 200, JSON.stringify(offline.body));
+    assert.equal(offline.body.data.sessionId, "session-old");
+    assert.equal(offline.body.data.current, null);
+    assert.deepEqual(offline.body.data.tail, []);
+    assert.match(offline.body.data.note, /不在运行/);
+  });
+
+  test("tail：倒序 / 默认 20 / limit 封顶 100 / 两种日志形状 / counts 归类", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-worker" });
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "日志任务" });
+    const taskId = created.body.data.task.taskId;
+    await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-worker", expectedRevision: 1, requestId: "w2-obs-log" });
+
+    // 30 条 tool/call（seq 1..30，名字轮换）+ 1 条 assistant/message 内容块形状
+    const names = ["bash", "pwsh", "str-replace-editor", "fs_write", "read"];
+    const events = [];
+    for (let index = 1; index <= 30; index += 1) {
+      events.push({ seq: index, type: "tool/call", data: { id: "c" + index, name: names[index % names.length], arguments: JSON.stringify({ n: index }) } });
+    }
+    events.push({ seq: 31, type: "assistant/message", data: { message: { content: [{ type: "tool-call", id: "blk-1", name: "read", arguments: '{"path":"x"}' }] } } });
+    // 同 id 的第二种形状：同一 callId 只留一条
+    events.push({ seq: 32, type: "tool/call", data: { id: "blk-1", name: "read", arguments: "{}" } });
+    h.sessionLogs.set("session-worker", events);
+
+    const observed = await h.call("GET", `/agent-whales/api/tasks/${taskId}/observations?projectId=${projectId}`);
+    const data = observed.body.data;
+    assert.equal(data.tail.length, 20, "默认最近 20 条");
+    assert.equal(data.tail[0].seq, 31, "倒序：最新在前");
+    assert.equal(data.tail[0].tool, "read", "内容块形状也要能抽到");
+    assert.equal(data.tail.at(-1).seq, 12, "取的是最近的一段");
+    assert.equal(data.tail.filter((row) => row.seq === 32).length, 0, "同 callId 去重");
+    // counts 数的是整份日志（31 条去重后）：bash/pwsh=命令，str-replace-editor/fs_write=文件，read=其它
+    assert.deepEqual(data.counts, { commands: 12, files: 12, other: 7 });
+    // 日志没有 at：不编时间键
+    assert.equal("at" in data.tail[0], false, "事件没带时间就不编 at");
+
+    const one = await h.call("GET", `/agent-whales/api/tasks/${taskId}/observations?projectId=${projectId}&limit=1`);
+    assert.equal(one.body.data.tail.length, 1);
+    assert.equal(one.body.data.tail[0].seq, 31);
+    const capped = await h.call("GET", `/agent-whales/api/tasks/${taskId}/observations?projectId=${projectId}&limit=1000`);
+    assert.equal(capped.body.data.tail.length, 31, "limit 封顶 100，实际只有 31 条");
+
+    // 事件带了时间就透传
+    h.sessionLogs.set("session-worker", [{ seq: 1, type: "tool/call", at: 1750000000000, data: { id: "t1", name: "bash", arguments: "{}" } }]);
+    const withAt = await h.call("GET", `/agent-whales/api/tasks/${taskId}/observations?projectId=${projectId}`);
+    assert.equal(withAt.body.data.tail[0].at, 1750000000000);
+  });
+
+  test("护栏：单条 ≤ 500 字（超了截断 + …），总量 60KB 从老的一侧砍", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-worker" });
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "护栏任务" });
+    const taskId = created.body.data.task.taskId;
+    await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-worker", expectedRevision: 1, requestId: "w2-obs-guard" });
+
+    // ① 单条 10 万字符参数：截断到 500 + 「…」
+    h.sessionLogs.set("session-worker", [{ seq: 1, type: "tool/call", data: { id: "g1", name: "bash", arguments: "x".repeat(100000) } }]);
+    const huge = await h.call("GET", `/agent-whales/api/tasks/${taskId}/observations?projectId=${projectId}`);
+    assert.equal(huge.body.data.tail.length, 1, "至少给一条");
+    assert.equal(huge.body.data.tail[0].args.length, 501, "500 字 + 省略号");
+    assert.ok(huge.body.data.tail[0].args.endsWith("…"));
+
+    // ② 30 条 × 4000 字 = 120KB > 60KB：只给最近的一部分，且最新的一定在
+    const many = [];
+    for (let index = 1; index <= 30; index += 1) {
+      many.push({ seq: index, type: "tool/call", data: { id: "m" + index, name: "bash", arguments: "y".repeat(4000) } });
+    }
+    h.sessionLogs.set("session-worker", many);
+    const budgeted = await h.call("GET", `/agent-whales/api/tasks/${taskId}/observations?projectId=${projectId}`);
+    assert.ok(budgeted.body.data.tail.length < 30, "总量超预算必须砍，实际 " + budgeted.body.data.tail.length);
+    assert.equal(budgeted.body.data.tail[0].seq, 30, "从老的一侧砍，最新一条必须在");
+  });
+});
+
+describe("W2 观测：路由接线与边界", () => {
+  test("方法校验：PUT/POST → 405 + allow: GET, HEAD（两个路由）", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "方法校验" });
+    const taskId = created.body.data.task.taskId;
+    for (const path of [`/agent-whales/api/tasks/${taskId}/timeline`, `/agent-whales/api/tasks/${taskId}/observations`]) {
+      for (const method of ["PUT", "POST", "DELETE"]) {
+        const rejected = await h.call(method, path, {});
+        assert.equal(rejected.status, 405, method + " " + path + " 必须 405");
+        assert.equal(rejected.headers.allow, "GET, HEAD", "allow 头必须只报读方法");
+        assert.equal(rejected.body.code, 40000);
+      }
+      const head = await h.call("HEAD", path);
+      assert.equal(head.status, 200, "HEAD 与 GET 同权（只读路由口径）");
+    }
+  });
+
+  test("项目不存在 → 宽松回空 + note；坏 taskId → 40401；不带 projectId 跨项目找", async () => {
+    const h = await w2Harness();
+    const projectId = await createProject(h);
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "边界任务" });
+    const taskId = created.body.data.task.taskId;
+
+    // 项目不存在（页面轮询时项目被删）：不刷错误，回空 + note
+    for (const path of ["timeline", "observations"]) {
+      const lenient = await h.call("GET", `/agent-whales/api/tasks/${taskId}/${path}?projectId=proj-ghost`);
+      assert.equal(lenient.body.code, 200, path + " 项目不存在必须宽松回空");
+      assert.match(lenient.body.data.note, /项目不存在/);
+      if (path === "timeline") {
+        assert.deepEqual(lenient.body.data.steps, []);
+        assert.deepEqual(lenient.body.data.entries, []);
+      } else {
+        assert.equal(lenient.body.data.sessionId, null);
+        assert.equal(lenient.body.data.current, null);
+        assert.deepEqual(lenient.body.data.tail, []);
+      }
+    }
+
+    // 坏 taskId：项目存在 → 40401；不带 projectId 也 40401
+    const ghostInProject = await h.call("GET", `/agent-whales/api/tasks/ptask-ghost/timeline?projectId=${projectId}`);
+    assert.equal(ghostInProject.body.code, 40401);
+    const ghostNoProject = await h.call("GET", "/agent-whales/api/tasks/ptask-ghost/timeline");
+    assert.equal(ghostNoProject.body.code, 40401);
+    const ghostObs = await h.call("GET", `/agent-whales/api/tasks/ptask-ghost/observations?projectId=${projectId}`);
+    assert.equal(ghostObs.body.code, 40401);
+
+    // 任务在 A 项目、查询带 B 项目 → 40401（taskId 全局唯一，带错项目就是找不到）
+    const other = await h.call("POST", "/agent-whales/api/projects", { name: "别的项目", mainSessionId: "session-b" });
+    const wrongProject = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline?projectId=${other.body.data.project.projectId}`);
+    assert.equal(wrongProject.body.code, 40401);
+
+    // 不带 projectId：跨全部项目按 id 找（taskId 全局唯一）
+    const crossProject = await h.call("GET", `/agent-whales/api/tasks/${taskId}/timeline`);
+    assert.equal(crossProject.body.code, 200, JSON.stringify(crossProject.body));
+    assert.equal(crossProject.body.data.taskId, taskId);
+    assert.equal(crossProject.body.data.projectId, projectId);
+    const crossObs = await h.call("GET", `/agent-whales/api/tasks/${taskId}/observations`);
+    assert.equal(crossObs.body.code, 200);
+    assert.equal(crossObs.body.data.taskId, taskId);
+  });
+
+  test("纯函数：畸变输入不抛、输出仍是 lossless JSON", () => {
+    const dirtyTask = {
+      taskId: 42, projectId: null, subject: null, description: undefined,
+      blockedBy: "not-an-array", ownerSessionId: 5, status: null,
+      createdAt: "x", updatedAt: NaN, completedAt: Infinity,
+      report: "bad", dispatch: 7, sourceProposal: { proposalId: "prop-1" }, worktree: {}, execRoot: []
+    };
+    const dirtySteps = host.timelineStepsOf({
+      task: dirtyTask,
+      tasks: { "ptask-x": { status: "completed", completedAt: "y", updatedAt: null } },
+      submitEvent: { at: "x", text: null, eventId: null, source: 5 },
+      proposalRecord: { confirmed: "bad", version: null },
+      dispatchFact: { status: 5, at: "x", reason: null },
+      toolCounts: { commands: "a", files: null, other: undefined }
+    });
+    assert.equal(dirtySteps.length, 6, "再脏也要给六步");
+    for (const step of dirtySteps) assertLossless(step, "timelineStepsOf 畸变步");
+    assert.equal(host.timelineStepsOf({ task: dirtyTask, tasks: {} }).length, 6, "缺字段也要给六步");
+
+    const circular = { self: null };
+    circular.self = circular;
+    const dirtyEvents = [null, undefined, 42, "x", {}, { type: "tool/call" }, { type: "tool/call", data: { name: 5, arguments: circular } },
+      { type: "tool/call", data: { tool: { name: "bash" }, arguments: { a: 1 } } },
+      { type: "assistant/message", data: { message: { content: [null, 42, { type: "tool-call" }, { type: "tool-call", name: "read", arguments: 7 }] } } },
+      { type: "assistant/message", data: null }];
+    const rows = host.toolCallsOf(dirtyEvents);
+    for (const row of rows) assertLossless(row, "toolCallsOf 畸变行");
+    assert.equal(rows.length, 5, "三条 tool/call（含两条脏名）+ 内容块里两条 tool-call");
+    assert.deepEqual(rows.map((row) => row.name), ["", "", "bash", "", "read"], "工具名逐个对上");
+    for (const limit of [undefined, 0, -5, 1.9, NaN, "x", 1000]) {
+      const tail = host.observationTailOf(rows, limit);
+      assert.ok(Array.isArray(tail));
+      for (const row of tail) assertLossless(row, "observationTailOf 畸变行");
     }
   });
 });
