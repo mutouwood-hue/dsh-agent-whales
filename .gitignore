@@ -17,3 +17,6 @@ __pycache__/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 设计源文件（pen.dev 画布，二进制且体积大；用户 2026-11-10 明确不入库）
+设计图pen.pen
