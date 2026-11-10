@@ -14,3 +14,5 @@ import "./index.test.mjs";
 import "./client-robustness.test.mjs";
 import "./meta.test.mjs";
 import "./workbench.test.mjs";
+import "./workbench-draft.test.mjs";
+import "./workbench-replay.test.mjs";

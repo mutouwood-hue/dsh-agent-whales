@@ -190,8 +190,8 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
 
   plugin.apply(ctx);
 
-  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "sidebar.panellist"]);
-  assert.equal(registrations.length, 5);
+  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "sidebar.panellist", "conversation.input.dock"]);
+  assert.equal(registrations.length, 6);
   for (const entry of registrations.slice(0, 2)) {
     assert.equal(entry.options.id, "agent-whales");
     assert.equal(typeof entry.component, "function");
@@ -218,6 +218,11 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
   assert.equal(entrySeat.options.id, "whales-canvas");
   assert.equal(typeof entrySeat.options.order, "number", "list 槽用 {id, order}");
   assert.equal(typeof entrySeat.component, "function");
+  // W2/D2：目标条叠在 conversation.input.dock 上——**不影子**官方 composer（不设 priority）
+  const dockSeat = registrations[5];
+  assert.equal(dockSeat.options.name, "conversation.input.dock");
+  assert.equal(dockSeat.options.priority, undefined, "D2 硬约束：叠加上方目标条，不影子官方输入区");
+  assert.equal(typeof dockSeat.component, "function");
   assert.equal(appended.length, 1, "样式标签注入一次");
   assert.equal(appended[0].id, "dsh-agent-whales-styles");
   const dictionary = dictionaries.find((row) => row.namespace === "agent-whales");
