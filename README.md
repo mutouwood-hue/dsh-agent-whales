@@ -326,6 +326,39 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 > 用户 preset 根才是它受支持的分发通道（落 patch 还会重犯 `cordis.patch.yml` 文件头已经警告过的
 > duplicate loader entry id 类启动失败）。
 
+### 事件台与 Source 健康面板（W1.5）
+
+Trigger 收件箱：事件先进来评估，再决定开工单还是忽略；与发送记录（事后账本）是两个面。
+
+- **顶栏**：待评估数 + 今日统计（今日 N · 已开工单 N · 已忽略 N）。
+- **源筛选**：全部 / 插件 / 主会话 / 工作区 / 定时 / 已抑制（后四类是 PRD 的词表，本期只有「插件」有事件）。
+- **事件行**：源 + 文本与时间 + 证据；点开是**展开态三要素**——Trigger 原文（逐字证据，不可摘要）、
+  三条规则命中（`rule: scope.match` / `rule: assignable` / `rule: dedupe`）、动作行
+  （开工单 / 忽略 / 标记为噪声）。已处置的行只读，并写明谁何时处置、建了哪个工单。
+- **自激保护**：同类事件（kind + 归一化文本前 80 字）10 分钟内只评估一次，重复的记 `suppressed` 留痕；
+  被标记噪声的 Source 24 小时内新事件直接记 `noise`，不进收件箱。
+- **Source 健康面板**（事件台右侧栏，不占主导航）：健康码只用**固定词表**五个词——
+  正常 / 评估中 / 已抑制 / 今日无事件 / 已标记噪声，不写自由文案。
+  > 与设计稿 T-14 字面词表的偏差：设计列了「已忽略」，但「忽略」是**单条事件**的处置，
+  > 不是 Source 的状态；Source 级真实可达的是「今天没有事件 → idle」。所以用 idle 占位，
+  > 不留一个永远渲染不出来的词。
+
+| 路由 | 方法 | 作用 |
+|---|---|---|
+| `/events?projectId=&source=&state=&limit=` | `GET` | 事件列表（`at` 倒序）+ `stats`（pending/today/opened/ignored）+ `health`；stats 只按项目口径算，不受 source/state 筛选影响 |
+| `/events/:eventId/actions` | `POST` | `open`（进项目任务表；projectId 缺省用事件自己的）/ `ignore`（留痕不建单）/ `noise`（噪声 + 24h 屏蔽）；写操作带 `x-whales-token`，`requestId` 进程内回放 |
+| `/events/health` | `GET` | Source 健康码（固定词表） |
+
+事件状态机：`pending`（待评估）→ `opened`（已开工单）/ `ignored`（已忽略）/ `noise`（被屏蔽）；
+`suppressed` 是自激保护的留痕态（同类 10 分钟内重复），不算待评估。落点：`~/.dsh/agent-whales/events.json`，
+与 handoffs.json 同目录、独立串行队列，不抢项目 store 的锁；2000 条按文件滚动归档，不静默删。
+
+> **来源边界（写实，不假装）**：本期事件只来自**插件自己已经拥有的事实**——提案提交、任务命令、
+> 交接发送结果、store 只读降级（`source: "plugin"`）。PRD 里的「主会话消息 / 工作区文件监听 /
+> 定时」三类 Source **本期不接**：没有可靠的会话消息钩子；`fs` 监听要做自身状态目录排除与泄漏防护，
+> 留后续波次。所以筛选项里那三个词表值当前不会有事件，不是 bug。投递前的校验失败
+> （无 owner / 对方未运行）不登记——消息都没造出来，没有「已发生的事实」可记。
+
 ## 素材重建
 
 ```powershell
@@ -590,7 +623,7 @@ node _scratch/preview.mjs
 | `test/harness.mjs` | 离线测试用的最小 React 垫片与插件加载器 |
 | `test/client.test.mjs` | 基线用例（契约 / 计数 / 素材 / 家族树 / 气泡 / 拖拽 / 设置 / 渲染） |
 | `test/workbench.test.mjs` | M6 工作台纯逻辑用例（路由 / token 估算 / 简报预算 / 任务行派生 / report 人机边界 / 待办聚合 / 画布图 / 十屏渲染冒烟 / 只读缓存） |
-| `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具、活动接口、项目任务表、简报、提案、report、handoffs、inbox、sessions、preset 安装器） |
+| `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具、活动接口、项目任务表、简报、提案、report、handoffs、inbox、sessions、events 台账与三动作、preset 安装器） |
 | `test/client-robustness.test.mjs` | 对抗性用例（畸形输入、缺服务、边界值） |
 | `test/meta.test.mjs` | 发布门禁用例（清单契约、`files`/`exports`、patch BOM 与结构、`npm test` 覆盖面） |
 | `test/index.js` | `node --test test/` 的目录入口，导入全部 `*.test.mjs` |
@@ -656,11 +689,21 @@ node _scratch/preview.mjs
   `_scratch/wb-css-check.mjs` 校验 CSS 花括号配对、16 个 token 两套主题都在、组件无硬编码 hex。
 - 已验证 · M6 宿主路由：`test/index.test.mjs` 覆盖 report 四态 + CAS 40902 + worker 越权 40708 +
   人可关、落点字段落库、handoffs 项目过滤与倒序、inbox 四组聚合（含只读降级）、
-  sessions 目录形状、POST /tasks 新建与 requestId 回放、preset 安装器（首装 / 幂等 / 不覆盖 / 源不齐不建目录）。
-- 未验证 · M6 画布交互手感：拖拽挪位、Ctrl+滚轮缩放、拖锚点建线、点选删除——垫片里
+  sessions 目录形状、POST /tasks 新建与 requestId 回放、preset 安装器（首装 / 幂等 / 不覆盖 / 源不齐不建目录）。- 未验证 · M6 画布交互手感：拖拽挪位、Ctrl+滚轮缩放、拖锚点建线、点选删除——垫片里
   `useState` 的 setter 是空函数，只能验证几何换算（`wbCanvasEdges` / `wbCanvasNodes`）与渲染，
   真实指针事件的手感与「拖出边界」未跑。
 - 未验证 · M6 真机对位：工作台跑在 `main` 槽里，与官方会话页的切换、侧栏 `panellist` 入口的
   实际图标位姿、以及「记住上次选择」未在真实 DSH 里验证（当前是插件内部路由，不写浏览器 history）。
-- 未验证 · 事件台交互：本期只做「最小版」——数据来自待办聚合（提案 / report / 系统提醒），
-  开工单 / 忽略 / 标记噪声三个动作与 Source 健康面板留 W1.5；`event_replay` 完整时间线归 W2。
+- 已验证 · W1.5 事件台（浏览器侧）：`test/workbench.test.mjs` 覆盖筛选项词表、健康码五个固定词
+  （ready/assessing/suppressed/idle/noise，与设计字面的「已忽略」偏差见上）、展开态
+  （pending 给三条规则 + 三个动作；已处置只读且露工单号）、页面渲染（事件行 + 健康面板五列 +
+  收起来的行不露规则）、开工单的项目上下文回退（工作台项目 → 事件自己的项目）、空数据占位。
+- 已验证 · W1.5 事件台（宿主侧）：`test/index.test.mjs` 81/81——四类 kind 落库、三条规则命中/未命中、
+  自激保护（空白归一化同指纹 / 10 分钟窗口 / 过期恢复）、噪声闸（未过期不评估、过期恢复）、
+  open 真建单 + 重复 40904 + requestId 回放 + projectId 回退 + 40000/40401/403、ignore 留痕、
+  noise 写 24h 屏蔽、GET /events 的 source/state/limit/stats/倒序/跨项目、health 五词表递进、
+  四个 ingest 接线点逐一落库、events.json 损坏时 ingest 静默不拖垮主流程。
+- 未验证 · W1.5 真机 ingest 时机：四个接线点（提案提交 / 任务命令 / 交接结果 / 存储降级）在真实
+  会话里的触发时序未跑；2000 条滚动归档与并发 open 只建一单用仓库外临时脚本验过（未落库）。
+- 未验证 · 事件来源边界：主会话消息 / 工作区文件监听 / 定时三类 Source 本期不接（README 已记账），
+  接入前需要可靠的会话消息钩子与带自激保护的 fs 监听方案；`event_replay` 完整时间线归 W2。
