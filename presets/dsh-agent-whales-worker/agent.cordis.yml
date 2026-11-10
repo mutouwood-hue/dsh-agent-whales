@@ -1,0 +1,89 @@
+# 本 preset 随 dsh-agent-whales 分发，由宿主半边（lib/index.js 的 installWorkerPreset）
+# 安装到用户 preset 根 ~/.dsh/.agent-presets/dsh-agent-whales-worker；执行 Session 专用，
+# 不供手动选择（order: 99 排在所有手动 preset 之后）。
+#
+# 它与 standard 的关系：整段复制后按「无人值守干工单」裁剪——
+# 去掉 tool-ask-user（不向人提问）、present（不呈现产物给人看）、planning group
+# （不进计划模式）、command-goal / tool-goal（不挂长线目标）、delegation group
+# （不派生子代理/工作流）、tool-web（不联网抓取）。
+# 保留 shell / filesystem / jobs / skills / compaction / todo：执行器要能真的动手干活，
+# 也要能在超长工单里压缩上下文、把耗时命令转后台。
+#
+# 修改本文件前先看上面的安装规则：用户目录下的副本一旦存在就不会被插件升级覆盖，
+# 这里的改动只影响尚未安装的机器。
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    suffix: Your working directory is {{cwd}}.
+    prefix: >-
+      You are a coding agent powered by the {{model}} model.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true

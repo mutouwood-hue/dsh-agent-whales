@@ -12,16 +12,16 @@
  *   - 会话日志兼容层遇到脏事件必须回空数组而不是抛错
  *   - apply() 在宿主服务缺失 / 全部抛错 / 注册失败时都必须安静降级
  */
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /** 串门工具的身份只取执行上下文（P2 修法），测试里统一用这个假身份。 */
 const VISIT_EXEC = { agent: { id: "caller-visit" } };
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 
 import * as host from "../lib/index.js";
 
@@ -31,6 +31,9 @@ const ISOLATED_STORE_DIR = mkdtempSync(join(tmpdir(), "aw-index-"));
 host.setProjectStorePathForTests(join(ISOLATED_STORE_DIR, "projects.json"));
 host.setProposalStorePathForTests(join(ISOLATED_STORE_DIR, "proposals.json"));
 host.setHandoffsStorePathForTests(join(ISOLATED_STORE_DIR, "handoffs.json"));
+// W1：preset 安装器的目标根也指向临时目录——否则本文件每次 host.apply 都会往真实
+// ~/.dsh/.agent-presets 写文件（那是生产行为，不该由单元测试触发）。
+process.env.DSH_AGENT_WHALES_PRESET_DIR = join(ISOLATED_STORE_DIR, "presets");
 
 const KNOWN_TOOLS = [
   "whales_visit_list",
@@ -1495,4 +1498,580 @@ test("M5 系统提示：团队策略段含「项目简报（按需读取）」�
   assert.equal(hits, 1, "静态提示必须恰好出现一次");
   assert.match(text, /whales_brief_read/, "提示里必须点名按需读取工具");
   assert.match(text, /whales_brief_read` 读取项目简报/, "提示措辞必须完整");
+});
+
+// ── 11. M6 工作台：report / 落点字段 / handoffs / inbox / sessions / 新建任务 ──
+//
+// 这一组打的是宿主半边的 HTTP 面（同源 token + 信封 + 业务码），fake 宿主同时提供
+// webServer 路由与 sessions/agents/sessionPersistence，store 每个用例一份临时目录。
+
+/** M6 专用假宿主：路由 + 三个只读会话服务 + tools；store 指向本用例专属临时目录。 */
+function m6Harness() {
+  const dir = mkdtempSync(join(tmpdir(), "aw-m6-"));
+  host.setProjectStorePathForTests(join(dir, "projects.json"));
+  host.setProposalStorePathForTests(join(dir, "proposals.json"));
+  host.setHandoffsStorePathForTests(join(dir, "handoffs.json"));
+  const routes = [];
+  const tools = {};
+  const followups = [];
+  // list() 里四个会话；live 由 get() 决定（session-old 只存在于持久化里）。
+  const rows = [
+    { id: "session-a", title: "主线会话", running: true, header: { origin: "user" } },
+    { id: "session-b", title: "组员会话", running: false, header: { origin: "user" } },
+    { id: "session-worker", title: "执行器会话", running: false, header: { origin: "subagent", parentSession: "session-a" } },
+    { id: "session-old", header: {} }
+  ];
+  const live = new Set(["session-a", "session-b", "session-worker"]);
+  const archived = new Set(["session-old"]);
+  host.apply({
+    get(name) {
+      if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
+      if (name === "sessions") return {
+        list: () => rows.map((row) => Object.assign({}, row)),
+        get: (id) => (live.has(id) ? rows.find((row) => row.id === id) : undefined)
+      };
+      if (name === "agents") return {
+        get: (id) => (live.has(id) ? { id, status: id === "session-a" ? "running" : "idle", session: { id } } : undefined),
+        list: () => []
+      };
+      if (name === "sessionPersistence") return { stat: (id) => (archived.has(id) ? { id } : undefined) };
+      if (name === "tools") return { register: (tool) => { tools[tool.name] = tool; return () => {}; } };
+      return undefined;
+    },
+    effect(run) { return run(); },
+    on() { return () => {}; }
+  });
+  const route = routes.find((item) => item && typeof item.handler === "function");
+  assert.ok(route, "活动路由必须挂载");
+  let token;
+  async function request(method, url, headers, body) {
+    const requestHeaders = headers || {};
+    const req = new EventEmitter();
+    req.method = method;
+    req.url = url;
+    req.headers = requestHeaders;
+    const settled = await new Promise((resolve, reject) => {
+      const responseHeaders = {};
+      const res = {
+        statusCode: 0,
+        headersSent: false,
+        setHeader(key, value) { responseHeaders[String(key).toLowerCase()] = value; },
+        end(text) { resolve({ status: this.statusCode, headers: responseHeaders, body: text }); }
+      };
+      try {
+        route.handler(req, res);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      setImmediate(() => {
+        if (body !== undefined) req.emit("data", Buffer.from(JSON.stringify(body)));
+        req.emit("end");
+      });
+    });
+    let parsed;
+    try { parsed = JSON.parse(settled.body); } catch (error) { parsed = undefined; }
+    return { status: settled.status, headers: settled.headers, body: parsed };
+  }
+  return {
+    dir,
+    tools,
+    followups,
+    route,
+    /** 带同源 token 的常规调用。 */
+    call(method, url, body) {
+      const headers = token === undefined ? {} : { "x-whales-token": token };
+      return request(method, url, headers, body);
+    },
+    /** 裸调用（自带 headers）：用于「缺 token 必须 403」这类负例。 */
+    raw(method, url, headers, body) {
+      return request(method, url, headers, body);
+    },
+    async token() {
+      if (token === undefined) {
+        const activity = await request("GET", "/agent-whales/api/activity", {}, undefined);
+        token = activity.body.controlToken;
+      }
+      return token;
+    }
+  };
+}
+
+/** 建一个项目（主对话 session-a）+ 返回 projectId。 */
+async function createProject(h) {
+  const tk = await h.token();
+  const created = await h.call("POST", "/agent-whales/api/projects", { name: "M6 项目", mainSessionId: "session-a" });
+  assert.equal(created.body.code, 200, JSON.stringify(created.body));
+  return created.body.data.project.projectId;
+}
+
+describe("M6 report：四态 + CAS + 人机边界", () => {
+  test("report：人写 done 全字段落库，视图带出 rev/at/bySessionId", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "体检宿主" });
+    const taskId = created.body.data.task.taskId;
+    assert.equal(created.body.data.task.report, null, "新任务没有 report 时视图必须给 null");
+
+    const reported = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, {
+      projectId,
+      expectedRevision: 1,
+      report: { status: "done", summary: "干完了", artifacts: [{ kind: "file", ref: "lib/index.js", note: "改动" }, { kind: "url", ref: "https://example.com" }] }
+    });
+    assert.equal(reported.body.code, 200, JSON.stringify(reported.body));
+    const task = reported.body.data.task;
+    assert.equal(task.revision, 2, "写 report 必须把任务 revision +1");
+    assert.equal(task.report.status, "done");
+    assert.equal(task.report.summary, "干完了");
+    assert.equal(task.report.rev, 2, "report.rev 必须等于新 revision");
+    assert.equal(task.report.bySessionId, "user", "缺省 bySessionId = 人");
+    assert.ok(typeof task.report.at === "number" && task.report.at > 0);
+    assert.deepEqual(task.report.artifacts, [{ kind: "file", ref: "lib/index.js", note: "改动" }, { kind: "url", ref: "https://example.com" }]);
+
+    // 落库（不只是视图）：重新读任务表，report 仍在
+    const listed = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
+    const stored = listed.body.data.tasks.find((item) => item.taskId === taskId);
+    assert.equal(stored.report.status, "done");
+    assert.equal(stored.report.rev, 2);
+  });
+
+  test("report：CAS 冲突 40902 + latestVersion；worker 越权 40708；worker 可发起退回；人可关", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "改派发" });
+    const taskId = created.body.data.task.taskId;
+
+    // 过期 expectedRevision → 40902 + 最新版本号（两种键都给，UI 按哪套读都行）
+    const stale = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, { projectId, expectedRevision: 99, report: { status: "done" } });
+    assert.equal(stale.body.code, 40902, JSON.stringify(stale.body));
+    assert.equal(stale.body.data.latestVersion, 1);
+    assert.equal(stale.body.data.latestRevision, 1);
+
+    // worker 先写 done
+    const workerDone = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, { projectId, expectedRevision: 1, report: { status: "done" }, bySessionId: "session-worker" });
+    assert.equal(workerDone.body.code, 200, JSON.stringify(workerDone.body));
+    assert.equal(workerDone.body.data.task.report.bySessionId, "session-worker");
+
+    // worker 发起 human_action（允许）
+    const workerAsk = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, { projectId, expectedRevision: 2, report: { status: "human_action", summary: "需要人给个线上账号" }, bySessionId: "session-worker" });
+    assert.equal(workerAsk.body.code, 200, JSON.stringify(workerAsk.body));
+    assert.equal(workerAsk.body.data.task.report.status, "human_action");
+
+    // worker 想自己关回 done → 40708（退回结论只能人改）
+    const workerClose = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, { projectId, expectedRevision: 3, report: { status: "done" }, bySessionId: "session-worker" });
+    assert.equal(workerClose.body.code, 40708, JSON.stringify(workerClose.body));
+    assert.equal(workerClose.status, 200, "业务失败仍走 200 信封");
+
+    // worker 从 done 发起 handed_back（允许：任何状态都能发起退回）
+    const workerBack = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, { projectId, expectedRevision: 3, report: { status: "handed_back", summary: "超出 scope，需要人决策" }, bySessionId: "session-worker" });
+    assert.equal(workerBack.body.code, 200, JSON.stringify(workerBack.body));
+
+    // 人可以把 handed_back 关回 done
+    const humanClose = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, { projectId, expectedRevision: 4, report: { status: "done" }, bySessionId: "user" });
+    assert.equal(humanClose.body.code, 200, JSON.stringify(humanClose.body));
+    assert.equal(humanClose.body.data.task.report.status, "done");
+  });
+
+  test("report：非法 status 40000、缺 token 403、项目/任务不存在 40401、已删除 40906、OPTIONS/方法", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "边界" });
+    const taskId = created.body.data.task.taskId;
+    const url = `/agent-whales/api/tasks/${taskId}/report`;
+
+    const badStatus = await h.call("PUT", url, { projectId, expectedRevision: 1, report: { status: "weird" } });
+    assert.equal(badStatus.body.code, 40000, JSON.stringify(badStatus.body));
+
+    const noProject = await h.call("PUT", url, { expectedRevision: 1, report: { status: "done" } });
+    assert.equal(noProject.body.code, 40000);
+
+    const noToken = await h.raw("PUT", url, {}, { projectId, expectedRevision: 1, report: { status: "done" } });
+    assert.equal(noToken.status, 403, "缺同源 token 必须 403");
+    assert.equal(noToken.body.code, 40301);
+
+    const ghostProject = await h.call("PUT", url, { projectId: "proj-ghost", expectedRevision: 1, report: { status: "done" } });
+    assert.equal(ghostProject.body.code, 40401, JSON.stringify(ghostProject.body));
+
+    const ghostTask = await h.call("PUT", "/agent-whales/api/tasks/ptask-ghost/report", { projectId, expectedRevision: 1, report: { status: "done" } });
+    assert.equal(ghostTask.body.code, 40401);
+
+    // 直接把任务标成 deleted → 40906
+    const storeFile = join(h.dir, "projects.json");
+    const store = JSON.parse(readFileSync(storeFile, "utf8"));
+    store.tasks[taskId].status = "deleted";
+    writeFileSync(storeFile, JSON.stringify(store), "utf8");
+    const deleted = await h.call("PUT", url, { projectId, expectedRevision: 1, report: { status: "done" } });
+    assert.equal(deleted.body.code, 40906, JSON.stringify(deleted.body));
+
+    const options = await h.call("OPTIONS", url, undefined);
+    assert.equal(options.status, 204, "OPTIONS 必须 204");
+    assert.equal(options.headers["allow"], "PUT, OPTIONS");
+    const post = await h.call("POST", url, { projectId, expectedRevision: 1, report: { status: "done" } });
+    assert.equal(post.status, 405, "只接受 PUT");
+    assert.equal(post.headers["allow"], "PUT, OPTIONS");
+  });
+
+  test("report：summary 截断到 4000、artifacts 限 50 条、脏值丢弃不抛", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "截断" });
+    const taskId = created.body.data.task.taskId;
+    const artifacts = [];
+    for (let index = 0; index < 49; index += 1) artifacts.push({ kind: "file", ref: "ref-" + index });
+    // 第 50 条放一条超长 ref（必须在 50 条上限内才会被截断保留）
+    artifacts.push({ kind: "file", ref: "x".repeat(600) });
+    // 超上限的与脏值一律丢弃
+    for (let index = 0; index < 20; index += 1) artifacts.push({ kind: "url", ref: "https://example.com/" + index });
+    artifacts.push({ kind: "weird", ref: "脏 kind" });
+    artifacts.push({ kind: "file" });
+    artifacts.push(null);
+    const long = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, {
+      projectId,
+      expectedRevision: 1,
+      report: { status: "draft", summary: "摘".repeat(4001), artifacts: artifacts }
+    });
+    assert.equal(long.body.code, 200, JSON.stringify(long.body));
+    assert.equal(long.body.data.task.report.summary.length, 4000, "summary 必须截断到 4000 字");
+    assert.equal(long.body.data.task.report.artifacts.length, 50, "artifacts 必须限 50 条");
+    assert.equal(long.body.data.task.report.artifacts[0].ref, "ref-0");
+    assert.equal(long.body.data.task.report.artifacts[49].ref, "x".repeat(500), "ref 超长必须截断到 500 字");
+    for (const item of long.body.data.task.report.artifacts) {
+      assert.ok(item.kind === "file" || item.kind === "url", "脏 kind 必须被丢弃");
+      assert.ok(typeof item.ref === "string" && item.ref !== "", "缺 ref 必须被丢弃");
+    }
+  });
+});
+
+describe("M6 任务落点字段 worktree / execRoot", () => {
+  test("新建时落库、视图原样带出；缺省为 null；assign 不改这两个字段", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    const withSpots = await h.call("POST", "/agent-whales/api/tasks", {
+      projectId,
+      subject: "带落点",
+      worktree: ".dsh-agent-whales/work/ptask-x",
+      execRoot: "D:/repo"
+    });
+    const task = withSpots.body.data.task;
+    assert.equal(task.worktree, ".dsh-agent-whales/work/ptask-x");
+    assert.equal(task.execRoot, "D:/repo");
+
+    const plain = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "无落点" });
+    assert.equal(plain.body.data.task.worktree, null, "缺省必须是 null（前端显示 —）");
+    assert.equal(plain.body.data.task.execRoot, null);
+
+    // 先把 session-b 加进项目，再 assign 给它：落点字段不得被命令改动
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+    const assigned = await h.call("POST", `/agent-whales/api/tasks/${task.taskId}/commands`, { projectId, action: "assign", owner: "session-b", expectedRevision: 1, requestId: "assign-1" });
+    assert.equal(assigned.body.code, 200, JSON.stringify(assigned.body));
+    assert.equal(assigned.body.data.task.worktree, ".dsh-agent-whales/work/ptask-x", "assign 不得改落点字段");
+    assert.equal(assigned.body.data.task.execRoot, "D:/repo");
+  });
+});
+
+describe("M6 GET /agent-whales/api/handoffs（发送记录）", () => {
+  test("倒序 + 项目过滤 + limit + 项目不存在 40401 + 非 GET 405", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+    // 三条发送记录：两条至少一方是项目成员，一条两边都是外人
+    writeFileSync(join(h.dir, "handoffs.json"), JSON.stringify({
+      entries: [
+        { kind: "relay", from: "session-a", to: "session-b", messageId: "m1", at: 1000 },
+        { kind: "dispatch", from: "user", to: "session-b", messageId: "m2", at: 3000, taskId: "ptask-1", revision: 1 },
+        { kind: "relay", from: "session-ghost", to: "session-outsider", messageId: "m3", at: 2000 }
+      ]
+    }), "utf8");
+
+    const all = await h.call("GET", "/agent-whales/api/handoffs");
+    assert.equal(all.body.code, 200, JSON.stringify(all.body));
+    assert.equal(all.body.data.projectId, null);
+    assert.deepEqual(all.body.data.entries.map((entry) => entry.messageId), ["m2", "m3", "m1"], "必须按 at 倒序");
+    assert.deepEqual(all.body.data.entries[0], { kind: "dispatch", from: "user", to: "session-b", messageId: "m2", at: 3000, taskId: "ptask-1", revision: 1 }, "已存字段原样带出");
+
+    const scoped = await h.call("GET", `/agent-whales/api/handoffs?projectId=${projectId}`);
+    assert.deepEqual(scoped.body.data.entries.map((entry) => entry.messageId), ["m2", "m1"], "只保留 from/to 至少一方是成员的记录");
+    assert.equal(scoped.body.data.projectId, projectId);
+
+    const limited = await h.call("GET", "/agent-whales/api/handoffs?limit=1");
+    assert.equal(limited.body.data.entries.length, 1);
+    assert.equal(limited.body.data.entries[0].messageId, "m2");
+
+    const ghost = await h.call("GET", "/agent-whales/api/handoffs?projectId=proj-ghost");
+    assert.equal(ghost.body.code, 40401, JSON.stringify(ghost.body));
+
+    const post = await h.call("POST", "/agent-whales/api/handoffs", {});
+    assert.equal(post.status, 405);
+    assert.equal(post.headers["allow"], "GET, HEAD");
+  });
+
+  test("handoffs：账本损坏时降级为空表，不抛错", async () => {
+    const h = await m6Harness();
+    await createProject(h);
+    writeFileSync(join(h.dir, "handoffs.json"), "{ 不是 json", "utf8");
+    const read = await h.call("GET", "/agent-whales/api/handoffs");
+    assert.equal(read.status, 200);
+    assert.deepEqual(read.body.data.entries, [], "损坏账本必须回空表");
+    assert.ok(existsSync(join(h.dir, "handoffs.json")) === false, "原文件必须被备份改名");
+  });
+});
+
+describe("M6 GET /agent-whales/api/inbox（需要我处理）", () => {
+  test("四组聚合：提案 / human_action / handed_back / 前置删除；空组保留；项目过滤", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+
+    // 提案台账按 leadSessionId 存一条：先提交 v1 并确认（锁定），再提交才会开新提案。
+    // 于是现场是「一个已确认（不进待办）+ 一个未确认（进待办）」。
+    const locked = await h.tools.whales_propose_tasks.execute({
+      leadSessionId: "session-a", projectId, items: [{ key: "T1", title: "提案一" }]
+    }, { agent: { id: "session-a" } });
+    const confirmLocked = await h.call("POST", `/agent-whales/api/proposals/${locked.proposalId}/confirm`, { leadSessionId: "session-a", version: locked.version, requestId: "inbox-confirm" });
+    assert.equal(confirmLocked.body.code, 200, JSON.stringify(confirmLocked.body));
+    const pending = await h.tools.whales_propose_tasks.execute({
+      leadSessionId: "session-a", projectId, items: [{ key: "T2", title: "提案二" }]
+    }, { agent: { id: "session-a" } });
+    assert.notEqual(pending.proposalId, locked.proposalId, "已确认后必须开新提案");
+
+    // 三个任务：human_action / handed_back / 前置已删除
+    const asked = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "求人任务" });
+    const askedId = asked.body.data.task.taskId;
+    const backed = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "退回任务" });
+    const backedId = backed.body.data.task.taskId;
+    const blocked = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "卡住任务" });
+    const blockedId = blocked.body.data.task.taskId;
+    const done = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "正常任务" });
+    const doneId = done.body.data.task.taskId;
+
+    await h.call("PUT", `/agent-whales/api/tasks/${askedId}/report`, { projectId, expectedRevision: 1, report: { status: "human_action", summary: "要账号" }, bySessionId: "session-worker" });
+    await h.call("PUT", `/agent-whales/api/tasks/${backedId}/report`, { projectId, expectedRevision: 1, report: { status: "handed_back", summary: "超 scope" }, bySessionId: "session-worker" });
+    await h.call("PUT", `/agent-whales/api/tasks/${doneId}/report`, { projectId, expectedRevision: 1, report: { status: "done", summary: "完成" }, bySessionId: "session-worker" });
+    // 直接把「卡住任务」的前置指向一个不存在的任务 → 前置已删除
+    const storeFile = join(h.dir, "projects.json");
+    const store = JSON.parse(readFileSync(storeFile, "utf8"));
+    store.tasks[blockedId].blockedBy = ["ptask-missing"];
+    writeFileSync(storeFile, JSON.stringify(store), "utf8");
+
+    const inbox = await h.call("GET", "/agent-whales/api/inbox");
+    assert.equal(inbox.body.code, 200, JSON.stringify(inbox.body));
+    const groups = {};
+    for (const group of inbox.body.data.groups) groups[group.key] = group;
+    assert.deepEqual(inbox.body.data.groups.map((group) => group.key), ["proposals", "worker", "handed_back", "system"], "四组必须固定且顺序稳定");
+    assert.equal(groups.proposals.label, "提案待确认");
+    assert.equal(groups.proposals.items.length, 1, "已确认提案不得再进待办");
+    assert.equal(groups.proposals.items[0].kind, "proposal");
+    assert.equal(groups.proposals.items[0].proposalId, pending.proposalId);
+    assert.equal(groups.proposals.items[0].subject, "提案二", "subject 取首个 item 的 title");
+    assert.equal(groups.worker.items.length, 1);
+    assert.equal(groups.worker.items[0].taskId, askedId);
+    assert.equal(groups.worker.items[0].report.status, "human_action");
+    assert.equal(groups.handed_back.items.length, 1);
+    assert.equal(groups.handed_back.items[0].taskId, backedId);
+    assert.equal(groups.system.items.length, 1, "只有前置删除一条系统提醒");
+    assert.equal(groups.system.items[0].kind, "task");
+    assert.equal(groups.system.items[0].reason, "前置已删除");
+    assert.equal(groups.system.items[0].taskId, blockedId);
+
+    const scoped = await h.call("GET", `/agent-whales/api/inbox?projectId=proj-ghost`);
+    assert.equal(scoped.body.code, 200, "项目过滤不该把接口打挂");
+    for (const group of scoped.body.data.groups) assert.equal(group.items.length, 0, "空组也必须保留");
+
+    const method = await h.call("POST", "/agent-whales/api/inbox", {});
+    assert.equal(method.status, 405);
+  });
+
+  test("inbox：store 只读降级时 system 组出现 store-readonly 提醒", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "任务" });
+    // 弄坏 handoffs.json：读时备份 + 只读降级
+    writeFileSync(join(h.dir, "handoffs.json"), "{ 坏", "utf8");
+    const inbox = await h.call("GET", "/agent-whales/api/inbox");
+    assert.equal(inbox.body.code, 200);
+    const system = inbox.body.data.groups.find((group) => group.key === "system");
+    const store = system.items.find((item) => item.kind === "store");
+    assert.ok(store, "只读降级必须提醒");
+    assert.equal(store.reason, "store-readonly");
+  });
+});
+
+describe("M6 GET /agent-whales/api/sessions（会话目录）", () => {
+  test("live/running/archived/parentSessionId、live 优先排序、上限、服务缺失给空数组", async () => {
+    const h = await m6Harness();
+    const sessions = await h.call("GET", "/agent-whales/api/sessions");
+    assert.equal(sessions.status, 200, JSON.stringify(sessions.body));
+    assert.equal(sessions.body.data.source, "host");
+    const order = sessions.body.data.sessions.map((item) => item.sessionId);
+    assert.equal(order[order.length - 1], "session-old", "非 live 的必须排在最后");
+    const liveTitles = sessions.body.data.sessions.filter((item) => item.live).map((item) => item.title);
+    assert.deepEqual(liveTitles, liveTitles.slice().sort((a, b) => a.localeCompare(b)), "live 组内按标题升序");
+    const byId = {};
+    for (const item of sessions.body.data.sessions) byId[item.sessionId] = item;
+    assert.equal(byId["session-a"].live, true);
+    assert.equal(byId["session-a"].running, true);
+    assert.equal(byId["session-a"].title, "主线会话");
+    assert.equal(byId["session-b"].running, false, "idle 不是 running");
+    assert.equal(byId["session-b"].live, true);
+    assert.equal(byId["session-old"].live, false);
+    assert.equal(byId["session-old"].archived, true, "有持久化记录且非 live = 归档");
+    assert.equal(byId["session-old"].title, "", "没有标题给空串");
+    assert.equal(byId["session-worker"].parentSessionId, "session-a", "header.parentSession 要映射成 parentSessionId");
+    assert.equal(byId["session-a"].parentSessionId, undefined, "没有父会话不带这个键");
+
+    const method = await h.call("POST", "/agent-whales/api/sessions", undefined, {});
+    assert.equal(method.status, 405);
+    assert.equal(method.headers["allow"], "GET, HEAD");
+
+    // 服务整体缺失：给空数组而不是抛错
+    const emptyHost = m6HarnessWithoutSessions();
+    const empty = await emptyHost.call("GET", "/agent-whales/api/sessions");
+    assert.equal(empty.status, 200);
+    assert.deepEqual(empty.body.data.sessions, [], "取不到会话服务必须给空数组");
+  });
+});
+
+/** 只提供 webServer 的假宿主（没有任何会话服务）。 */
+function m6HarnessWithoutSessions() {
+  const routes = [];
+  host.apply({
+    get(name) {
+      if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
+      return undefined;
+    },
+    effect(run) { return run(); },
+    on() { return () => {}; }
+  });
+  const route = routes[0];
+  return {
+    async call(method, url, body) {
+      const req = new EventEmitter();
+      req.method = method;
+      req.url = url;
+      req.headers = {};
+      const settled = await new Promise((resolve) => {
+        const res = { statusCode: 0, setHeader() {}, end(text) { resolve({ status: this.statusCode, body: text }); } };
+        route.handler(req, res);
+        setImmediate(() => {
+          if (body !== undefined) req.emit("data", Buffer.from(JSON.stringify(body)));
+          req.emit("end");
+        });
+      });
+      let parsed;
+      try { parsed = JSON.parse(settled.body); } catch (error) { parsed = undefined; }
+      return { status: settled.status, body: parsed };
+    }
+  };
+}
+
+describe("M6 POST /agent-whales/api/tasks（新建任务）", () => {
+  test("新建成功 + requestId 回放 + 项目不存在 40401 + 跨项目/已删除 blocker", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    const created = await h.call("POST", "/agent-whales/api/tasks", {
+      projectId, subject: "新任务", description: "描述", writeScopes: ["lib/"], requestId: "create-1"
+    });
+    assert.equal(created.body.code, 200, JSON.stringify(created.body));
+    assert.equal(created.body.data.source, "project");
+    assert.equal(created.body.data.task.subject, "新任务");
+    assert.equal(created.body.data.task.status, "pending");
+    assert.equal(created.body.data.task.revision, 1);
+    assert.deepEqual(created.body.data.task.writeScopes, ["lib/"]);
+
+    // 同 requestId 再发 → 回放同一个任务，不重复建
+    const replayed = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "另一个", requestId: "create-1" });
+    assert.equal(replayed.body.data.task.taskId, created.body.data.task.taskId, "同 requestId 必须回放");
+    assert.equal(replayed.body.data.replayed, true);
+    const listed = await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`);
+    assert.equal(listed.body.data.tasks.filter((task) => task.subject === "另一个").length, 0, "回放不得真的再建一个");
+
+    const ghost = await h.call("POST", "/agent-whales/api/tasks", { projectId: "proj-ghost", subject: "x" });
+    assert.equal(ghost.body.code, 40401, JSON.stringify(ghost.body));
+
+    const noSubject = await h.call("POST", "/agent-whales/api/tasks", { projectId });
+    assert.equal(noSubject.body.code, 40000);
+
+    const noToken = await h.raw("POST", "/agent-whales/api/tasks", {}, { projectId, subject: "x" });
+    assert.equal(noToken.status, 403);
+    assert.equal(noToken.body.code, 40301);
+
+    const missingBlocker = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "坏前置", blockedBy: ["ptask-elsewhere"] });
+    assert.equal(missingBlocker.body.code, 40704, JSON.stringify(missingBlocker.body));
+
+    // 已删除的前置 → 40906
+    const first = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "前置" });
+    const firstId = first.body.data.task.taskId;
+    const storeFile = join(h.dir, "projects.json");
+    const store = JSON.parse(readFileSync(storeFile, "utf8"));
+    store.tasks[firstId].status = "deleted";
+    writeFileSync(storeFile, JSON.stringify(store), "utf8");
+    const deletedBlocker = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "跟已删除前置", blockedBy: [firstId] });
+    assert.equal(deletedBlocker.body.code, 40906, JSON.stringify(deletedBlocker.body));
+
+    const options = await h.call("OPTIONS", "/agent-whales/api/tasks", undefined);
+    assert.equal(options.status, 204, "OPTIONS 必须 204");
+    assert.equal(options.headers["allow"], "GET, HEAD, POST, OPTIONS", "allow 必须同时报出快照与新建");
+    const put = await h.raw("PUT", "/agent-whales/api/tasks", {}, { projectId, subject: "x" });
+    assert.equal(put.status, 405);
+    assert.equal(put.headers["allow"], "GET, HEAD, POST, OPTIONS");
+  });
+});
+
+describe("W1 worker preset 安装器", () => {
+  test("首次安装两个文件、二次 apply 不覆盖、目标已存在时不动", () => {
+    const presetRoot = mkdtempSync(join(tmpdir(), "aw-preset-"));
+    const target = join(presetRoot, "dsh-agent-whales-worker");
+    const repoPreset = join(dirname(fileURLToPath(import.meta.url)), "..", "presets", "dsh-agent-whales-worker");
+    const previous = process.env.DSH_AGENT_WHALES_PRESET_DIR;
+    process.env.DSH_AGENT_WHALES_PRESET_DIR = presetRoot;
+    const bareHost = () => ({
+      get: () => undefined,
+      effect(run) { return run(); },
+      on() { return () => {}; }
+    });
+    try {
+      // 1) 首次安装：两个文件都在，且与仓库里的完全一致
+      host.apply(bareHost());
+      assert.ok(existsSync(join(target, "preset.yml")), "preset.yml 必须被安装");
+      assert.ok(existsSync(join(target, "agent.cordis.yml")), "agent.cordis.yml 必须被安装");
+      assert.equal(
+        readFileSync(join(target, "preset.yml"), "utf8"),
+        readFileSync(join(repoPreset, "preset.yml"), "utf8"),
+        "安装内容必须与插件自带文件一致"
+      );
+      assert.equal(
+        readFileSync(join(target, "agent.cordis.yml"), "utf8"),
+        readFileSync(join(repoPreset, "agent.cordis.yml"), "utf8")
+      );
+      const manifest = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"));
+      assert.ok(manifest.files.includes("presets/dsh-agent-whales-worker/preset.yml"), "preset.yml 必须进 files");
+      assert.ok(manifest.files.includes("presets/dsh-agent-whales-worker/agent.cordis.yml"), "agent.cordis.yml 必须进 files");
+
+      // 2) 用户改过自己的版本：再次 apply 不得覆盖
+      writeFileSync(join(target, "preset.yml"), "name: 我改过的版本\n", "utf8");
+      writeFileSync(join(target, "extra.txt"), "别动我", "utf8");
+      host.apply(bareHost());
+      assert.equal(readFileSync(join(target, "preset.yml"), "utf8"), "name: 我改过的版本\n", "已存在的 preset 绝不被覆盖");
+      assert.equal(readFileSync(join(target, "extra.txt"), "utf8"), "别动我", "用户目录里的其它文件不受影响");
+
+      // 3) 目标目录事先存在（哪怕是空目录）：同样整目录跳过
+      const other = mkdtempSync(join(tmpdir(), "aw-preset-"));
+      process.env.DSH_AGENT_WHALES_PRESET_DIR = other;
+      mkdirSync(join(other, "dsh-agent-whales-worker"), { recursive: true });
+      host.apply(bareHost());
+      assert.equal(existsSync(join(other, "dsh-agent-whales-worker", "preset.yml")), false, "目标已存在不得补文件");
+    } finally {
+      if (previous === undefined) delete process.env.DSH_AGENT_WHALES_PRESET_DIR;
+      else process.env.DSH_AGENT_WHALES_PRESET_DIR = previous;
+      rmSync(presetRoot, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,0 +1,3 @@
+name: 执行器 · dsh-agent-whales-worker
+description: 执行器专用，不供手动选择：无人值守干工单，前台命令 5 秒转后台；去掉人工提问、presenting、plan 模式、插件管理与市场、scheduling、goals、workflows、web fetch、forked subagents。
+order: 99
