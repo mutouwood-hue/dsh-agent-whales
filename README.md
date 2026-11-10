@@ -353,6 +353,45 @@ Trigger 收件箱：事件先进来评估，再决定开工单还是忽略；与
 `suppressed` 是自激保护的留痕态（同类 10 分钟内重复），不算待评估。落点：`~/.dsh/agent-whales/events.json`，
 与 handoffs.json 同目录、独立串行队列，不抢项目 store 的锁；2000 条按文件滚动归档，不静默删。
 
+### 观测 · event_replay（W2）
+
+「这个任务发生过什么」——挂在**任务卡详情**（任务行上的「查看过程」），不进侧栏、不占导航。
+
+- **六步时间线**（设计稿 T-13）：Source → Trigger → Policy → Ticket → Worker → Report。
+  每步 = 阶段词 + 时间 + 事实 + 证据；缺的步补 `pending`，`skipped` 表示这一步不适用
+  （如手动创建的任务没有 Trigger）。宿主少给/多给都不能让 UI 缺环或乱序（未知 key 追加尾部）。
+- **明细流水**：事件台账 / 交接账本 / report 写入三处聚合，按时间倒序，默认 50 条、上限 200。
+- **observations**：owner 会话的当前工具与耗时、跑命令 / 写文件计数、日志尾部——
+  与执行台同源（`/activity` 快照 + 会话日志折叠），不建第二套采集。
+  **计数是执行会话口径（跨任务累计），不是这个任务单独跑的量**——UI 上明确标注，别当任务口径用。
+- **与账本的分工**（设计稿原话）：replay 记「任务怎么来的、怎么跑的」；发送记录记「消息送到没有」。
+  两者不合并——「已回复」不等于 report 为 `done`。
+
+| 路由 | 方法 | 作用 |
+|---|---|---|
+| `/tasks/:taskId/timeline?projectId=&limit=` | `GET` | 六步时间线 + 明细流水（只读、无 token） |
+| `/tasks/:taskId/observations?projectId=&limit=` | `GET` | 当前工具 + 计数 + 日志尾部（只读、无 token） |
+
+「找不到」分两种：项目不存在 → 200 宽松回空 + `note`（页面轮询时项目被删不刷错误，与 inbox 同口径）；
+项目存在但任务不在 → `40401`。
+
+### 目标条与提案带入（W2 · D2 递进第一步）
+
+- **目标条**叠在 `conversation.input.dock`（**不影子**官方 composer——D2 硬约束：先叠加、
+  采集升级依据，再决定是否影子；升级触发条件：观察窗口 2 周或 200 会话、目标条点击率 ≥15%）。
+- 目标 = 最新提案 `sourceMessageId` 指向的那条用户消息，标题直接截取该消息首行；
+  **客户端没有读单条消息的路由**，所以当前永远走「会话标题」兜底并**可见地注明来源**，
+  不编造目标文本（参数位保留，将来有读消息能力即可优先）。
+- **还没有提案时**：目标条只显示一句引导「在下方输入框写下目标」，**不放「带入」**（§49.1 硬约束）。
+- **提案状态行**：`提案 v2 待确认 · 查看`；点「查看」切到工作台并定位到提案卡。
+- **「带入」只服务一件事**：让 Lead 改提案——用官方草稿 API（`inputActions.captureInsertion()`
+  + `insertText(text, span)`，契约逐字核实自 desktop runtime）插入一个**引用前缀**
+  （如「关于提案 v2（prop-9f3c）：」）。**零 DOM 操作**、是一次可撤销的官方编辑事务；
+  插入后**不自动提交**，成功态只说「已带入，请回车发送」——**绝不显示"已发送"**。
+  被拒（revision 过期 / 编辑器不可编辑 / 面板拿不到 inputActions）→ 剪贴板降级
+  「无法写入输入框，已复制」（`navigator.clipboard` → 隐藏 textarea + `execCommand` → 返回原文，
+  全插件唯一一处 DOM 触碰，层层兜底）。
+
 > **来源边界（写实，不假装）**：本期事件只来自**插件自己已经拥有的事实**——提案提交、任务命令、
 > 交接发送结果、store 只读降级（`source: "plugin"`）。PRD 里的「主会话消息 / 工作区文件监听 /
 > 定时」三类 Source **本期不接**：没有可靠的会话消息钩子；`fs` 监听要做自身状态目录排除与泄漏防护，
@@ -570,7 +609,9 @@ npm test          # = node --test test/，跑 test/ 下全部 *.test.mjs
 
 四个文件分工：`client.test.mjs`（基线：契约/计数/素材/排布/家族树/气泡/拖拽/设置/渲染）、
 `index.test.mjs`（宿主半边）、`client-robustness.test.mjs`（对抗性：畸形输入、缺服务、边界值）、
-`workbench.test.mjs`（M6 工作台纯逻辑 + 十屏渲染冒烟）、
+`workbench.test.mjs`（M6 工作台纯逻辑 + 十屏渲染冒烟 + W1.5 事件台）、
+`workbench-draft.test.mjs`（W2 提案带入与目标条）、
+`workbench-replay.test.mjs`（W2 event_replay UI）、
 `meta.test.mjs`（发布门禁：清单契约、`files` 覆盖 `exports` 目标、patch 无 BOM/可解析、
 默认 patch 只增量插入自己、`npm test` 覆盖全部用例）。
 
@@ -622,7 +663,9 @@ node _scratch/preview.mjs
 | `icon.svg` | 插件管理页图标 |
 | `test/harness.mjs` | 离线测试用的最小 React 垫片与插件加载器 |
 | `test/client.test.mjs` | 基线用例（契约 / 计数 / 素材 / 家族树 / 气泡 / 拖拽 / 设置 / 渲染） |
-| `test/workbench.test.mjs` | M6 工作台纯逻辑用例（路由 / token 估算 / 简报预算 / 任务行派生 / report 人机边界 / 待办聚合 / 画布图 / 十屏渲染冒烟 / 只读缓存） |
+| `test/workbench.test.mjs` | M6 工作台纯逻辑用例（路由 / token 估算 / 简报预算 / 任务行派生 / report 人机边界 / 待办聚合 / 画布图 / hook 顺序 / 十屏渲染冒烟 / 只读缓存）+ W1.5 事件台用例（筛选项词表 / 健康码五词与色调 / 展开态 / 页面渲染 / 项目上下文回退） |
+| `test/workbench-draft.test.mjs` | W2 提案带入与目标条（`wbDraftPrefix` 引用前缀无指令措责 / `wbInsertDraft` 三态降级链 / 目标条无提案时不放带入 / input.dock 不影子） |
+| `test/workbench-replay.test.mjs` | W2 event_replay UI（六步固定 / 缺步补 pending / 未知 key 追加尾部 / 明细倒序 / 色调 / 弹层渲染与坏数据兜底） |
 | `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具、活动接口、项目任务表、简报、提案、report、handoffs、inbox、sessions、events 台账与三动作、preset 安装器） |
 | `test/client-robustness.test.mjs` | 对抗性用例（畸形输入、缺服务、边界值） |
 | `test/meta.test.mjs` | 发布门禁用例（清单契约、`files`/`exports`、patch BOM 与结构、`npm test` 覆盖面） |
@@ -689,7 +732,8 @@ node _scratch/preview.mjs
   `_scratch/wb-css-check.mjs` 校验 CSS 花括号配对、16 个 token 两套主题都在、组件无硬编码 hex。
 - 已验证 · M6 宿主路由：`test/index.test.mjs` 覆盖 report 四态 + CAS 40902 + worker 越权 40708 +
   人可关、落点字段落库、handoffs 项目过滤与倒序、inbox 四组聚合（含只读降级）、
-  sessions 目录形状、POST /tasks 新建与 requestId 回放、preset 安装器（首装 / 幂等 / 不覆盖 / 源不齐不建目录）。- 未验证 · M6 画布交互手感：拖拽挪位、Ctrl+滚轮缩放、拖锚点建线、点选删除——垫片里
+  sessions 目录形状、POST /tasks 新建与 requestId 回放、preset 安装器（首装 / 幂等 / 不覆盖 / 源不齐不建目录）。
+- 未验证 · M6 画布交互手感：拖拽挪位、Ctrl+滚轮缩放、拖锚点建线、点选删除——垫片里
   `useState` 的 setter 是空函数，只能验证几何换算（`wbCanvasEdges` / `wbCanvasNodes`）与渲染，
   真实指针事件的手感与「拖出边界」未跑。
 - 未验证 · M6 真机对位：工作台跑在 `main` 槽里，与官方会话页的切换、侧栏 `panellist` 入口的
@@ -706,4 +750,20 @@ node _scratch/preview.mjs
 - 未验证 · W1.5 真机 ingest 时机：四个接线点（提案提交 / 任务命令 / 交接结果 / 存储降级）在真实
   会话里的触发时序未跑；2000 条滚动归档与并发 open 只建一单用仓库外临时脚本验过（未落库）。
 - 未验证 · 事件来源边界：主会话消息 / 工作区文件监听 / 定时三类 Source 本期不接（README 已记账），
-  接入前需要可靠的会话消息钩子与带自激保护的 fs 监听方案；`event_replay` 完整时间线归 W2。
+  接入前需要可靠的会话消息钩子与带自激保护的 fs 监听方案。
+- 已验证 · W2 event_replay（宿主侧）：`test/index.test.mjs` 96/96——六步各自派生（来源提案 /
+  无来源 skipped / blockedBy 挡过 + 解锁时间 / dispatch 三态 / report 四态 / 已完成 until+计数）、
+  entries 三处聚合 + 倒序 + 去重 + limit、observations 全边界（当前工具与 /activity 同源且结果事件后消失 /
+  无 owner / 会话不在跑 / tail 倒序 + 两种日志形状 + counts + 封顶）、405+allow、宽松回空与 40401、
+  纯函数畸变输入 lossless。
+- 已验证 · W2 event_replay（浏览器侧）：`test/workbench-replay.test.mjs` 6 例——六步固定、
+  缺步补 pending、未知 key 追加尾部、明细倒序、色调映射、弹层渲染（六步 + observations + 明细 +
+  脚注）与坏数据兜底（空 steps / observations 5xx 不炸）；`_scratch/wb-preview.mjs` 出 replay.html 静态预览。
+- 已验证 · W2 提案带入与目标条（浏览器侧）：`test/workbench-draft.test.mjs` 21 例——`wbDraftPrefix`
+  只含版本+编号且逐词断言无指令措辞、`wbInsertDraft` 三态（inserted / copied / failed）与逐层降级、
+  目标条无提案时只有引导语且**不带入按钮**、input.dock 座位无 priority（D2 硬约束）。
+- 未验证 · W2 真机：`input.dock` 的 standard props 是否真按契约送到（inputActions / sessionId /
+  useSessions）、目标条在官方 composer 里的观感与暗色适配、`insertText` 在真实编辑器里的可撤销性、
+  六步时间线在真实任务上的完整度（fixture 只覆盖了常见形状）。
+- 未验证 · W2 升级判定（D2 递进）：目标条点击率 ≥15% / 观察窗口 2 周或 200 会话——需要真实使用数据，
+  达标后才考虑影子 `conversation.composer`；本期不影子。
