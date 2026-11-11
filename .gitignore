@@ -20,3 +20,6 @@ Desktop.ini
 
 # 设计源文件（pen.dev 画布，二进制且体积大；用户 2026-11-10 明确不入库）
 设计图pen.pen
+
+# PRD 工作期临时脚本（改 lib/client.js 与测试用，不入库）
+.prd-tmp/

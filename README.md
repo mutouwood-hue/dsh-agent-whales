@@ -275,7 +275,8 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 **画布**只承载三类节点：上下文（仓库 / 文件夹，来自任务落点）、Agent（项目成员对话）、
 Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links`，只表示允许互发 / 互读）；
 上下文 → Agent 是**有向数据流**（虚线）。任务依赖 `blockedBy` **不上画布**，只在任务板。
-支持拖拽挪位、Ctrl+滚轮缩放、小地图、拖锚点建线、点选后确认删除；删除成员节点只解除画布引用，
+支持拖拽挪位、Ctrl+滚轮缩放、小地图（只读镜像：节点在哪、当前视区在哪）、网格开关、
+拖锚点建线、点选后确认删除；删除成员节点只解除画布引用，
 进行中的工单标记 `handed_back` 且**不自动取消**（PRD §53.9.12）。
 
 **任务板**走插件自建任务表（`~/.dsh/agent-whales/projects.json`，与宿主任务板共存不混），
@@ -286,6 +287,11 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 **简报**两层：项目简报（人 / 主对话可写，版本 CAS）+ 对话简报（本人可写，人可代写并标「代写」），
 两者**共用 2000 token 总预算**（CJK 1 字 = 1 token，其他 4 字符 = 1 token），超出按序丢弃并返回
 `truncated` / `omitted`。每轮自动注入全量上下文已被否决，改为**按需读取** + 系统提示静态提示。
+
+**位置存在宿主**（`~/.dsh/agent-whales/canvas.json`，按项目分页 + revision），浏览器
+`localStorage` 只做拖拽即时反馈与离线兜底——换设备 / 换浏览器不再丢，agent 也能改。
+刷新后落在上次的界面与项目内 Tab（`dsh-agent-whales.last-view`）；**首次仍然进项目列表**，
+「记住」不等于「首次默认进画布」。
 
 **主题**默认浅色，设置里可切暗色；两套 token 一一对应（`WB_TOKENS`），组件只引用
 `var(--daw-*)`，切主题即换色，没有第二套组件。
@@ -306,6 +312,7 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 | `/handoffs?projectId=` | `GET` | 发送记录（交接账本只读，`at` 倒序） |
 | `/inbox?projectId=` | `GET` | 需要我处理四组：提案待确认 / worker 求人 / 超 scope 退回 / 系统提醒 |
 | `/sessions` | `GET` | 会话目录（加入对话列表、owner 显示名、画布 Agent 节点用） |
+| `/canvas?projectId=` | `GET` / `PUT` | 画布位置表。节点是派生的，**位置是唯一「人摆过」的状态**。`expectedRevision` CAS，过期 `40902` 并带回当前版本——不覆盖别人刚摆的位置 |
 | `/proposals` · `/proposals/:id/confirm` | `GET` / `POST` | 提案只读展示 + 确认后逐条建任务 |
 
 写操作一律带 `x-whales-token`（同源证明，与 `/visit-tools` 同一把 `controlToken`）；
@@ -313,6 +320,22 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 `PROJECT_TASK_EXTRA`（report 冲突 = `40902`，worker 越权 = `40708`，跨项目 = `40701`，
 主对话不可移除 = `40702`，提案须主对话提交 = `40706`，store 只读降级 = `50302`）。
 
+### 画布 agent 面（W1 返工）
+
+W2 审核发现的缺口：画布此前只有人能在浏览器里摆，**agent 完全看不到也改不了**。
+现在补了一组工具（`presentCall` 分 read / edit，edit 才出现在可写面）：
+
+| 工具 | 作用 |
+|---|---|
+| `whales_canvas_list` | 列有画布页的项目 + revision + 节点数（read） |
+| `whales_canvas_inspect` | 看某个项目的画布：位置 + 关联线 + 成员（read，项目不存在 `40401`） |
+| `whales_canvas_layout` | 整体覆盖位置；`expectedRevision` 过期回 `40902`，**不覆盖**（edit） |
+| `whales_canvas_link` | 建无向关联线（同项目、自连 `40001`、重复幂等）（edit） |
+| `whales_canvas_unlink` | 删关联线（删不存在的也当成功，幂等）（edit） |
+
+**没有 `node_add` / `node_delete`**：画布节点是**派生**的——上下文节点来自任务落点
+（`worktree` / `execRoot`，§55.3.1）、Agent 节点来自项目成员、Composer 来自主会话。
+允许 agent「增删节点」等于让它伪造这三种事实，所以只开放「摆位置」和「连关联线」。
 ### worker preset（执行器专用）
 
 `presets/dsh-agent-whales-worker/` 随包分发；插件 `apply` 时把它复制到
@@ -382,7 +405,10 @@ Trigger 收件箱：事件先进来评估，再决定开工单还是忽略；与
 - 目标 = 最新提案 `sourceMessageId` 指向的那条用户消息，标题直接截取该消息首行；
   **客户端没有读单条消息的路由**，所以当前永远走「会话标题」兜底并**可见地注明来源**，
   不编造目标文本（参数位保留，将来有读消息能力即可优先）。
-- **还没有提案时**：目标条只显示一句引导「在下方输入框写下目标」，**不放「带入」**（§49.1 硬约束）。
+- **没有提案就整个不渲染**：目标条是「有提案才出现」的行动条，不是常驻装饰。传统对话里
+  没有提案，就不该在官方输入框上方占位置（用户验收反馈 2026-11-10）；提案接口报错时同样
+  不渲染——拿不到数据就不表态。（早先这里会退化成一句引导「在下方输入框写下目标」，
+  已按该反馈移除，`goal.guide` 文案键一并删除。）
 - **提案状态行**：`提案 v2 待确认 · 查看`；点「查看」切到工作台并定位到提案卡。
 - **「带入」只服务一件事**：让 Lead 改提案——用官方草稿 API（`inputActions.captureInsertion()`
   + `insertText(text, span)`，契约逐字核实自 desktop runtime）插入一个**引用前缀**
@@ -397,6 +423,86 @@ Trigger 收件箱：事件先进来评估，再决定开工单还是忽略；与
 > 定时」三类 Source **本期不接**：没有可靠的会话消息钩子；`fs` 监听要做自身状态目录排除与泄漏防护，
 > 留后续波次。所以筛选项里那三个词表值当前不会有事件，不是 bug。投递前的校验失败
 > （无 owner / 对方未运行）不登记——消息都没造出来，没有「已发生的事实」可记。
+
+### MCP 约束层（画布连线即约束）
+
+「这个会话能用哪些 MCP 工具」在画布上就是**一条线**：把 MCP 服务节点拖到某个 Agent 上，
+这个会话就被限制成只能用连上的那些服务；删掉线，约束解除。
+
+| 路由 | 方法 | 作用 |
+|---|---|---|
+| `/projects/:id/mcp-links` | `GET` / `HEAD` | 读约束表 + 可用 MCP 清单（只读、无 token） |
+| `/projects/:id/mcp-links` | `POST` | 建约束：`{server, sessionId}`，带前置校验 |
+| `/projects/:id/mcp-links?all=1` | `DELETE` | 一键全清；不带 `all=1` 按 `{server, sessionId}` 删一条 |
+
+**存的是什么**：`mcpLinks[] = {server, sessionId, createdAt}`，`sessionId` 是**裸会话 id**
+（与 `project.members[].sessionId` 同格式，不带 `session-` 前缀；`agent.id` 的前缀由
+`sessionIdOfAgent()` 剥掉）。单独建表而不是塞进 `project.links`——那条路由要求两端都是
+项目成员，MCP server 不是成员，硬塞只会拿到 `40701`。
+
+**三个保险（缺一个都不敢上）**：
+
+1. **默认全放行**。表里没有的会话，guard 直接 `return undefined`。插件关掉 = 层消失，
+   不会把人锁在外面。
+2. **一键全清**。`DELETE ?all=1` 一步退回「没有约束」，任何误连都能秒撤。
+3. **前置校验**。服务没连上 DSH 时连线请求直接被拒（`40709` / `40710`），
+   不会留下一条指向空气的线。
+
+**为什么走 `guard()` 而不是 `ToolRestriction.allow`**：`allow` 的语义是「只保留这些，
+其余全部移除」，按它实现会把 `bash` 和文件读写一起删掉。所以 guard 里先判是不是
+MCP 工具（`mcp__` 前缀），不是就立刻放行；是且不在允许表里才返回拒绝理由。
+
+```js
+function mcpConstraintGuard(exec) {
+  var index = mcpConstraintIndex();           // 带 2s TTL 缓存
+  if (index === null) return undefined;       // 一条约束都没有 → 快路径
+  var sessionId = sessionIdOfAgent(exec && exec.agent);
+  if (sessionId === "") return undefined;    // 身份取不到 → 放行，不猜
+  var entry = index[sessionId];
+  if (!entry) return undefined;               // 这个会话没被约束 → 放行
+  var server = mcpServerOfTool(exec && exec.name);
+  if (server === "") return undefined;       // 不是 MCP 工具 → 放行
+  if (entry.servers[server]) return undefined;
+  return "该会话未连接 MCP 服务「" + server + "」";
+}
+```
+
+**粒度是服务级，不是工具级。** 一条约束记的是「这个会话能连 `pencil` 这个服务」，
+不是「能调 `pencil` 的哪几个工具」。理由：画布上画的和用户认的都是服务名，工具级粒度
+要么在 UI 上多一层「选哪些工具」，要么就得替用户猜——两者都不如服务级诚实。
+要收窄到工具级是下一步的事，需要 MCP 侧先能给「这个服务有哪些工具」的稳定清单。
+
+**新建的约束最多 2 秒后生效。** 索引带 `MCP_CONSTRAINT_TTL = 2000` 缓存，
+给「外部手改 `projects.json`」留一个陈旧上界。所以连上线立刻去试，可能还会被拒一次——
+这不是 bug，等一个 TTL 就好。
+
+**`mcpServerOfTool()` 同时承担「是不是 MCP 工具」的判别**：返回空串就不是，
+不用再单独写一个 `isMcpTool`。`mcp__` 后面没有第二个 `__` 时也返回空串（拒识，不放行误判）。
+
+**guard 契约**（逐字核实自 `@deepseek-ai/dsh-tools`）：`ToolGuard = (execution) => string | undefined`，
+`execution.agent` 由 agent loop 填入；返回 `undefined` = 放行，返回字符串 = 拒绝且该字符串就是
+拒绝理由；`guardReason` 取**第一个非 undefined**（先拒者赢）。
+
+**`agent.id === agent.session.id === "session-<uuid>"`**（探针实测 300/300）：拿会话身份只需
+去前缀，不需要额外映射表。探针数据已固化成 `test/fixtures/tool-probe-concurrency.json`，
+由 `test/mcp-concurrency-contract.test.mjs` 5 例钉住这条契约。
+
+**画布侧的呈现**（设计稿 U-13）：MCP 是第三类节点（⌘ 标签 + 工具数 + 已连接/未连接 chip）；
+Agent 卡上直接列出被允许的服务，不用去连线上数；Composer 不显示徽标——它没有被约束，
+显示反而误导。
+
+**并发已实证**（探针 300 条 / 4 个 agent）：6/6 对时间窗重叠、同一个 5 秒窗口挤进 4 个 agent、
+相邻 299 条里 199 次换 agent。附带实证：被放行的 12 种工具里 `pwsh` 出现 90 次——这正是不能用
+`ToolRestriction.allow` 的原因。
+
+**探针已删除**：它的使命（证明 `exec.agent` 能给可靠的会话级身份）已完成，100 行调试代码 + 一个
+`/probe` HTTP 端点不该留在要发布的插件里。复读落盘数据时它还涨到过 375KB（有 `PROBE_CAP = 300`
+上限，但每 3 秒重写一次）。
+
+**已验证**：完整用户旅程有测试钉着——连上 `pencil` 后 `slack` 被拦、`pwsh` 照常放行、
+另一个会话和主会话都不受影响；点「一键全清」后全部恢复；只删一条线时其余约束还在。
+
+**还没做的**：画布上不能真的断开某个 MCP 服务（那要在 DSH 设置里做），占位按钮只负责引导。
 
 ## 素材重建
 
@@ -643,7 +749,7 @@ node _scratch/preview.mjs
 
 | 文件 | 作用 |
 |---|---|
-| `lib/index.js` | 宿主半边：注册「团队协作」策略段落（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、四个 `whales_visit_*` 串门工具（可运行时开关）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
+| `lib/index.js` | 宿主半边：注册「团队协作」策略段落、MCP 约束层（`mcpLinks` 表 + 全局 `tools.guard()` 只拦 `mcp__` 工具）（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、四个 `whales_visit_*` 串门工具（可运行时开关）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
 | `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层、设置页、状态表情状态机、素材 loader（**不含图片数据**，运行期从宿主路由按皮肤拉）；**M6 项目工作台**（十屏 + 节点画布 + 设计 token，纯逻辑可离线测） |
 | `cordis.patch.yml` | 默认层（**唯一真相**）：插入 `agent-whales` + 团队服务/工具/面板三行，并 `disabled` 掉旧 subagent 四行 |
 | `presets/dsh-agent-whales-worker/` | 执行器 preset（随包分发，`apply` 时装到用户 preset 根；执行 Session 专用，不供手动选择） |
@@ -664,8 +770,13 @@ node _scratch/preview.mjs
 | `test/harness.mjs` | 离线测试用的最小 React 垫片与插件加载器 |
 | `test/client.test.mjs` | 基线用例（契约 / 计数 / 素材 / 家族树 / 气泡 / 拖拽 / 设置 / 渲染） |
 | `test/workbench.test.mjs` | M6 工作台纯逻辑用例（路由 / token 估算 / 简报预算 / 任务行派生 / report 人机边界 / 待办聚合 / 画布图 / hook 顺序 / 十屏渲染冒烟 / 只读缓存）+ W1.5 事件台用例（筛选项词表 / 健康码五词与色调 / 展开态 / 页面渲染 / 项目上下文回退） |
-| `test/workbench-draft.test.mjs` | W2 提案带入与目标条（`wbDraftPrefix` 引用前缀无指令措责 / `wbInsertDraft` 三态降级链 / 目标条无提案时不放带入 / input.dock 不影子） |
+| `test/workbench-draft.test.mjs` | W2 提案带入与目标条（`wbDraftPrefix` 引用前缀无指令措责 / `wbInsertDraft` 三态降级链 / 目标条无提案时整个不渲染 / input.dock 不影子） |
 | `test/workbench-replay.test.mjs` | W2 event_replay UI（六步固定 / 缺步补 pending / 未知 key 追加尾部 / 明细倒序 / 色调 / 弹层渲染与坏数据兜底） |
+| `test/workbench-canvas.test.mjs` | R1 画布 store（`canvas.json` 读写 round-trip、CAS 冲突、位置收敛、坏 JSON 降级）+ `observe-tool-calls.test.mjs` 观测层（`sessionToolCalls` 从真实会话事件抽 `tool/call`、maxScan 上限、尾部优先） |
+| `test/mcp-constraint.test.mjs` | MCP 约束层宿主侧（连线表读写、前置校验 40709/40710、`?all=1` 全清、guard 放行/拒绝、剥前缀、只读降级） |
+| `test/mcp-canvas.test.mjs` | MCP 约束层浏览器侧纯函数（三类节点派生 / 连线对 / 按会话允许集合 / MCP id 判别 / i18n） |
+| `test/mcp-concurrency-contract.test.mjs` | 探针实测契约的回归（`sessionIdOfAgent` 剥前缀含主会话 / `agent.session.id` 兜底 / 并发确实发生过 / 放行工具里没有 MCP 工具 / 主会话不被当成 worker），fixture 是真机数据 |
+| `test/mcp-canvas-render.test.mjs` | MCP 约束层渲染 + 交互（已连接 chip、Agent 徽标、无服务占位、挂掉不崩、拖线发 POST、判重不发请求、全清发 DELETE） |
 | `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具、活动接口、项目任务表、简报、提案、report、handoffs、inbox、sessions、events 台账与三动作、preset 安装器） |
 | `test/client-robustness.test.mjs` | 对抗性用例（畸形输入、缺服务、边界值） |
 | `test/meta.test.mjs` | 发布门禁用例（清单契约、`files`/`exports`、patch BOM 与结构、`npm test` 覆盖面） |
@@ -737,7 +848,10 @@ node _scratch/preview.mjs
   `useState` 的 setter 是空函数，只能验证几何换算（`wbCanvasEdges` / `wbCanvasNodes`）与渲染，
   真实指针事件的手感与「拖出边界」未跑。
 - 未验证 · M6 真机对位：工作台跑在 `main` 槽里，与官方会话页的切换、侧栏 `panellist` 入口的
-  实际图标位姿、以及「记住上次选择」未在真实 DSH 里验证（当前是插件内部路由，不写浏览器 history）。
+  实际图标位姿未跑。
+- 已验证 · 「记住上次选择」：`wbRoute` 每次 set 都写 `dsh-agent-whales.last-view`，加载时 recall
+  （脏 kind / 坏 JSON / 缺 projectId 一律回落 list）；**首次无记录仍是列表**，不默认进画布。
+  仍未验证的是「真实 DSH 里的侧栏入口位姿」。
 - 已验证 · W1.5 事件台（浏览器侧）：`test/workbench.test.mjs` 覆盖筛选项词表、健康码五个固定词
   （ready/assessing/suppressed/idle/noise，与设计字面的「已忽略」偏差见上）、展开态
   （pending 给三条规则 + 三个动作；已处置只读且露工单号）、页面渲染（事件行 + 健康面板五列 +
@@ -767,3 +881,23 @@ node _scratch/preview.mjs
   六步时间线在真实任务上的完整度（fixture 只覆盖了常见形状）。
 - 未验证 · W2 升级判定（D2 递进）：目标条点击率 ≥15% / 观察窗口 2 周或 200 会话——需要真实使用数据，
   达标后才考虑影子 `conversation.composer`；本期不影子。
+- 已验证 · MCP 约束层（宿主侧）：`test/mcp-constraint.test.mjs` 16 例——连线表读写 round-trip、
+  前置校验（MCP 未连接 40709 / 非项目成员 40710）、`?all=1` 全清、guard 对非 MCP 工具一律放行、
+  guard 对表外会话放行、guard 拦下表内会话的未连接 MCP、`sessionIdOfAgent()` 剥前缀、
+  存储损坏时降级为只读不拖垮启动。
+- 已验证 · MCP 约束层（浏览器侧）：`test/mcp-canvas.test.mjs` 10 例 + `test/mcp-canvas-render.test.mjs`
+  8 例。纯函数覆盖三类节点派生、连线对派生、按会话的允许集合、MCP 节点 id 判别；
+  渲染覆盖已连接/未连接 chip、Agent 徽标（Composer 不显示）、无服务占位、mcp-links 挂掉不崩；
+  **交互覆盖「连线即约束」主链路**——拖 Agent 锚点到 MCP 节点真的发出 `POST /mcp-links`
+  且带 `{server, sessionId}`、重复约束被本地判重挡下不发请求、一键全清发 `DELETE ?all=1`、
+  没有约束时不摆全清按钮。交互测试靠 `test/harness.mjs` 新增的 `createMount()`（带真实
+  `useState` 的迷你 React，setter 真的改 hook cell 并触发重渲染）。
+- 已验证 · 并发身份不串（探针实证）：落盘探针复读到 **300 条 / 4 个 agent**（1 主会话 + 3 worker），
+  **6/6 对时间窗全重叠**、**同一个 5 秒窗口挤进 4 个 agent**、**相邻 299 条里 199 次换 agent**；
+  **300/300 条 `agentId === sessionId`**。说明 `exec.agent` 给的是可靠的会话级身份，
+  并发跑多个任务时约束表按 `sessionId` 查不会互相干扰。附带实证：被放行的 12 种工具里
+  `pwsh` 出现 90 次——按 `ToolRestriction.allow` 实现会把 shell 和文件读写一起删掉。
+- 未验证 · MCP 约束层真机：**DSH 未运行**（`127.0.0.1:56981` 无监听，`curl` 返 `HTTP 000`），
+  实时 HTTP 未跑；探针里 **`mcp__` 调用 0 条**（当时没连 MCP），所以「guard 真的拦下未连接的
+  MCP」只有单测覆盖，要连一个 MCP 再跑一轮才算闭环。
+- 未验证 · 画布上断开 MCP 服务：占位按钮只负责引导，真正断开仍要在 DSH 设置里做。

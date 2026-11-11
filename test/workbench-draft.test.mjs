@@ -108,7 +108,7 @@ test("W2 文案：带入 / 目标条新键中英键集合一致且都非空", ()
   const keys = [
     "draft.prefix", "draft.insert", "draft.insert.title", "draft.insert.locked", "draft.insert.clipboard",
     "draft.state.inserted", "draft.state.copied", "draft.state.failed", "draft.boundary",
-    "goal.guide", "goal.label", "goal.from.session", "goal.status", "goal.status.locked", "goal.view", "goal.view.none"
+    "goal.label", "goal.from.session", "goal.status", "goal.status.locked", "goal.view", "goal.view.none"
   ];
   for (const key of keys) {
     assert.ok(typeof WB_TEXT.zh[key] === "string" && WB_TEXT.zh[key] !== "", "zh." + key + " 必须存在且非空");
@@ -319,17 +319,32 @@ function goalProps(api, extra) {
   }, extra || {});
 }
 
-test("目标条：还没有提案时只有引导语，没有带入按钮", () => {
+test("目标条：没有提案时整个条不渲染——不占传统对话的输入区", () => {
   const { plugin } = loadPlugin();
   installDocumentStub();
   const api = plugin.__test;
   const tree = render(h(api.WhaleGoalBar, goalProps(api)));
-  const texts = [];
-  collectText(tree, texts);
-  const joined = texts.join("|");
-  assert.ok(joined.includes("在下方输入框写下目标"), "必须显示引导语");
-  assert.equal(buttonsOf(tree).length, 0, "没有提案就不放「带入」，也不放查看（§49.1 硬约束）");
-  assert.ok(findByClass(tree, "daw-goalbar").length >= 1, "目标条要挂 daw-goalbar");
+  assert.equal(tree, null, "没有提案就必须返回 null：一个空引导条不该占着每个官方对话的输入框上方");
+  assert.equal(findByClass(tree, "daw-goalbar").length, 0, "不该留下空壳");
+  assert.equal(buttonsOf(tree).length, 0, "更不该放按钮");
+});
+
+test("目标条：提案接口报错时也不渲染（拿不到数据就不表态）", async () => {
+  const { plugin } = loadPlugin();
+  installDocumentStub();
+  const api = plugin.__test;
+  api.wbCache.reset();
+  // 让 /proposals 这条请求失败（5xx），模拟宿主侧报错
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+  try {
+    await api.wbCache.read("/proposals?leadSessionId=s-main").catch(() => {});
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+  }
+  const tree = render(h(api.WhaleGoalBar, goalProps(api)));
+  assert.equal(tree, null, "读不到提案时不渲染，避免传统对话里出现一条无意义的状态条");
 });
 
 test("目标条：有提案时有目标行、提案状态行与查看/带入", async () => {
@@ -443,15 +458,13 @@ test("目标条：点查看切到工作台并定位提案卡；推断不出就�
   }
 });
 
-test("目标条：读不到提案（请求失败）只退化成引导语，不炸官方输入区", () => {
+test("目标条：读不到提案（请求失败）就整个不渲染，不炸官方输入区", () => {
   const { plugin } = loadPlugin();
   installDocumentStub();
   const api = plugin.__test;
   // 不灌数据：快照是初始态（error 也没有），等价于「还没有提案」
   const tree = render(h(api.WhaleGoalBar, goalProps(api)));
-  const texts = [];
-  collectText(tree, texts);
-  assert.ok(texts.join("|").includes("在下方输入框写下目标"));
+  assert.equal(tree, null, "读不到提案就不渲染，而不是退化成一条占地方的引导语");
   assert.equal(buttonsOf(tree).length, 0);
 });
 

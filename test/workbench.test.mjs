@@ -9,6 +9,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { createReactShim, findByClass, installDocumentStub, loadPlugin, render, walk } from "./harness.mjs";
 function testApi() {
@@ -594,4 +595,473 @@ test("hook 顺序：在列表页与工作台之间来回切，外壳自身的 ho
   }
   assert.equal(new Set(counts).size, 1, "每条路由的 hook 次数必须一样，实际 " + counts.join(","));
   assert.ok(counts[0] >= 4, "外壳至少该有 settings/route/projects/tasks 四个 hook，实际 " + counts[0]);
+});
+
+// ── 12. 画布位置：宿主权威 + 本地兜底（R1 返工）────────────────────────────
+//
+// 节点是派生的，位置是唯一「人摆过」的状态。R1 之前它只活在 localStorage：刷新不丢，
+// 但换设备/换浏览器就丢，且 agent 完全看不到。现在宿主 canvas.json 是权威。
+
+test("画布位置：hydrate 灌宿主快照，get 先读缓存", () => {
+  const { wbNodePositions } = testApi();
+  wbNodePositions.hydrate("proj-1", { rev: 3, nodes: { "session-a": { x: 340, y: 168, w: 300, h: 224 } } });
+  assert.deepEqual(wbNodePositions.get("proj-1", "session-a"), { x: 340, y: 168, w: 300, h: 224 });
+  assert.equal(wbNodePositions.get("proj-1", "nope"), undefined, "没摆过的节点不瞎编位置");
+});
+
+test("画布位置：set 立刻改本地（拖拽不等网络），坏宿主不炸", () => {
+  const { wbNodePositions } = testApi();
+  wbNodePositions.hydrate("proj-2", { rev: 0, nodes: {} });
+  assert.doesNotThrow(() => wbNodePositions.set("proj-2", "session-b", 700, 40), "没有 fetch 也不能抛");
+  assert.deepEqual(wbNodePositions.get("proj-2", "session-b"), { x: 700, y: 40, w: 0, h: 0 }, "UI 必须立刻跟着动");
+  assert.doesNotThrow(() => wbNodePositions.flushNow("proj-2"), "立即 flush 也不能抛");
+});
+
+test("画布位置：hydrate 容忍坏数据（宿主 5xx / 空响应）", () => {
+  const { wbNodePositions } = testApi();
+  assert.doesNotThrow(() => wbNodePositions.hydrate("proj-3", undefined));
+  assert.doesNotThrow(() => wbNodePositions.hydrate("proj-3", { rev: "x", nodes: null }));
+  assert.equal(wbNodePositions.get("proj-3", "session-a"), undefined);
+});
+
+test("画布路由：记住上次选择，无记录时仍是列表（D10 两条都要）", () => {
+  const seeded = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": JSON.stringify({ kind: "workbench", projectId: "proj-9", tab: "exec" }) } });
+  const route = seeded.plugin.__test.wbRoute;
+  assert.deepEqual(route.get(), { kind: "workbench", projectId: "proj-9", tab: "exec" }, "必须 recall 上次的项目与 tab");
+  const dirty = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": JSON.stringify({ kind: "nope", projectId: 5 }) } });
+  assert.deepEqual(dirty.plugin.__test.wbRoute.get(), { kind: "list" }, "非法 kind 回落 list");
+  const broken = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": "{不是 JSON" } });
+  assert.deepEqual(broken.plugin.__test.wbRoute.get(), { kind: "list" }, "坏 JSON 回落 list");
+});
+
+test("画布路由：每次 set 都落盘，首次无记录不进画布", () => {
+  const loaded = loadPlugin();
+  const api = loaded.plugin.__test;
+  assert.deepEqual(api.wbRoute.get(), { kind: "list" }, "首次必须是列表——不默认进画布（D10）");
+  api.wbRoute.project("proj-1", "tasks");
+  assert.deepEqual(api.wbRoute.get(), { kind: "workbench", projectId: "proj-1", tab: "tasks" });
+  const raw = loaded.storage.get("dsh-agent-whales.last-view");
+  assert.ok(raw !== undefined, "切换视图必须写盘，否则刷新回不去");
+  assert.equal(JSON.parse(raw).tab, "tasks");
+});
+
+// ── 13. 画布件契约：小地图 + 网格开关（R2 返工）────────────────────────────
+// 这两条原审核结论是「没做」。小地图是只读镜像（不接交互），网格原来常开且没有开关。
+
+test("画布件：小地图与网格开关的样式/文案契约齐了", () => {
+  const { WB_TEXT } = testApi();
+  assert.ok(WB_TEXT.zh["canvas.minimap"].length > 0 && WB_TEXT.en["canvas.minimap"].length > 0, "小地图要有中英文案");
+  assert.ok(WB_TEXT.zh["canvas.grid"].length > 0 && WB_TEXT.en["canvas.grid"].length > 0, "网格开关要有中英文案");
+  const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  for (const fragment of ["daw-wb-minimap", "daw-wb-mininode", "daw-wb-miniview", "data-grid", "canvas.minimap", "canvas.grid"]) {
+    assert.ok(source.indexOf(fragment) >= 0, "client.js 里必须有 " + fragment);
+  }
+  assert.ok(source.indexOf("daw-wb-canvas[data-grid=off] .daw-wb-canvas-grid{display:none}") >= 0, "网格关掉要有对应的 CSS");
+});
+
+test("画布件：空项目下画布页仍能渲染（小地图不能把它带崩）", () => {
+  installDocumentStub();
+  const { WbCanvasPage } = testApi();
+  assert.doesNotThrow(() => render(h(WbCanvasPage, { t: (key) => key, projectId: "p1" })), "没有项目数据也要能渲染");
+});
+
+// ── 14. 空 URL 不发请求（避免明知失败的请求每 5s 打一次）────────────────────
+
+test("只读缓存：URL 为 null 时不建 entry、不发请求、返回常量空快照", async () => {
+  const { plugin } = loadPlugin();
+  installDocumentStub();
+  const api = plugin.__test;
+  api.wbCache.reset();
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    calls.push(String(url));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data: {} }) });
+  };
+  try {
+    const off = api.wbCache.subscribe(null, () => {});
+    assert.equal(typeof off, "function", "退订函数照样要返回");
+    assert.deepEqual(api.wbCache.getSnapshot(null), { data: undefined, error: null, loading: false, at: 0 });
+    assert.equal(await api.wbCache.read(null), undefined, "read(null) 直接给 undefined，不发请求");
+    off();
+    assert.equal(calls.length, 0, "一次请求都不该发（/proposals 缺 leadSessionId 必然 40000）");
+    // 空快照必须是同一个对象：useSyncExternalStore 靠 Object.is 判等，换对象会无限重渲染
+    assert.equal(api.wbCache.getSnapshot(null), api.wbCache.getSnapshot(null), "空快照必须缓存，不能每次新建");
+    assert.equal(api.wbCache.getSnapshot(""), api.wbCache.getSnapshot(null), "空串与 null 同等对待");
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+  }
+});
+
+test("目标条 / 提案卡：拿不到 lead 会话时不再请求 /proposals", async () => {
+  const { plugin } = loadPlugin();
+  installDocumentStub();
+  const api = plugin.__test;
+  api.wbCache.reset();
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    calls.push(String(url));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 40000, msg: "leadSessionId is required" }) });
+  };
+  try {
+    // 没有 leadId：整条不渲染，也不该留下一次请求
+    render(h(api.WhaleGoalBar, { t: (key) => key, sessionId: undefined, useSessions: () => undefined }));
+    render(h(api.WbProposalCard, { t: (key) => key }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(calls.length, 0, "拿不到 lead 会话时一次都不该请求，实际发了：" + JSON.stringify(calls));
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+  }
+});
+
+test("只读缓存：useSyncExternalStore 契约——发布才通知、快照在发布间必须稳定", async () => {
+  const { plugin } = loadPlugin();
+  installDocumentStub();
+  const api = plugin.__test;
+  api.wbCache.reset();
+
+  // 1) 稳定：两次 getSnapshot 必须是同一个对象。
+  //    否则 React 18 会判定「快照没缓存」并报 The result of getSnapshot should be cached，
+  //    表现就是组件反复重渲染、界面卡在某个状态——这类 bug 在假垫片下看不出来。
+  const first = api.wbCache.getSnapshot("/projects");
+  assert.equal(api.wbCache.getSnapshot("/projects"), first, "发布之间快照必须同一个对象");
+
+  // 2) 订阅后发布要通知到 listener
+  let notified = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data: { projects: [] } }) });
+  try {
+    const off = api.wbCache.subscribe("/projects", () => { notified += 1; });
+    assert.ok(notified >= 1, "订阅后首次 load 会同步发布一次（loading:false→true）");
+    const loadingSnapshot = api.wbCache.getSnapshot("/projects");
+    assert.equal(loadingSnapshot.loading, true, "请求在飞时应是 loading");
+    await api.wbCache.read("/projects");
+    assert.ok(notified > 1, "请求 resolve 后必须再发布一次，否则界面永远停在 loading");
+    const done = api.wbCache.getSnapshot("/projects");
+    assert.equal(done.loading, false, "resolve 后 loading 必须清零");
+    assert.deepEqual(done.data, { projects: [] }, "数据要进快照");
+    // 3) 发布之间再次稳定
+    assert.equal(api.wbCache.getSnapshot("/projects"), done, "发布之间仍然要稳定");
+    off();
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+  }
+});
+
+// ── 15. 画布节点检视（A/C 方向：开发协作定位）────────────────────────────────
+//
+// 画布原来只能「摆位置、连关联线、删节点」，是个拓扑图不是开发工具。开发者盯着一个
+// 节点时真正想问的是「这个 Agent 在干什么、卡在哪儿、活儿派到哪了」——这些信息此前
+// 散在任务板和待办两个页签里。wbNodeInspector 把纯推导部分抽出来可离线测。
+
+const INSPECTOR_TASKS = [
+  { taskId: "t-1", subject: "修登录态", ownerSessionId: "s-agent", status: "in_progress", worktree: "/repo/a", revision: 3 },
+  { taskId: "t-2", subject: "补测试", ownerSessionId: "s-agent", status: "pending", execRoot: "/repo/b", blockedBy: ["t-9"], revision: 1 },
+  { taskId: "t-3", subject: "写文档", ownerSessionId: "s-agent", status: "completed", revision: 2, report: { status: "done", summary: "ok", rev: 1 } },
+  { taskId: "t-4", subject: "别人的活", ownerSessionId: "s-other", status: "in_progress", worktree: "/repo/a" },
+  { taskId: "t-9", subject: "前置活儿", ownerSessionId: "s-other", status: "in_progress" },
+  { taskId: "t-dead", subject: "已作废", ownerSessionId: "s-other", status: "deleted" },
+  { taskId: "t-5", subject: "依赖已作废", ownerSessionId: "s-agent", status: "pending", blockedBy: ["t-dead"] }
+];
+const INSPECTOR_SESSIONS = [
+  { sessionId: "s-agent", title: "小张", running: true },
+  { sessionId: "s-other", title: "小李", running: false }
+];
+
+test("节点检视：Agent 节点给出在线状态、它的任务与已完工计数", () => {
+  const { wbNodeInspector } = testApi();
+  const data = wbNodeInspector(
+    { kind: "agent", sessionId: "s-agent", title: "小张" },
+    { tasks: INSPECTOR_TASKS, sessions: INSPECTOR_SESSIONS }
+  );
+  assert.equal(data.kind, "agent");
+  assert.equal(data.statusLabel, "在线", "running=true 必须说在线");
+  assert.equal(data.statusTone, "ok");
+  assert.equal(data.tasks.length, 3, "已完成/已删的不算「在干什么」");
+  assert.equal(data.doneCount, 1, "已完工只计数不进列表");
+  assert.equal(data.tasks[0].subject, "修登录态");
+  assert.equal(data.tasks[0].where, "/repo/a", "落点取 worktree");
+  assert.equal(data.tasks[1].where, "/repo/b", "没有 worktree 时取 execRoot");
+  assert.equal(data.tasks[1].blockedReason, "wait", "等一个未完成的依赖");
+  assert.equal(data.tasks[2].blockedReason, "deleted", "依赖已作废是另一种阻塞，不能混为一谈");
+  assert.equal(data.tasks[2].subject, "依赖已作废");
+  assert.equal(data.tasks[0].blockedReason, null, "没阻塞就不能编一个");
+});
+
+test("节点检视：Agent 离线且没任务时明说，不留空", () => {
+  const { wbNodeInspector } = testApi();
+  const data = wbNodeInspector(
+    { kind: "agent", sessionId: "s-ghost", title: "幽灵" },
+    { tasks: INSPECTOR_TASKS, sessions: INSPECTOR_SESSIONS }
+  );
+  assert.equal(data.statusLabel, "空闲");
+  assert.equal(data.statusTone, "neutral");
+  assert.equal(data.tasks.length, 0);
+  assert.deepEqual(data.notes, ["没有进行中的任务"], "空态必须有一句说明");
+});
+
+test("节点检视：落点节点列出指向它的任务与牵扯到的人（去重）", () => {
+  const { wbNodeInspector } = testApi();
+  const data = wbNodeInspector(
+    { kind: "folder", title: "/repo/a", tasks: [INSPECTOR_TASKS[0], INSPECTOR_TASKS[3]] },
+    { tasks: INSPECTOR_TASKS, sessions: INSPECTOR_SESSIONS }
+  );
+  assert.equal(data.kind, "folder");
+  assert.equal(data.statusLabel, "2 个任务指向这里");
+  assert.equal(data.tasks.length, 2);
+  assert.deepEqual(data.people, ["小张", "小李"], "人要去重，且用会话标题不用 id");
+});
+
+test("节点检视：Composer 节点报提案待确认与简报在不在", () => {
+  const { wbNodeInspector } = testApi();
+  const withPending = wbNodeInspector(
+    { kind: "composer", title: "Composer" },
+    { tasks: [], sessions: [], inbox: { groups: [{ key: "proposals", label: "提案待确认", items: [{ proposalId: "p1" }, { proposalId: "p2" }] }] } }
+  );
+  assert.equal(withPending.statusLabel, "2 条提案待确认");
+  assert.equal(withPending.statusTone, "warn");
+  assert.equal(withPending.notes[0], "项目简报还没写");
+
+  const withBrief = wbNodeInspector(
+    { kind: "composer", title: "Composer" },
+    { project: { brief: { version: 4 } }, inbox: { groups: [] } }
+  );
+  assert.equal(withBrief.statusLabel, "没有待确认提案");
+  assert.equal(withBrief.notes[0], "项目简报已写（v4）");
+});
+
+test("节点检视：坏数据不炸，且不猜事件归属", () => {
+  const { wbNodeInspector } = testApi();
+  assert.equal(wbNodeInspector(null, {}), null, "没有节点就没有检视");
+  assert.equal(wbNodeInspector(undefined, undefined), null);
+  assert.equal(wbNodeInspector({ kind: "unknown" }, {}), null, "不认识的 kind 不硬渲染");
+  assert.doesNotThrow(() => wbNodeInspector({ kind: "agent" }, undefined), "ctx 整个缺也要能活");
+  // 事件台账不带 sessionId（宿主 eventView 已核实），所以检视器不算事件——这里锁住「不猜」
+  const data = wbNodeInspector({ kind: "agent", sessionId: "s-agent" }, { tasks: [], sessions: [] });
+  assert.ok(!("events" in data), "没有 session 关联字段就不该凭空给事件列表");
+});
+
+test("节点检视组件：坏数据渲染降级而不是把画布带崩", () => {
+  installDocumentStub();
+  const { WbNodeInspector } = testApi();
+  const t = (key) => key;
+  assert.doesNotThrow(() => render(h(WbNodeInspector, { t, data: null })), "data 为 null 返回 null");
+  assert.doesNotThrow(() => render(h(WbNodeInspector, { t })), "data 整个缺也要活");
+  // 曾经这里会抛 data.tasks.map is not a function——一个节点检视把整块画布带崩
+  const tree = render(h(WbNodeInspector, { t, data: { kind: "weird", tasks: "not-array", people: null, notes: null, doneCount: "x", title: 5, statusLabel: {} } }));
+  assert.ok(findByClass(tree, "daw-wb-inspect").length === 1, "坏数据也要渲染出一个面板，不是白屏");
+  assert.equal(findByClass(tree, "daw-wb-inspect-task").length, 0, "tasks 不是数组就当没有任务");
+});
+
+test("节点检视组件：正常数据渲染出状态、任务、落点与阻塞原因", () => {
+  installDocumentStub();
+  const { WbNodeInspector, wbNodeInspector } = testApi();
+  const data = wbNodeInspector(
+    { kind: "agent", sessionId: "s-1", title: "小张" },
+    { tasks: [{ taskId: "t-1", subject: "修登录态", ownerSessionId: "s-1", status: "in_progress", worktree: "/repo/a" }, { taskId: "t-2", subject: "补测试", ownerSessionId: "s-1", status: "pending", blockedBy: ["t-9"] }], sessions: [{ sessionId: "s-1", title: "小张", running: true }] }
+  );
+  const tree = render(h(WbNodeInspector, { t: (key) => key, data, onClose: () => {} }));
+  assert.equal(findByClass(tree, "daw-wb-inspect-task").length, 2, "两个在跑任务都要列出来");
+  assert.equal(findByClass(tree, "daw-wb-inspect-task-blocked").length, 1, "t-9 不在表里 → 「依赖没了」要显示");
+  assert.ok(findByClass(tree, "daw-wb-inspect-task-where").length >= 1, "落点要有一席之地");
+});
+
+// ── 16. 观测层：Agent 节点的「最近调用」────────────────────────────────────
+//
+// 数据来自宿主 /sessions 的 recentTools（= 会话事件里的 tool/call，已在真实落盘
+// 会话里核实形状）。这一层只展示，不做允许/禁止判断——那是约束层的事。
+
+test("观测层：Agent 检视列出最近调用的工具，去重且保持最近优先", () => {
+  const { wbNodeInspector } = testApi();
+  const data = wbNodeInspector(
+    { kind: "agent", sessionId: "s-1", title: "小张" },
+    {
+      tasks: [],
+      sessions: [{
+        sessionId: "s-1", title: "小张", running: true,
+        recentTools: [
+          { name: "pwsh", at: 300, seq: 5 },
+          { name: "read", at: 100, seq: 2 },
+          { name: "pwsh", at: 200, seq: 4 },
+          { name: "pwsh", at: 400, seq: 6 }
+        ]
+      }]
+    }
+  );
+  assert.deepEqual(data.toolNames, ["pwsh", "read"], "同一工具调多次只出现一次，且保持最近优先的顺序");
+  assert.equal(data.toolCallCount, 4, "总调用次数要如实报，不能因为去重就少算");
+});
+
+test("观测层：会话没调过工具时不编造，字段给空", () => {
+  const { wbNodeInspector } = testApi();
+  const none = wbNodeInspector({ kind: "agent", sessionId: "s-1" }, { sessions: [{ sessionId: "s-1", title: "小张" }] });
+  assert.deepEqual(none.toolNames, [], "没调过就是空数组");
+  assert.equal(none.toolCallCount, 0);
+  const dirty = wbNodeInspector({ kind: "agent", sessionId: "s-1" }, { sessions: [{ sessionId: "s-1", recentTools: "not-array" }] });
+  assert.deepEqual(dirty.toolNames, [], "recentTools 形状不对时当没有，不抛");
+  const nameless = wbNodeInspector({ kind: "agent", sessionId: "s-1" }, { sessions: [{ sessionId: "s-1", recentTools: [{ at: 1 }, { name: "" }, null] }] });
+  assert.deepEqual(nameless.toolNames, [], "缺 name / 空 name 的条目不能进去");
+});
+
+test("观测层：只有 Agent 节点有工具调用，落点与 Composer 不给", () => {
+  const { wbNodeInspector } = testApi();
+  const sessions = [{ sessionId: "s-1", title: "小张", recentTools: [{ name: "pwsh", at: 1, seq: 1 }] }];
+  const folder = wbNodeInspector({ kind: "folder", title: "/r", tasks: [] }, { sessions });
+  const composer = wbNodeInspector({ kind: "composer", title: "C" }, { sessions });
+  assert.ok(!("toolNames" in folder), "落点节点是「哪些任务指向这」，不是工具调用");
+  assert.ok(!("toolNames" in composer), "Composer 管提案与派发，给它列工具调用是答非所问");
+});
+
+test("观测层：检视组件渲染「最近调用」代码块", () => {
+  installDocumentStub();
+  const { WbNodeInspector, wbNodeInspector } = testApi();
+  const data = wbNodeInspector(
+    { kind: "agent", sessionId: "s-1", title: "小张" },
+    { tasks: [], sessions: [{ sessionId: "s-1", title: "小张", running: true, recentTools: [{ name: "pwsh", at: 1, seq: 1 }, { name: "read", at: 2, seq: 2 }] }] }
+  );
+  const tree = render(h(WbNodeInspector, { t: (key) => key, data }));
+  assert.equal(findByClass(tree, "daw-wb-inspect-tool").length, 2, "两个工具名都要渲染成 code 块");
+  assert.ok(findByClass(tree, "daw-wb-inspect-tools").length === 1, "要有一个「最近调用」行");
+});
+
+// ── 17. A1：画布上增派 Agent ─────────────────────────────────────────────
+//
+// 此前的bug：空态文案写着「或先加一个 Agent」，但 onAddAgent 出现 0 次——
+// 用户照做时无路可走。宿主路由 POST /projects/:id/members 一直都有，
+// 差的只是画布侧的一个落点。这里测的是「哪些会话可加入」的过滤口径。
+
+test("A1：可加入会话排除主对话与现有成员，坏数据当不能加", () => {
+  const { wbAddableSessions } = testApi();
+  const sessions = [
+    { sessionId: "s-main", title: "主线" },
+    { sessionId: "s-a", title: "小张" },
+    { sessionId: "s-b", title: "小李" },
+    { sessionId: "s-c", title: "新人" }
+  ];
+  const project = { mainSessionId: "s-main", members: [{ sessionId: "s-a", role: "member" }] };
+  const rows = wbAddableSessions(sessions, project);
+  assert.deepEqual(rows.map((r) => r.sessionId), ["s-b", "s-c"], "主对话和现有成员都不能再出现");
+  // 坏数据不能抛，也不能把脏会话放进去
+  assert.deepEqual(wbAddableSessions(undefined, project), []);
+  assert.deepEqual(wbAddableSessions("x", project), []);
+  assert.deepEqual(wbAddableSessions([{ title: "没 id" }, null, { sessionId: "" }], project), [], "缺 id 的会话不能加入");
+  // 没有 members 字段时只用主对话排除
+  assert.deepEqual(wbAddableSessions(sessions, { mainSessionId: "s-main" }).map((r) => r.sessionId), ["s-a", "s-b", "s-c"]);
+  // 没有 mainSessionId 时不误伤任何人
+  assert.equal(wbAddableSessions(sessions, {}).length, 4);
+});
+
+test("A1：画布上真的有「添加 Agent」落点，不再指引不存在的操作", () => {
+  // 画布页在无项目数据时整体返回 null，渲染断言不到内部；这里查源码契约。
+  const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  assert.ok(source.indexOf(String.fromCharCode(34)+"data-kind"+String.fromCharCode(34)+": "+String.fromCharCode(34)+"add"+String.fromCharCode(34)) >= 0, "画布上必须有添加 Agent 占位节点");
+  assert.ok(source.indexOf("setAddState(true)") >= 0, "占位节点必须可点");
+  assert.ok(source.indexOf('method: "POST", body: { sessionId: sessionId }') >= 0, "必须走宿主既有的 POST /projects/:id/members");
+  for (const key of ["canvas.addAgent", "canvas.addAgent.hint", "canvas.addAgent.none", "canvas.addAgent.modal", "canvas.addAgent.ok"]) {
+    assert.ok(source.indexOf(key) >= 0, key + " 文案键必须存在");
+  }
+  const { WB_TEXT } = testApi();
+  assert.ok(WB_TEXT.zh["canvas.addAgent"].length > 0 && WB_TEXT.en["canvas.addAgent"].length > 0, "中英都要有");
+});
+// ── 18. A2：连线检视 ─────────────────────────────────────────────────────
+//
+// 此前的bug：点连线只有「删除」一个动作，而节点有检视卡——严重不对称。
+// 用户想看看这两个 Agent 之间发生过什么，只能去「发送记录」页签。
+// 而连线承载的正是这层关系，数据也一直在（/handoffs 账本）。
+// fixture 是真实 handoffs.json（94 条），不是我编的。
+
+import { readFileSync as readFixture } from "node:fs";
+const REAL_HANDOFFS = JSON.parse(readFixture(new URL("./fixtures/real-handoffs.json", import.meta.url), "utf8"));
+
+test("A2：连线检视按会话对过滤，无向且倒序", () => {
+  const { wbLinkHandoffs } = testApi();
+  // 真实数据里 s9 ↔ visit 有 32 条，是最常往来的一对
+  const rows = wbLinkHandoffs(REAL_HANDOFFS, "s9", "visit");
+  assert.equal(rows.length, 32, "s9↔visit 有 32 条，一条都不能少");
+  assert.equal(rows.length, wbLinkHandoffs(REAL_HANDOFFS, "visit", "s9").length, "无向：换顺序结果必须一样");
+  for (let i = 1; i < rows.length; i += 1) {
+    assert.ok(rows[i].at <= rows[i - 1].at, "必须倒序（新的在前）");
+  }
+  // 每一行都确实是这两者之间的
+  for (const row of rows) {
+    assert.ok((row.from === "s9" && row.to === "visit") || (row.from === "visit" && row.to === "s9"), "不能漏进第三方的记录");
+  }
+});
+
+test("A2：没往来就是空，不编造；坏数据不抛", () => {
+  const { wbLinkHandoffs } = testApi();
+  assert.deepEqual(wbLinkHandoffs(REAL_HANDOFFS, "s9", "不存在的会话"), []);
+  assert.deepEqual(wbLinkHandoffs(undefined, "a", "b"), []);
+  assert.deepEqual(wbLinkHandoffs("not-array", "a", "b"), []);
+  assert.deepEqual(wbLinkHandoffs(REAL_HANDOFFS, "", "b"), [], "空 id 不过滤");
+  assert.deepEqual(wbLinkHandoffs(REAL_HANDOFFS, "a", ""), []);
+  assert.deepEqual(wbLinkHandoffs([null, { from: "a" }, { to: "b" }], "a", "b"), [], "缺字段的条目不能算往来");
+  // from 可能是 "user"（人直接说），不能假设两端都是会话 id
+  assert.equal(wbLinkHandoffs(REAL_HANDOFFS, "user", "s-live").length, 12, "user↔s-live 有 12 条");
+});
+
+// ── 19. B1/B2：画布上派发与改目标 ─────────────────────────────────────────
+//
+// B1：此前建/派/指派全在任务板，画布上一点都做不了。
+// B2：Composer 检视卡此前只说「项目简报已写 v4」，读内容/改内容都要去简报页签。
+
+test("B1：检视数据带 revision 与 owner，派发按钮只给有主且未完工的任务", () => {
+  const { wbNodeInspector } = testApi();
+  const tasks = [
+    { taskId: "t-1", subject: "在跑", ownerSessionId: "s-1", status: "in_progress", revision: 7 },
+    { taskId: "t-2", subject: "待办", ownerSessionId: "s-1", status: "pending", revision: 3 },
+    { taskId: "t-3", subject: "没人领", ownerSessionId: null, status: "pending", revision: 1 },
+    { taskId: "t-4", subject: "已完工", ownerSessionId: "s-1", status: "completed", revision: 9 }
+  ];
+  const data = wbNodeInspector({ kind: "agent", sessionId: "s-1" }, { tasks, sessions: [] });
+  const byId = {};
+  data.tasks.forEach((r) => { byId[r.taskId] = r; });
+  assert.equal(byId["t-1"].revision, 7, "派发要带 CAS，revision 必须下发");
+  assert.equal(byId["t-1"].ownerSessionId, "s-1");
+  // 组件侧的 dispatchable 判据靠这两个字段，缺一个就点不了
+  assert.ok(byId["t-1"].status === "in_progress" && typeof byId["t-1"].ownerSessionId === "string", "在跑 + 有主 → 可派发");
+  // t-3 没主，根本不该出现在这个 Agent 的列表里（见下一条：无主任务只在落点卡出现）
+  assert.equal(byId["t-3"], undefined, "没主的任务不进 Agent 卡");
+  assert.equal(data.tasks.length, 2, "Agent 卡只列它自己负责的任务，没主人的不进");
+});
+
+test("B1：落点节点的任务可能没主，这种不给派发按钮", () => {
+  const { wbNodeInspector } = testApi();
+  const tasks = [
+    { taskId: "t-1", subject: "有主", ownerSessionId: "s-1", status: "pending", revision: 2 },
+    { taskId: "t-2", subject: "没主", ownerSessionId: null, status: "pending", revision: 1 }
+  ];
+  const data = wbNodeInspector({ kind: "folder", title: "/repo", tasks: tasks }, { tasks, sessions: [] });
+  const byId = {};
+  data.tasks.forEach((r) => { byId[r.taskId] = r; });
+  assert.equal(data.tasks.length, 2, "落点卡按落点列任务，不管有没有主");
+  assert.equal(byId["t-1"].ownerSessionId, "s-1");
+  assert.equal(byId["t-2"].ownerSessionId, null, "没主的也要显示（不然用户不知道有这个任务），但不该有派发按钮");
+});
+
+test("B2：Composer 检视带目标文本与版本号（供卡内编辑与 CAS）", () => {
+  const { wbNodeInspector } = testApi();
+  const withGoal = wbNodeInspector({ kind: "composer", title: "C" }, { project: { brief: { version: 4, goal: "把节点图画布做出来" } } });
+  assert.equal(withGoal.goal, "把节点图画布做出来", "目标文本要下发，否则卡内编辑器是空的");
+  assert.equal(withGoal.briefVersion, 4, "PUT 要带 expectedVersion，版本号必须下发");
+  const noBrief = wbNodeInspector({ kind: "composer", title: "C" }, {});
+  assert.equal(noBrief.goal, "", "没写目标就是空串，不编造");
+  assert.equal(noBrief.briefVersion, 1);
+});
+
+test("B1/B2：源码契约——派发走宿主命令路由，目标走 brief CAS", () => {
+  const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  assert.ok(source.indexOf('wbTaskCommand(projectId, taskId, "dispatch", { expectedRevision: revision })') >= 0, "派发必须走宿主既有命令路由并带 CAS");
+  assert.ok(source.indexOf('body: { expectedVersion: briefVersionOf(data), goal: goalDraft }') >= 0, "改目标必须带 expectedVersion");
+  for (const key of ["inspect.dispatch", "inspect.goal.edit", "inspect.goal.placeholder"]) {
+    assert.ok(source.indexOf(key) >= 0, key + " 文案键必须存在");
+  }
+  const { WB_TEXT } = testApi();
+  for (const key of ["inspect.dispatch", "inspect.goal.edit", "inspect.goal.placeholder"]) {
+    assert.ok(WB_TEXT.zh[key].length > 0 && WB_TEXT.en[key].length > 0, key + " 中英都要有");
+  }
 });

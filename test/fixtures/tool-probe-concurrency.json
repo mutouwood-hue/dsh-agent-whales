@@ -1,0 +1,85 @@
+{
+ "note": "DSH 真机探针落盘数据（2026-11-11 03:49–04:05）。用于把 exec.agent 的实测契约钉成回归：agentId === sessionId、主会话 id 带 session- 前缀、4 个 agent 并发交错。",
+ "totalCalls": 300,
+ "agents": [
+  {
+   "agentId": "1f67fce9-f7f7-477c-b3bf-1dbfdf7631e6",
+   "calls": 104,
+   "tools": [
+    "edit",
+    "grep",
+    "list_agents",
+    "pwsh",
+    "read",
+    "send_message",
+    "team_task_list",
+    "team_task_update",
+    "todo_write",
+    "wait_agent",
+    "write"
+   ],
+   "isMain": false
+  },
+  {
+   "agentId": "d288a1b6-0050-4378-bd04-0dcaeaedf85c",
+   "calls": 84,
+   "tools": [
+    "edit",
+    "grep",
+    "pwsh",
+    "read",
+    "send_message",
+    "write"
+   ],
+   "isMain": false
+  },
+  {
+   "agentId": "bb9996a8-8dcf-483b-a39c-36356ae71596",
+   "calls": 75,
+   "tools": [
+    "edit",
+    "list_agents",
+    "pwsh",
+    "read",
+    "send_message",
+    "team_task_get",
+    "team_task_update",
+    "todo_write",
+    "write"
+   ],
+   "isMain": false
+  },
+  {
+   "agentId": "session-cde52fa8-44e1-4a30-98ea-ff0cec21b2c8",
+   "calls": 37,
+   "tools": [
+    "edit",
+    "list_agents",
+    "pwsh",
+    "read",
+    "send_message",
+    "team_task_list",
+    "wait_agent",
+    "write"
+   ],
+   "isMain": true
+  }
+ ],
+ "adjacentAgentSwitches": 196,
+ "maxAgentsInFiveSeconds": 4,
+ "mcpToolCalls": 0,
+ "nonMcpToolKinds": [
+  "edit",
+  "grep",
+  "list_agents",
+  "pwsh",
+  "read",
+  "send_message",
+  "team_task_get",
+  "team_task_list",
+  "team_task_update",
+  "todo_write",
+  "wait_agent",
+  "write"
+ ]
+}
