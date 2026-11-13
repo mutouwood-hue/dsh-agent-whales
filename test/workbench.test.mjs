@@ -11,7 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { createReactShim, findByClass, installDocumentStub, loadPlugin, render, walk } from "./harness.mjs";
+import { createMount, createReactShim, findByClass, installDocumentStub, loadPlugin, render, walk } from "./harness.mjs";
 function testApi() {
   return loadPlugin().plugin.__test;
 }
@@ -283,6 +283,74 @@ test("工作台外壳：默认渲染项目列表侧栏与顶栏，主题跟着�
   assert.ok(findByClass(tree, "daw-wb-stats").length >= 1, "默认应该是项目列表页（统计条）");
   const root = findByClass(tree, "daw-wb")[0];
   assert.equal(root.props["data-wb-theme"], "light", "默认浅色");
+});
+
+/** 在渲染树里找「文案等于 text 且带 onClick」的按钮，返回它的 props。 */
+function buttonByText(tree, text) {
+  let found = null;
+  walk(tree, (node) => {
+    if (found !== null) return;
+    const children = node.props ? node.props.children : undefined;
+    const flat = Array.isArray(children) ? children : [children];
+    if (typeof node.props.onClick === "function" && flat.indexOf(text) >= 0) found = node.props;
+  });
+  return found;
+}
+
+test("旅程：外壳进新建项目弹窗，填了名称后确认按钮必须可用", () => {
+  // 回归守门：WhaleWorkbench 曾没把 useSessions 传给 WbProjectList（props 不会自动
+  // 流向孙组件）→ 列表页 useWbSessions 取不到钩子 → sessionRows 恒为 [] →
+  // 「新建项目」的主会话下拉为空、确认按钮永久禁用。用户侧症状：画布建不了项目，
+  // 于是一个项目都没有，也就打不开任何项目。测试只渲染页面本身一直查不到，
+  // 因为测试直接把 useSessions 递给页面，绕过了外壳这一层。
+  // 垫片必须先建再加载：loadPlugin 不传 react 就用默认垫片，那个的 useState
+  // setter 是 no-op，「点一下 → 状态变 → 树变」整条链都模拟不出来。
+  const { mount, shim } = createMount();
+  const { plugin } = loadPlugin({ react: shim });
+  installDocumentStub();
+  const api = plugin.__test;
+  api.wbRoute.set({ kind: "list" });
+  const state = {
+    ids: ["sess-main"],
+    byId: { "sess-main": { sessionId: "sess-main", title: "主对话", running: false, origin: "live" } },
+    phase: "ready",
+    projectionsBySession: {}
+  };
+  const view = mount(api.WhaleWorkbench, {
+    useSessions: (selector) => selector(state),
+    leadIdOf: (id) => id,
+    focusSession: () => true
+  });
+
+  const openCreate = buttonByText(view.tree, "＋ 新建项目");
+  assert.ok(openCreate, "列表页要有「＋ 新建项目」按钮");
+  openCreate.onClick();
+  view.rerender();
+
+  const nameInput = findByClass(view.tree, "daw-wb-input")[0];
+  assert.ok(nameInput, "弹窗要有名称输入框");
+  nameInput.props.onChange({ target: { value: "鲸鱼协作" } });
+  view.rerender();
+
+  const confirm = buttonByText(view.tree, "确认");
+  assert.ok(confirm, "弹窗要有确认按钮");
+  assert.notEqual(confirm.disabled, true,
+    "名称填了就还得能确认；仍 disabled 说明主会话下拉是空的——useSessions 没传到列表页");
+
+  // join 弹窗是被同一个括号 bug 吃掉的另一个：两个 modal 三元都掉进了
+  // h(WbState) 的实参里，空态时一起被丢。只测 create 会漏掉它。
+  const cancel = buttonByText(view.tree, "取消");
+  assert.ok(cancel, "create 弹窗要有取消按钮");
+  cancel.onClick();
+  view.rerender();
+  assert.equal(findByClass(view.tree, "daw-wb-modal").length, 0, "取消要能关掉弹窗");
+
+  const openJoin = buttonByText(view.tree, "加入已有对话");
+  assert.ok(openJoin, "空态要有「加入已有对话」入口");
+  openJoin.onClick();
+  view.rerender();
+  assert.equal(findByClass(view.tree, "daw-wb-modal").length, 1, "join 弹窗也要能打开");
+  assert.ok(findByClass(view.tree, "daw-wb-select").length >= 1, "join 弹窗要有会话下拉");
 });
 
 test("工作台主题：设置切到 dark 时根节点换主题标记", () => {
