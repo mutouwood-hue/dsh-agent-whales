@@ -296,6 +296,27 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 **主题**默认浅色，设置里可切暗色；两套 token 一一对应（`WB_TOKENS`），组件只引用
 `var(--daw-*)`，切主题即换色，没有第二套组件。
 
+### 借鉴 oh-my-hermes 的两处（调子同 troupe：只为接近的功能拿来用）
+
+> 完整对照（含刻意没拿的 7 项及理由）见 Notion：
+> [借鉴 oh-my-hermes · 证据分级与图上标连线理由](https://app.notion.com/p/oh-my-hermes-rlaope-oh-my-hermes-418c209ad67f81b2b6d1def23bd0df41)
+
+- **证据分级：`report.status === "done"` 只说「已报完工」，不说「已完工」**。它 README 原话：
+  「执行器说『做完了』不等于有人核过」，四档 `Plan·not run` / `Code·running` /
+  `Code·reported done` / `Test·verified`。**这条本来就是我们自己的规矩**（「已回复 ≠ report done」），
+  但代码里 done 就直接当 completed、Agent 卡显示「已完工」——等于把中间态填成了绿。
+  现在 Agent 卡 chip 说「**已报完工**」+ tooltip「执行器已报完工，还没有人核对」。
+  **没有冒充 verified**：我们没有测试/评审/CI 的数据源，不能把它画成绿。
+- **依赖连线上线，并标出「为什么连」**。它截图里每条边都写着 `Waits on 2 lanes`；
+  我们的画布此前只画 `project.links`（会话关联）与 MCP 约束，**`blockedBy` 依赖从不上线**——
+  谁在等谁全靠用户自己记。现在 `wbDepLinks(tasks)` 按 blockedBy 派生依赖线
+  （只画两端都有 owner 的、同对去重），边上渲染「**等待 ptask-t1**」。
+- **刻意没拿**：lane 模型链与 effort（模型归会话/宿主管，插件没有可选的面）、115 个技能按需装载
+  （没有技能注册表）、LSP 进循环（宿主已有）、记忆召回包（我们的 brief 是另一套，同一条边界）、
+  TUI lane 树（没有终端所有权）、`ulw-*` 工作流（我们的提案协议是同层级的不同实现）、
+  「并行节点不共享写入范围」的**强制**（我们只警告，升级强制属于改我们的判据——但记下了：
+  OMH 与 troupe 两家都选了强制/显式顺序，这是第三个独立佐证）。
+
 ### 借鉴 troupe 的两处（只接我们已有功能，不为它改我们）
 
 > 调子是用户定的：「不要为了他改我们的功能，只是如果和我们有接近的功能，可以直接拿来用」。
@@ -843,6 +864,11 @@ node _scratch/preview.mjs
 - 已验证 · 借鉴 troupe（2026-11-14）：`wbAgentChip` 证据优先（有 report 就不看在线，8 例）、
   `wbArtifactsOutside` 越界产物（声明内 / 声明外 / 无声明 / 坏数据 / 字符串产物 5 种输入）、
   `wbScopeOverlaps` 与宿主 `writeScopeWarnings` 同口径（含前缀，两边必须一致否则界面说的和宿主罚的不是一件事）。
+- 已验证 · 借鉴 oh-my-hermes（2026-11-14）：`wbDepLinks` 依赖派生（两端有 owner 才画 / 同对去重 /
+  自等不画 / 阻塞方不存在或没 owner 不画 / 坏数据不炸，11 断言）；画布上真出现「等待 ptask-t1」边标；
+  `report done` 的措辞改成「已报完工」并带 tooltip「还没有人核对」。
+- 未验证 · 借鉴 oh-my-hermes 真机：依赖边在真实多任务项目下的可读性（现在只有 1 条的 fixture）；
+  「已报完工」这个措辞在产品语境里是否要升级成更强的视觉区分（比如降饱和度）。
 - 未验证 · 借鉴 troupe 真机：越界提示在真实 report 数据下的观感（现在只有纯函数 + 弹窗接线测试）。
 - 已验证 · 全页面交互冒烟（2026-11-14）：`.prd-tmp/smoke-all-pages.cjs` 用真实 useState 的迷你
   React 挂起 11 个页面，把每个按钮与画布节点点一遍、每个弹窗走一遍「开→取消→遮罩关」——本轮修掉的

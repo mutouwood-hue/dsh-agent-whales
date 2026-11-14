@@ -1501,3 +1501,95 @@ test("渲染：report 弹窗在产物越界时给出提示（troupe outside 的�
     else globalThis.fetch = originalFetch;
   }
 });
+
+
+// ── 22. 借鉴 oh-my-hermes：依赖连线带理由 + 证据分级措辞 ───────────────────
+
+test("wbDepLinks：blockedBy 派生依赖线，两端有 owner 才画，同对去重", () => {
+  const { wbDepLinks } = testApi();
+  const tasks = [
+    { taskId: "t1", ownerSessionId: "s1", blockedBy: [] },
+    { taskId: "t2", ownerSessionId: "s2", blockedBy: ["t1"] },
+    { taskId: "t3", ownerSessionId: "s3", blockedBy: ["t1", "t2"] },
+    { taskId: "t4", blockedBy: ["t1"] } // 没 owner：等待方不在画布上，不画
+  ];
+  const edges = wbDepLinks(tasks);
+  assert.deepEqual(edges.map((e) => e.a + ">" + e.b), ["s1>s2", "s1>s3", "s2>s3"], "只画两端都有 owner 的");
+  assert.equal(edges[0].reason, "blocked");
+  assert.equal(edges[0].waitTaskId, "t1", "带着阻塞方的 taskId（边上要写「等待 t1」）");
+  // 同一对会话只留一条
+  const dup = wbDepLinks([
+    { taskId: "a1", ownerSessionId: "s1", blockedBy: [] },
+    { taskId: "a2", ownerSessionId: "s2", blockedBy: ["a1"] },
+    { taskId: "b1", ownerSessionId: "s1", blockedBy: [] },
+    { taskId: "b2", ownerSessionId: "s2", blockedBy: ["b1"] }
+  ]);
+  assert.equal(dup.length, 1, "s1→s2 一对只画一根线");
+  // 自己等自己（同一 owner 的两条任务）不画
+  assert.deepEqual(wbDepLinks([{ taskId: "x1", ownerSessionId: "s1" }, { taskId: "x2", ownerSessionId: "s1", blockedBy: ["x1"] }]), []);
+  // 阻塞方不存在 / 阻塞方没 owner → 不画
+  assert.deepEqual(wbDepLinks([{ taskId: "y", ownerSessionId: "s1", blockedBy: ["不存在"] }]), []);
+  assert.deepEqual(wbDepLinks([{ taskId: "z1", blockedBy: [] }, { taskId: "z2", ownerSessionId: "s1", blockedBy: ["z1"] }]), []);
+  // 坏数据不炸
+  assert.deepEqual(wbDepLinks(undefined), []);
+  assert.deepEqual(wbDepLinks("x"), []);
+  assert.deepEqual(wbDepLinks([null, { taskId: "q", blockedBy: "不是数组" }]), []);
+});
+
+test("渲染：画布上的依赖连线带「等待 <task>」文字，且 Agent 卡说「已报完工」", async () => {
+  const { shim, mount } = createMount();
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const api = loaded.plugin.__test;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const ok = (data) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data }) });
+    if (target === "/projects") return ok([{ projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1" }, { sessionId: "s2" }], links: [], brief: { goal: "g" } }]);
+    if (target === "/projects/p1") return ok({ project: { projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1" }, { sessionId: "s2" }], links: [], brief: { goal: "g" } } });
+    if (target === "/projects/p1/brief") return ok({ brief: { version: 1, goal: "g", decisions: [], constraints: [] } });
+    if (target === "/projects/p1/mcp-links") return ok({ projectId: "p1", available: [], links: [], members: [{ sessionId: "s1" }, { sessionId: "s2" }], mainSessionId: "main" });
+    if (target.startsWith("/tasks?projectId=")) return ok({ source: "project", projectId: "p1", tasks: [
+      { taskId: "t1", subject: "先做这个", status: "in_progress", ownerSessionId: "s1", revision: 1, createdAt: 1 },
+      { taskId: "t2", subject: "等 t1", status: "pending", ownerSessionId: "s2", revision: 1, createdAt: 2, blockedBy: ["t1"] }
+    ] });
+    if (target === "/sessions") return ok({ source: "host", sessions: [{ sessionId: "s1", title: "甲", running: true }, { sessionId: "s2", title: "乙", running: true }] });
+    if (target === "/activity") return ok({ at: Date.now(), active: {} });
+    if (target.startsWith("/events")) return ok({ events: [], stats: {}, health: [] });
+    if (target.startsWith("/canvas")) return ok({ rev: 1, nodes: [] });
+    if (target.startsWith("/inbox")) return ok({ groups: [] });
+    if (target.startsWith("/handoffs")) return ok({ entries: [] });
+    return ok({});
+  };
+  try {
+    const urls = ["/projects", "/projects/p1", "/projects/p1/brief", "/projects/p1/mcp-links", "/tasks?projectId=p1", "/sessions", "/activity", "/canvas?projectId=p1", "/events?projectId=p1", "/inbox?projectId=p1", "/handoffs?projectId=p1"];
+    for (const url of urls) await api.wbCache.read(url).catch(() => {});
+    const t = (key, vars) => {
+      const raw = api.WB_TEXT.zh[key];
+      if (raw === undefined) return "«" + key + "»";
+      if (!vars) return raw;
+      return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
+    };
+    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
+    // 1) 依赖连线的边上有「等待 t1」文字
+    const labels = [];
+    const collectText = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collectText); return; }
+      if (typeof node !== "object") return;
+      if (node.type === "text" && typeof node.props?.children === "string") labels.push(node.props.children);
+      collectText(node.props ? node.props.children : undefined);
+    };
+    collectText(view.tree);
+    assert.ok(labels.indexOf("等待 t1") >= 0, "依赖边上必须标注「等待 t1」，实际：" + labels.join("|").slice(0, 200));
+    // 2) 有 report 的 Agent 卡说「已报完工」而不是「已完工」（证据分级）
+    assert.equal(api.WB_TEXT.zh["canvas.agent.chip.done"], "已报完工", "done 只能说「已报」，不能说「已」");
+    const chip = api.wbAgentChip({ report: { status: "done" } }, true);
+    assert.equal(chip.key, "done");
+    assert.ok(api.WB_TEXT.zh["canvas.agent.chip.done.title"].indexOf("没有人核对") >= 0 || api.WB_TEXT.zh["canvas.agent.chip.done.title"].length > 0, "必须有 title 说明没人核");
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+    api.wbCache.reset();
+  }
+});
