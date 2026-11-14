@@ -3101,3 +3101,72 @@ describe("W2 观测：路由接线与边界", () => {
     }
   });
 });
+
+describe("Q3 已核对（verify 命令）与 Q4 规划时提示", () => {
+  test("只有主对话能核、只能核已报完工；核完写独立字段且不改状态", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "待核" });
+    const taskId = created.body.data.task.taskId;
+
+    // 没报完工就核 → 拒（40904 taskClosed：谈不上核）
+    const tooEarly = await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "verify", expectedRevision: 1, requestId: "v-early" });
+    assert.equal(tooEarly.body.code, 40904, JSON.stringify(tooEarly.body));
+
+    // 报完工
+    await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, { projectId, expectedRevision: 1, report: { status: "done", summary: "干完了" }, bySessionId: "session-worker" });
+    // 核（宿主把 caller 置成主对话）
+    const verified = await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "verify", expectedRevision: 2, requestId: "v-1", note: "我看过" });
+    assert.equal(verified.body.code, 200, JSON.stringify(verified.body));
+    assert.equal(verified.body.data.verified.by, "session-a", "核对人 = 项目主对话（harness 里主对话是 session-a）");
+    assert.equal(verified.body.data.verified.note, "我看过");
+    assert.ok(verified.body.data.verified.at > 0, "核对时间");
+    // 状态没被并入：report 仍是 done（verify 只写独立字段，不动任务状态与 report）
+    assert.equal(verified.body.data.task.report.status, "done");
+    assert.equal(verified.body.data.task.report.summary, "干完了");
+
+    // 过期 revision → 40902（与其它写命令同一套 CAS）
+    const stale = await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "verify", expectedRevision: 1, requestId: "v-stale" });
+    assert.equal(stale.body.code, 40902, JSON.stringify(stale.body));
+
+    // action 白名单里有 verify
+    const bad = await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "核一下", expectedRevision: 3, requestId: "v-bad" });
+    assert.equal(bad.body.code, 40000, JSON.stringify(bad.body));
+  });
+
+  test("Q4：写入范围重叠且无先后顺序 → 提示补依赖；有顺序就不提示", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const tk = await h.token();
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-worker" });
+    const make = async (subject, writeScopes, blockedBy) => {
+      const created = await h.call("POST", "/agent-whales/api/tasks", Object.assign({ projectId, subject, writeScopes }, blockedBy === undefined ? {} : { blockedBy }));
+      return created.body.data.task.taskId;
+    };
+    const assign = async (taskId, owner, requestId) => {
+      const out = await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner, expectedRevision: 1, requestId });
+      assert.equal(out.body.code, 200, JSON.stringify(out.body));
+      return out.body.data.scopeOrderHint;
+    };
+
+    const docs = await make("A 改文档", ["docs/"]);
+    const lib = await make("B 改 lib", ["lib/"]);
+
+    // 1) 第一个有主的：没有对手，不该提示
+    assert.equal(await assign(docs, "session-b", "q4-1"), undefined, "没有可重叠的对手，不该提示");
+    // 2) 范围不重叠：不该提示
+    assert.equal(await assign(lib, "session-worker", "q4-2"), undefined, "docs/ 与 lib/ 不重叠，不该提示");
+
+    // 3) 重叠且有先后顺序（lib 阻塞 libIndex）→ 不是并发冲突，不提示
+    const libIndex = await make("C 改 lib/index.js", ["lib/index.js"], [lib]);
+    assert.equal(await assign(libIndex, "session-a", "q4-3"), undefined, "有依赖顺序的不是并发冲突（同步页 Q4 结论）");
+
+    // 4) 重叠且无先后顺序 → 必须提示，并且指认对手
+    const libOther = await make("D 改 lib/other.js", ["lib/other.js"]);
+    const hint = await assign(libOther, "session-b", "q4-4");
+    assert.ok(typeof hint === "string" && hint.indexOf("建议补一条依赖") >= 0, "重叠且无顺序必须提示");
+    assert.ok(hint.indexOf(lib) >= 0, "提示要指认对手任务：" + hint);
+  });
+});

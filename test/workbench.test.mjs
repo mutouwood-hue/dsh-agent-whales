@@ -1593,3 +1593,54 @@ test("渲染：画布上的依赖连线带「等待 <task>」文字，且 Agent 
     api.wbCache.reset();
   }
 });
+
+
+// ── 23. Q1 Composer 轻量版 / Q3 已核对 / Q4 规划时提示 ───────────────────
+
+test("wbComposerPrefix：只引用身份，不带指令；两者都没有就空前缀", () => {
+  const { wbComposerPrefix } = testApi();
+  // 有提案 → 引提案身份
+  assert.equal(wbComposerPrefix({ sourceProposal: { proposalId: "prop-1", version: 3 } }), "[提案 v3 prop-1] ");
+  // 版本脏数据取整到 1
+  assert.equal(wbComposerPrefix({ sourceProposal: { proposalId: "p", version: -5 } }), "[提案 v1 p] ");
+  assert.equal(wbComposerPrefix({ sourceProposal: { proposalId: "p", version: 2.7 } }), "[提案 v2 p] ");
+  // 没有提案 → 引任务身份
+  assert.equal(wbComposerPrefix({ taskId: "ptask-1", subject: "体检宿主" }), "[任务 ptask-1 · 体检宿主] ");
+  assert.equal(wbComposerPrefix({ taskId: "ptask-1", subject: "" }), "[任务 ptask-1] ", "没有主题就不补分隔符");
+  // 两者都没有 → 空前缀（用户自己起头，不替他写）
+  assert.equal(wbComposerPrefix({}), "");
+  assert.equal(wbComposerPrefix(null), "");
+  assert.equal(wbComposerPrefix({ sourceProposal: {} }), "");
+  // 不注入 t 时退回内置句式
+  assert.ok(wbComposerPrefix({ taskId: "t" }).indexOf("[任务 t") === 0);
+});
+
+test("wbVerifiedView / wbReviewSignal：人工核对与评审次信号分开", () => {
+  const { wbVerifiedView, wbReviewSignal } = testApi();
+  // 没有核对字段 → false，不编
+  assert.deepEqual(wbVerifiedView({}), { verified: false, by: "", at: 0, note: "" });
+  assert.deepEqual(wbVerifiedView(null), { verified: false, by: "", at: 0, note: "" });
+  assert.deepEqual(wbVerifiedView({ verified: "脏" }), { verified: false, by: "", at: 0, note: "" });
+  // 有 → 原样带出
+  assert.deepEqual(wbVerifiedView({ verified: { by: "session-main", at: 123, note: "看过" } }), { verified: true, by: "session-main", at: 123, note: "看过" });
+
+  // 评审次信号：以本任务为前置、且 report=done 的评审任务
+  const tasks = [
+    { taskId: "t1", report: { status: "done", at: 100 } },
+    { taskId: "t2", blockedBy: ["t1"], report: { status: "done", at: 200 } },
+    { taskId: "t3", blockedBy: ["t1"], report: { status: "draft", at: 300 } },
+    { taskId: "t4", blockedBy: ["t9"] }
+  ];
+  assert.deepEqual(wbReviewSignal(tasks[0], tasks), { reviewed: true, byTaskId: "t2", at: 200 }, "只认已报完工的评审任务，取最新");
+  assert.deepEqual(wbReviewSignal(tasks[3], tasks), { reviewed: false, byTaskId: "", at: 0 }, "没人评审 → false");
+  assert.deepEqual(wbReviewSignal(undefined, tasks), { reviewed: false, byTaskId: "", at: 0 });
+  assert.deepEqual(wbReviewSignal(tasks[0], undefined), { reviewed: false, byTaskId: "", at: 0 });
+});
+
+test("wbAgentChip：已核对压过已报完工（证据优先）", () => {
+  const { wbAgentChip } = testApi();
+  assert.deepEqual(wbAgentChip({ verified: { by: "session-main", at: 1 } }, false), { tone: "ok", key: "verified" }, "不在线也是已核对");
+  assert.deepEqual(wbAgentChip({ report: { status: "done" }, verified: null }, true), { tone: "ok", key: "done" });
+  // 没有核对才看 report
+  assert.deepEqual(wbAgentChip({ report: { status: "handed_back" } }, true), { tone: "warn", key: "handed_back" });
+});

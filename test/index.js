@@ -22,3 +22,6 @@ import "./mcp-constraint.test.mjs";
 import "./mcp-canvas.test.mjs";
 import "./mcp-canvas-render.test.mjs";
 import "./mcp-concurrency-contract.test.mjs";
+// 真 HTTP E2E：宿主半边跑在真 http server 上，真 socket 走完整闭环 + 重启持久化。
+// 既有用例都是「假 fetch + 直接调 handler」，从没验过真实 TCP 上的一次请求/响应。
+import "./e2e-http.test.mjs";
