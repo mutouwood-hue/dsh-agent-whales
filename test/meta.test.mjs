@@ -505,7 +505,7 @@ test("lib/client.js：不得再内联 base64 素材，且体积必须 ≤ 上限
   // 这条用例是回归守门：谁再把 base64 内联回来，或者体积重新膨胀，这里立刻红。
   // 注意只查 base64 与体积：client.js 允许保留空的 ART 占位（T-client 用它做
   // 「旧内联构建已就绪」的兼容判断），那不是内联素材。
-  // 上限从 200KB 提到 420KB（M6 项目工作台，2026-11-09）：装饰层 + 十屏工作台
+  // 上限 200KB → 420KB（M6 工作台，2026-11-09）→ 560KB（M6 画布波次，2026-11-14）：装饰层 + 十屏工作台
   // 共用这一个单文件 bundle（dsh.client 只认一个 ./client 导出），素材依旧出包、
   // 不出现在本文件里；上限的意义是「别无声膨胀」，不是「永远 127KB」。
   const source = readFileSync(clientPath, "utf8");
@@ -516,7 +516,7 @@ test("lib/client.js：不得再内联 base64 素材，且体积必须 ≤ 上限
   );
   assert.equal(/data:image\/(?:webp|png|jpeg);base64,/i.test(source), false, "client.js 不得内联任何位图 data URI");
   const bytes = Buffer.byteLength(source, "utf8");
-  assert.ok(bytes <= 420 * 1024, "client.js 必须 ≤420KB（只含代码与矢量兜底），实际 " + (bytes / 1024).toFixed(1) + "KB");
+  assert.ok(bytes <= 560 * 1024, "client.js 必须 ≤560KB（只含代码与矢量兜底），实际 " + (bytes / 1024).toFixed(1) + "KB");
 });
 
 // ── 4. 测试入口卫生 ─────────────────────────────────────────────────────

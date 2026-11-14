@@ -52,7 +52,7 @@
     "test": "node --test test/",
     "build:manifest": "node tools/build-manifest.mjs",
     "pack:dist": "npm pack --pack-destination dist",
-    "prepack": "node tools/build-manifest.mjs && node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('assets/manifest.json','utf8'));if(!m.keys||Object.keys(m.keys).length===0){console.error('prepack: assets/manifest.json 为空，素材没打进去');process.exit(1)}const c=fs.readFileSync('lib/client.js','utf8');if(/data:image\\/(?:webp|png|jpeg);base64,/i.test(c)){console.error('prepack: lib/client.js 仍在内联 base64 素材（D1 起素材走宿主路由 /agent-whales/api/art/*，client.js 只能含代码与矢量兜底）');process.exit(1)}const kb=Buffer.byteLength(c,'utf8')/1024;if(kb>420){console.error('prepack: lib/client.js 体积 '+kb.toFixed(1)+'KB 超过上限 420KB（M6 工作台起从 200KB 上调；素材仍走宿主路由，不得内联）');process.exit(1)}\""
+    "prepack": "node tools/build-manifest.mjs && node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('assets/manifest.json','utf8'));if(!m.keys||Object.keys(m.keys).length===0){console.error('prepack: assets/manifest.json 为空，素材没打进去');process.exit(1)}const c=fs.readFileSync('lib/client.js','utf8');if(/data:image\\/(?:webp|png|jpeg);base64,/i.test(c)){console.error('prepack: lib/client.js 仍在内联 base64 素材（D1 起素材走宿主路由 /agent-whales/api/art/*，client.js 只能含代码与矢量兜底）');process.exit(1)}const kb=Buffer.byteLength(c,'utf8')/1024;if(kb>560){console.error('prepack: lib/client.js 体积 '+kb.toFixed(1)+'KB 超过上限 560KB（M6 画布波次再从 420KB 上调；素材仍走宿主路由，不得内联）');process.exit(1)}\""
   },
   "dsh": {
     "bundle": {

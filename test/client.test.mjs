@@ -1415,12 +1415,12 @@ test("素材加载：重试耗尽后，activity 通了（宿主路由已就绪�
 });
 
 test("体积：client.js 不再内联 base64 素材，且控制在 420KB 以内", () => {
-  // 上限 200KB → 420KB（M6 项目工作台，2026-11-09）：dsh.client 只认一个 ./client
+  // 上限 200KB → 420KB（M6 工作台）→ 560KB（M6 画布波次，2026-11-14）：dsh.client 只认一个 ./client
   // 导出，装饰层与十屏工作台共用同一个单文件 bundle；素材依旧出包、不内联。
   const source = readFileSync(join(pluginDir, "lib", "client.js"), "utf8");
   assert.equal(source.includes("data:image/webp;base64"), false, "bundle 里不得再出现内联 WebP");
   const bytes = Buffer.byteLength(source, "utf8");
-  assert.ok(bytes < 420 * 1024, "client.js 必须 ≤420KB，实际 " + Math.round(bytes / 1024) + "KB");
+  assert.ok(bytes < 560 * 1024, "client.js 必须 ≤560KB，实际 " + Math.round(bytes / 1024) + "KB");
   assert.ok(source.includes("var ART = {};"), "ART 必须保留空表占位，等运行时填充");
 });
 

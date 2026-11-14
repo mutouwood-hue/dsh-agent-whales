@@ -1023,17 +1023,81 @@ test("A1：可加入会话排除主对话与现有成员，坏数据当不能加
   assert.equal(wbAddableSessions(sessions, {}).length, 4);
 });
 
-test("A1：画布上真的有「添加 Agent」落点，不再指引不存在的操作", () => {
-  // 画布页在无项目数据时整体返回 null，渲染断言不到内部；这里查源码契约。
-  const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
-  assert.ok(source.indexOf(String.fromCharCode(34)+"data-kind"+String.fromCharCode(34)+": "+String.fromCharCode(34)+"add"+String.fromCharCode(34)) >= 0, "画布上必须有添加 Agent 占位节点");
-  assert.ok(source.indexOf("setAddState(true)") >= 0, "占位节点必须可点");
-  assert.ok(source.indexOf('method: "POST", body: { sessionId: sessionId }') >= 0, "必须走宿主既有的 POST /projects/:id/members");
-  for (const key of ["canvas.addAgent", "canvas.addAgent.hint", "canvas.addAgent.none", "canvas.addAgent.modal", "canvas.addAgent.ok"]) {
-    assert.ok(source.indexOf(key) >= 0, key + " 文案键必须存在");
+test("A1：画布上真的有「添加 Agent」落点，点得开也关得掉", async () => {
+  // 这条曾经是源码 grep（断言 "setAddState(true)" 字面量）。改名就红，而且抓不到真 bug：
+  // 2026-11-14 真机三连——addState 元组当值用（弹窗条件永不成立）、setAddState 未声明
+  // （点击即抛 ReferenceError）、busyState 从没声明（点「加入」就抛）。
+  // 现在用 createMount 真点一遍：挂画布 → 点添加节点 → 弹窗出现 → 取消 → 弹窗消失。
+  const { shim, mount } = createMount();
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const api = loaded.plugin.__test;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const ok = (data) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data }) });
+    if (target === "/projects") return ok([{ projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1", role: "member" }], links: [], brief: { goal: "g" } }]);
+    if (target === "/projects/p1") return ok({ project: { projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1", role: "member" }], links: [], brief: { goal: "g" } } });
+    if (target === "/projects/p1/brief") return ok({ brief: { version: 1, goal: "g", decisions: [], constraints: [] } });
+    if (target === "/projects/p1/mcp-links") return ok({ projectId: "p1", available: [], links: [], members: [{ sessionId: "s1" }], mainSessionId: "main" });
+    if (target.startsWith("/tasks?projectId=")) return ok({ source: "project", projectId: "p1", tasks: [] });
+    if (target === "/sessions") return ok({ source: "host", sessions: [{ sessionId: "s1", title: "Agent 甲", running: true }, { sessionId: "s2", title: "新人乙", running: false }] });
+    if (target === "/activity") return ok({ at: Date.now(), active: {} });
+    if (target.startsWith("/canvas")) return ok({ rev: 1, nodes: [] });
+    if (target.startsWith("/inbox")) return ok({ groups: [] });
+    if (target.startsWith("/handoffs")) return ok({ entries: [] });
+    return ok({});
+  };
+  const collect = (node, out, match) => {
+    if (node === null || node === undefined || typeof node === "boolean") return;
+    if (Array.isArray(node)) { node.forEach((item) => collect(item, out, match)); return; }
+    if (typeof node !== "object") return;
+    if (typeof node.type === "string" && node.props && match(node)) out.push(node);
+    collect(node.props ? node.props.children : undefined, out, match);
+  };
+  const texts = (node) => {
+    const out = [];
+    const walk = (n) => {
+      if (n === null || n === undefined || typeof n === "boolean") return;
+      if (typeof n === "string" || typeof n === "number") { out.push(String(n)); return; }
+      if (Array.isArray(n)) { n.forEach(walk); return; }
+      if (typeof n !== "object") return;
+      walk(n.props ? n.props.children : undefined);
+    };
+    walk(node);
+    return out.join("");
+  };
+  // 精确匹配类名 token：daw-wb-modal-title / -foot 也含 "daw-wb-modal" 子串，
+  // 用 indexOf 会把标题和页脚一起算进来（3 !== 1 就是这么来的）。
+  const isModal = (n) => typeof n.props.className === "string" && n.props.className.split(" ").indexOf("daw-wb-modal") >= 0;
+  const modalsIn = (tree) => { const out = []; collect(tree, out, isModal); return out; };
+  try {
+    const urls = ["/projects", "/projects/p1", "/projects/p1/brief", "/projects/p1/mcp-links", "/tasks?projectId=p1", "/sessions", "/activity", "/canvas?projectId=p1", "/inbox?projectId=p1", "/handoffs?projectId=p1"];
+    for (const url of urls) await api.wbCache.read(url).catch(() => {});
+    const t = (key, vars) => {
+      const raw = api.WB_TEXT.zh[key];
+      if (raw === undefined) return "«" + key + "»";
+      if (!vars) return raw;
+      return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
+    };
+    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
+    const addNodes = [];
+    collect(view.tree, addNodes, (n) => n.props["data-kind"] === "add");
+    assert.equal(addNodes.length, 1, "画布上必须有一个「添加 Agent」占位节点");
+    assert.doesNotThrow(() => { addNodes[0].props.onClick({ stopPropagation() {} }); view.rerender(); }, "点添加节点不能抛");
+    assert.equal(modalsIn(view.tree).length, 1, "点完必须弹出加入弹窗");
+    const allButtons = [];
+    collect(view.tree, allButtons, (n) => n.type === "button");
+    const cancel = allButtons.filter((b) => texts(b) === "取消")[0];
+    assert.ok(cancel, "弹窗里必须有取消按钮");
+    cancel.props.onClick({ stopPropagation() {} });
+    view.rerender();
+    assert.equal(modalsIn(view.tree).length, 0, "取消之后弹窗必须消失");
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+    api.wbCache.reset();
   }
-  const { WB_TEXT } = testApi();
-  assert.ok(WB_TEXT.zh["canvas.addAgent"].length > 0 && WB_TEXT.en["canvas.addAgent"].length > 0, "中英都要有");
 });
 // ── 18. A2：连线检视 ─────────────────────────────────────────────────────
 //
@@ -1131,5 +1195,229 @@ test("B1/B2：源码契约——派发走宿主命令路由，目标走 brief CA
   const { WB_TEXT } = testApi();
   for (const key of ["inspect.dispatch", "inspect.goal.edit", "inspect.goal.placeholder"]) {
     assert.ok(WB_TEXT.zh[key].length > 0 && WB_TEXT.en[key].length > 0, key + " 中英都要有");
+  }
+});
+
+
+// ── 19. Agent 分段生长进度（参考图 V2 + CDS ApprovalFlow 等宽分段口径）──────
+
+test("wbAgentSteps：六步派生——提案来源全 done、手动创建前三步 skipped", () => {
+  const { wbAgentSteps } = testApi();
+  const keys = wbAgentSteps({}).map((s) => s.key);
+  assert.deepEqual(keys, ["source", "trigger", "policy", "ticket", "worker", "report"], "六步固定（T-13 同款）");
+
+  // 提案来的任务：前三步 done，ticket done，worker 有主且在跑 = active，没有 report = pending
+  const proposed = wbAgentSteps({
+    sourceProposal: { proposalId: "prop-1", version: 2, key: "T1" },
+    ownerSessionId: "s1",
+    status: "in_progress",
+    report: null
+  });
+  assert.deepEqual(proposed.map((s) => s.state), ["done", "done", "done", "done", "active", "pending"]);
+
+  // 手动创建：前三步 skipped（不是 pending——「不适用」与「还没到」是两件事）
+  const manual = wbAgentSteps({ ownerSessionId: null, status: "pending", report: null });
+  assert.deepEqual(manual.map((s) => s.state), ["skipped", "skipped", "skipped", "done", "pending", "pending"]);
+
+  // report 四态：done = 回流关闭；draft/handed_back/human_action 都算 active（还在回流里）
+  for (const status of ["done"]) {
+    assert.equal(wbAgentSteps({ ownerSessionId: "s1", report: { status } })[5].state, "done");
+  }
+  for (const status of ["draft", "handed_back", "human_action"]) {
+    assert.equal(wbAgentSteps({ ownerSessionId: "s1", report: { status } })[5].state, "active", status + " 也算 active");
+  }
+  // 有主但没在跑（已派完待命）→ worker = done
+  assert.equal(wbAgentSteps({ ownerSessionId: "s1", status: "pending" })[4].state, "done");
+  // 坏数据不炸
+  assert.equal(wbAgentSteps(undefined).length, 6);
+  assert.equal(wbAgentSteps({ report: "脏" }).length, 6);
+});
+
+test("wbGrowthLabel：可读名报 done/total（纯图形必须有文字复述）", () => {
+  const { wbAgentSteps, wbGrowthLabel, WB_TEXT } = testApi();
+  const steps = wbAgentSteps({ sourceProposal: { proposalId: "p" }, ownerSessionId: "s1", status: "in_progress", report: { status: "done" } });
+  const t = (key, vars) => {
+    const raw = WB_TEXT.zh[key];
+    if (raw === undefined) return key;
+    if (!vars) return raw;
+    return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
+  };
+  assert.equal(wbGrowthLabel(steps, t), "任务进度：共 6 步，已完成 5 步", "worker 步在跑 = active，不算 done");
+  // 手动创建且没报告：前三步 skipped，ticket + worker 两步 done，report pending → done = 2
+  assert.equal(wbGrowthLabel(wbAgentSteps({ ownerSessionId: "s1", status: "completed" }), t), "任务进度：共 6 步，已完成 2 步");
+  // 完全空的任务：manual 前三步 skipped + ticket done，其余 pending → done = 1
+  assert.equal(wbGrowthLabel(wbAgentSteps({}), t), "任务进度：共 6 步，已完成 1 步", "只有 ticket 一步恒 done");
+  // 没有 t 时退回内置中文句式（不返回 undefined）
+  assert.ok(wbGrowthLabel(steps).indexOf("共 6 步") >= 0);
+  assert.equal(wbGrowthLabel(undefined), "共 0 步，已完成 0 步", "空 steps 也不能炸");
+  assert.equal(wbGrowthLabel(null), "共 0 步，已完成 0 步");
+});
+
+test("渲染：Agent 卡上真出现 6 个等宽分段，aria-label 与数据一致", async () => {
+  const { shim, mount } = createMount();
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const api = loaded.plugin.__test;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const ok = (data) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data }) });
+    if (target === "/projects") return ok([{ projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1", role: "member" }], links: [], brief: { goal: "g" } }]);
+    if (target === "/projects/p1") return ok({ project: { projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1", role: "member" }], links: [], brief: { goal: "g" } } });
+    if (target === "/projects/p1/brief") return ok({ brief: { version: 1, goal: "g", decisions: [], constraints: [] } });
+    if (target === "/projects/p1/mcp-links") return ok({ projectId: "p1", available: [], links: [], members: [{ sessionId: "s1" }], mainSessionId: "main" });
+    if (target.startsWith("/tasks?projectId=")) return ok({ source: "project", projectId: "p1", tasks: [
+      { taskId: "t-1", subject: "接画布", status: "in_progress", ownerSessionId: "s1", worktree: "/d/repo", revision: 3, sourceProposal: { proposalId: "prop-1", version: 1, key: "T1" }, report: { status: "draft", summary: "s", rev: 2, at: 1 } }
+    ] });
+    if (target === "/sessions") return ok({ source: "host", sessions: [{ sessionId: "s1", title: "Agent 甲", running: true }] });
+    if (target === "/activity") return ok({ at: Date.now(), active: {} });
+    if (target.startsWith("/canvas")) return ok({ rev: 1, nodes: [] });
+    if (target.startsWith("/inbox")) return ok({ groups: [] });
+    if (target.startsWith("/handoffs")) return ok({ entries: [] });
+    return ok({});
+  };
+  try {
+    const urls = ["/projects", "/projects/p1", "/projects/p1/brief", "/projects/p1/mcp-links", "/tasks?projectId=p1", "/sessions", "/activity", "/canvas?projectId=p1", "/inbox?projectId=p1", "/handoffs?projectId=p1"];
+    for (const url of urls) await api.wbCache.read(url).catch(() => {});
+    const t = (key, vars) => {
+      const raw = api.WB_TEXT.zh[key];
+      if (raw === undefined) return "«" + key + "»";
+      if (!vars) return raw;
+      return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
+    };
+    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
+    const segs = [];
+    const collect = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collect); return; }
+      if (typeof node !== "object") return;
+      if (typeof node.type === "string" && node.props && typeof node.props.className === "string" && node.props.className.split(" ").indexOf("daw-wb-growth-seg") >= 0) segs.push(node);
+      collect(node.props ? node.props.children : undefined);
+    };
+    collect(view.tree);
+    assert.equal(segs.length, 6, "Agent 卡必须渲染 6 个等宽分段");
+    const states = segs.map((s) => s.props["data-state"]);
+    assert.deepEqual(states, ["done", "done", "done", "done", "active", "active"], "提案来源 + 在跑 + draft");
+    const bars = [];
+    const collectBars = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collectBars); return; }
+      if (typeof node !== "object") return;
+      if (typeof node.type === "string" && node.props && node.props.role === "img" && typeof node.props.className === "string" && node.props.className.indexOf("daw-wb-growth") >= 0) bars.push(node);
+      collectBars(node.props ? node.props.children : undefined);
+    };
+    collectBars(view.tree);
+    assert.equal(bars.length, 1, "分段条必须 role=img（纯图形的文字复述）");
+    assert.ok(bars[0].props["aria-label"].indexOf("共 6 步") >= 0, "aria-label 要说清 done/total");
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+    api.wbCache.reset();
+  }
+});
+
+
+// ── 20. Thread 回合记录节点（参考图 V2 顶部；全部来自已有事实） ─────────────
+
+test("wbThreadNode：目标/成员/任务/最近动态/执行顺序/留痕，坏数据不炸", () => {
+  const { wbThreadNode } = testApi();
+  const project = {
+    mainSessionId: "main",
+    members: [{ sessionId: "main" }, { sessionId: "s1" }, { sessionId: "s2" }],
+    brief: { goal: "  把上线前体检做完  " }
+  };
+  const events = [
+    { eventId: "e1", kind: "task.command", text: "dispatch ptask-t1", at: 300, evidence: "req-1" },
+    { eventId: "e2", kind: "proposal.submit", text: "体检分工", at: 200, evidence: "prop-1" },
+    { eventId: "e3", kind: "store.degraded", text: "只读降级", at: 100 }
+  ];
+  const tasks = [
+    { taskId: "t1", status: "completed", ownerSessionId: "s1", createdAt: 10 },
+    { taskId: "t2", status: "in_progress", ownerSessionId: "s2", createdAt: 20 }
+  ];
+  const node = wbThreadNode(project, events, tasks);
+  assert.equal(node.goal, "把上线前体检做完", "goal 去首尾空白");
+  assert.equal(node.members, 3, "成员数含主对话");
+  assert.deepEqual(node.tasks, { done: 1, total: 2 });
+  assert.equal(node.state, "active", "有 in_progress → active");
+  assert.equal(node.recent.length, 3, "最近动态按 at 倒序全给（内部再 slice）");
+  assert.ok(node.recent[0].at >= node.recent[1].at, "倒序");
+  assert.deepEqual(node.order, ["s1", "s2"], "执行顺序按任务创建序的去重 owner 链");
+  assert.equal(node.evidence, 2, "只数带 evidence 的事件");
+
+  // 全完成 → done；没有任务 → pending
+  assert.equal(wbThreadNode(project, [], [{ status: "completed" }]).state, "done");
+  assert.equal(wbThreadNode(project, [], []).state, "pending");
+  // 空 goal 不编造
+  assert.equal(wbThreadNode({ members: [], brief: {} }, [], []).goal, "");
+  // 坏数据不炸
+  assert.equal(wbThreadNode(undefined, undefined, undefined).members, 0);
+  assert.deepEqual(wbThreadNode(null, null, null).recent, []);
+  assert.equal(wbThreadNode({ members: "x", brief: "y" }, "z", "w").state, "pending");
+});
+
+test("渲染：画布上出现 Thread 节点，带走目标/成员/任务/留痕四行", async () => {
+  const { shim, mount } = createMount();
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const api = loaded.plugin.__test;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const ok = (data) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data }) });
+    if (target === "/projects") return ok([{ projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1", role: "member" }], links: [], brief: { goal: "把 MCP 约束落到画布" } }]);
+    if (target === "/projects/p1") return ok({ project: { projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1", role: "member" }], links: [], brief: { goal: "把 MCP 约束落到画布" } } });
+    if (target === "/projects/p1/brief") return ok({ brief: { version: 1, goal: "g", decisions: [], constraints: [] } });
+    if (target === "/projects/p1/mcp-links") return ok({ projectId: "p1", available: [], links: [], members: [{ sessionId: "s1" }], mainSessionId: "main" });
+    if (target.startsWith("/tasks?projectId=")) return ok({ source: "project", projectId: "p1", tasks: [
+      { taskId: "t-1", subject: "接画布", status: "in_progress", ownerSessionId: "s1", revision: 2, createdAt: 5 }
+    ] });
+    if (target === "/sessions") return ok({ source: "host", sessions: [{ sessionId: "s1", title: "Agent 甲", running: true }] });
+    if (target === "/activity") return ok({ at: Date.now(), active: {} });
+    if (target.startsWith("/events")) return ok({ events: [
+      { eventId: "e1", projectId: "p1", source: "plugin", kind: "task.command", text: "dispatch t-1", evidence: "req-1", at: Date.now() - 60000, state: "pending", rules: [] }
+    ], stats: { pending: 1, today: 1, opened: 0, ignored: 0 }, health: [] });
+    if (target.startsWith("/canvas")) return ok({ rev: 1, nodes: [] });
+    if (target.startsWith("/inbox")) return ok({ groups: [] });
+    if (target.startsWith("/handoffs")) return ok({ entries: [] });
+    return ok({});
+  };
+  try {
+    const urls = ["/projects", "/projects/p1", "/projects/p1/brief", "/projects/p1/mcp-links", "/tasks?projectId=p1", "/sessions", "/activity", "/canvas?projectId=p1", "/events?projectId=p1", "/inbox?projectId=p1", "/handoffs?projectId=p1"];
+    for (const url of urls) await api.wbCache.read(url).catch(() => {});
+    const t = (key, vars) => {
+      const raw = api.WB_TEXT.zh[key];
+      if (raw === undefined) return "«" + key + "»";
+      if (!vars) return raw;
+      return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
+    };
+    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
+    const nodes = [];
+    const collect = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collect); return; }
+      if (typeof node !== "object") return;
+      if (typeof node.type === "string" && node.props && node.props["data-kind"] === "thread") nodes.push(node);
+      collect(node.props ? node.props.children : undefined);
+    };
+    collect(view.tree);
+    assert.equal(nodes.length, 1, "画布上必须有一个 Thread 节点");
+    const texts = [];
+    const walk = (n) => {
+      if (n === null || n === undefined || typeof n === "boolean") return;
+      if (typeof n === "string" || typeof n === "number") { texts.push(String(n)); return; }
+      if (Array.isArray(n)) { n.forEach(walk); return; }
+      if (typeof n !== "object") return;
+      walk(n.props ? n.props.children : undefined);
+    };
+    walk(nodes[0]);
+    const joined = texts.join("|");
+    for (const word of ["Thread · 回合记录", "把 MCP 约束落到画布", "成员 1", "任务 0/1", "留痕 1 条", "task.command", "执行顺序：Agent 甲"]) {
+      assert.ok(joined.indexOf(word) >= 0, "Thread 节点必须出现「" + word + "」，实际：" + joined.slice(0, 200));
+    }
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+    api.wbCache.reset();
   }
 });
