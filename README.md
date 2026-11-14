@@ -296,6 +296,27 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 **主题**默认浅色，设置里可切暗色；两套 token 一一对应（`WB_TOKENS`），组件只引用
 `var(--daw-*)`，切主题即换色，没有第二套组件。
 
+### 借鉴 troupe 的两处（只接我们已有功能，不为它改我们）
+
+> 调子是用户定的：「不要为了他改我们的功能，只是如果和我们有接近的功能，可以直接拿来用」。
+> 完整对照（含刻意没拿的 7 项及理由）见 Notion：
+> [借鉴 troupe · 已拿的两处与刻意没拿的](https://app.notion.com/p/troupe-hitianqi-troupe-418c209ad67f81ec92ebca1ad4d1d974)
+
+- **Agent 卡 chip「证据压过观感」**（借 `src/state.ts` 的 `roleState` 梯子）：它原话是
+  「写过 `done` 的就是 done，哪怕它还挂在提示符上」。我们原来是看会话在不在线，现在是
+  `wbAgentChip(task, online)`——**有 report 就按 report 显示**（done→已完工 / handed_back→待我决定 /
+  human_action→求人处理 / draft→草稿中），没有 report 才看在线。这就是我们「已产出 ≠ 已送达」
+  纪律在 Agent 卡上的同一句话。
+- **产物越界提示**（借 `src/state.ts` 的 `workOf().outside`）：它用 `git diff` 算「改动文件里
+  没有被 `touches` 覆盖的」；插件跑不了 git，但 **report 的 artifacts 与任务的 writeScopes 是同一件事的
+  声明面与事实面**——`wbArtifactsOutside()` 算出越界产物，在 report 弹窗里 warn 点名列出。
+  这给 `handed_back`（超 scope 退回）补上它一直缺的证据面。**没有声明 `writeScopes` 时不提示**
+  ——「没声明」不是越界的证据。
+- **刻意没拿**：`clashesOf` 的「有依赖顺序的重叠不算冲突」（我们的 `writeScopeWarnings` 是自己的判据，
+  为它改我们的判据越界）；notices 的「往 orchestrator 输入一行」（PRD §38.1 禁宿主代发消息）；
+  tmux/worktree/分支管理（我们没有终端所有权）；`stages.yaml` 八段流水线（我们的六段是 T-13 生命周期，
+  语义不同）；`planHash`、`treeOf`、`done_when`（后两者缺数据源，登记为候选）。
+
 ### 画布上的 Agent 生长进度与 Thread 回合记录（M6 画布波次）
 
 - **Agent 卡等宽分段进度**：六段 = T-13 的 source → trigger → policy → ticket → worker → report，
@@ -819,6 +840,10 @@ node _scratch/preview.mjs
 - 已验证 · 画布波次（2026-11-14）：`wbAgentSteps` 六步派生（提案来源全 done / 手动创建前三步
   skipped / owner 三态 / report 四态）、`wbGrowthLabel` 可读名、Agent 卡真渲染 6 个等宽分段且
   aria-label 与数据一致；`wbThreadNode` 六行全来自已有事实（坏数据不炸）、画布上真出现 Thread 节点。
+- 已验证 · 借鉴 troupe（2026-11-14）：`wbAgentChip` 证据优先（有 report 就不看在线，8 例）、
+  `wbArtifactsOutside` 越界产物（声明内 / 声明外 / 无声明 / 坏数据 / 字符串产物 5 种输入）、
+  `wbScopeOverlaps` 与宿主 `writeScopeWarnings` 同口径（含前缀，两边必须一致否则界面说的和宿主罚的不是一件事）。
+- 未验证 · 借鉴 troupe 真机：越界提示在真实 report 数据下的观感（现在只有纯函数 + 弹窗接线测试）。
 - 已验证 · 全页面交互冒烟（2026-11-14）：`.prd-tmp/smoke-all-pages.cjs` 用真实 useState 的迷你
   React 挂起 11 个页面，把每个按钮与画布节点点一遍、每个弹窗走一遍「开→取消→遮罩关」——本轮修掉的
   5 类 bug（useState 元组当值 ×2 / 未声明标识符 ×2 / 声明序错 / props 回调未保护）全部由它抓到。

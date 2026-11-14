@@ -1421,3 +1421,83 @@ test("渲染：画布上出现 Thread 节点，带走目标/成员/任务/留痕
     api.wbCache.reset();
   }
 });
+
+
+// ── 21. 借鉴 troupe：证据优先的 Agent 态 + 产物越界（outside） ──────────────
+
+test("wbAgentChip：有 report 就按 report 显示，没有才看在线（证据压过观感）", () => {
+  const { wbAgentChip } = testApi();
+  // troupe roleState 的第一条：写过 done 的就是 done，哪怕它还挂在提示符上
+  assert.deepEqual(wbAgentChip({ report: { status: "done" } }, true), { tone: "ok", key: "done" });
+  assert.deepEqual(wbAgentChip({ report: { status: "done" } }, false), { tone: "ok", key: "done" }, "不在线也是 done——证据说话");
+  assert.deepEqual(wbAgentChip({ report: { status: "handed_back" } }, true), { tone: "warn", key: "handed_back" });
+  assert.deepEqual(wbAgentChip({ report: { status: "human_action" } }, true), { tone: "danger", key: "human_action" });
+  assert.deepEqual(wbAgentChip({ report: { status: "draft" } }, true), { tone: "brand", key: "draft" });
+  // 没有 report 才看观感
+  assert.deepEqual(wbAgentChip({}, true), { tone: "ok", key: "online" });
+  assert.deepEqual(wbAgentChip({}, false), { tone: "neutral", key: "idle" });
+  assert.deepEqual(wbAgentChip(undefined, false), { tone: "neutral", key: "idle" });
+  assert.deepEqual(wbAgentChip({ report: "脏" }, true), { tone: "ok", key: "online" }, "坏 report 当没有");
+});
+
+test("wbArtifactsOutside：产物里越界的那几个（troupe outside 的声明面版本）", () => {
+  const { wbArtifactsOutside } = testApi();
+  // 声明 lib/，产物全在里面 → 没有越界
+  assert.deepEqual(wbArtifactsOutside({ writeScopes: ["lib/"], report: { artifacts: [{ ref: "lib/a.js" }, { ref: "lib/x/b.js" }] } }), { total: 2, outside: [] });
+  // 一个在声明外
+  const one = wbArtifactsOutside({ writeScopes: ["lib/"], report: { artifacts: [{ ref: "lib/a.js" }, { ref: "docs/readme.md" }] } });
+  assert.equal(one.total, 2);
+  assert.deepEqual(one.outside, ["docs/readme.md"]);
+  // 没有声明范围 → 不判断（「没声明」不是越界证据）
+  assert.deepEqual(wbArtifactsOutside({ writeScopes: [], report: { artifacts: [{ ref: "anywhere" }] } }), { total: 1, outside: [] });
+  assert.deepEqual(wbArtifactsOutside({ report: null }), { total: 0, outside: [] });
+  // 坏数据不抛
+  assert.deepEqual(wbArtifactsOutside(undefined), { total: 0, outside: [] });
+  assert.deepEqual(wbArtifactsOutside({ writeScopes: "x", report: { artifacts: "y" } }), { total: 0, outside: [] });
+  // 字符串产物也认（旧数据）
+  assert.deepEqual(wbArtifactsOutside({ writeScopes: ["lib/"], report: { artifacts: ["docs/x.md"] } }).outside, ["docs/x.md"]);
+});
+
+test("wbScopeOverlaps：与宿主 writeScopeWarnings 同口径（含前缀）", () => {
+  const { wbScopeOverlaps } = testApi();
+  assert.equal(wbScopeOverlaps("lib/", "lib/"), true, "完全相同");
+  assert.equal(wbScopeOverlaps("lib/index.js", "lib/"), true, "文件在目录范围里");
+  assert.equal(wbScopeOverlaps("lib/", "lib/index.js"), true, "反向也算");
+  assert.equal(wbScopeOverlaps("lib/", "docs/"), false, "不相干");
+  assert.equal(wbScopeOverlaps("", "lib/"), false, "空范围不命中任何东西");
+  assert.equal(wbScopeOverlaps(undefined, undefined), false);
+});
+
+
+test("渲染：report 弹窗在产物越界时给出提示（troupe outside 的落地）", async () => {
+  const { shim, mount } = createMount();
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const api = loaded.plugin.__test;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const ok = (data) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data }) });
+    return ok({});
+  };
+  const t = (key, vars) => {
+    const raw = api.WB_TEXT.zh[key];
+    if (raw === undefined) return "«" + key + "»";
+    if (!vars) return raw;
+    return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
+  };
+  try {
+    // 有声明范围 + 产物越界 → 必须出现提示，并列出越界产物
+    const outside = api.wbArtifactsOutside({ writeScopes: ["lib/"], report: { artifacts: [{ ref: "lib/a.js" }, { ref: "docs/readme.md" }] } });
+    assert.equal(outside.outside.length, 1, "前置：越界产物 1 个");
+    const banner = t("tasks.report.outside", { count: 1, total: 2, refs: "docs/readme.md" });
+    assert.ok(banner.indexOf("docs/readme.md") >= 0, "提示必须点名越界产物：" + banner);
+    // 全部在范围内 → 不提示（不制造噪音）
+    assert.equal(api.wbArtifactsOutside({ writeScopes: ["lib/"], report: { artifacts: [{ ref: "lib/a.js" }] } }).outside.length, 0);
+    // 没有声明范围 → 不提示
+    assert.equal(api.wbArtifactsOutside({ writeScopes: [], report: { artifacts: [{ ref: "x" }] } }).outside.length, 0);
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+  }
+});
