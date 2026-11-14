@@ -296,6 +296,23 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 **主题**默认浅色，设置里可切暗色；两套 token 一一对应（`WB_TOKENS`），组件只引用
 `var(--daw-*)`，切主题即换色，没有第二套组件。
 
+### 画布上的 Agent 生长进度与 Thread 回合记录（M6 画布波次）
+
+- **Agent 卡等宽分段进度**：六段 = T-13 的 source → trigger → policy → ticket → worker → report，
+  **全部从任务行已有字段派生，不发额外请求**；`skipped` 表示「不适用」（手动创建没有提案链路），
+  与 `pending`（还没到）是两回事。口径抄 CDS `ApprovalFlow`：等宽、不按耗时加权、
+  `role="img"` + `aria-label` 文字复述。
+- **卡高按 kind 固定**（Agent 148）：CDS 专家画布的同一决策——锚点由 `node.h` 算，
+  内容增减不能让卡变高，否则连线锚点立刻算偏。
+- **Thread 回合记录节点**（画布顶部中间，V2 起目标由它承载、不再有独立 goal 条）：
+  目标（项目简报 goal）/ 成员数 / 任务完成数 / 最近动态（事件台账倒序前 3）/
+  执行顺序（按任务创建序的去重 owner 链）/ 留痕条数（带 evidence 的事件数）。
+  **没有 Research 节点**——我们没有「研究资料归档」这个数据源，不编。
+- **未做（差数据源，不是差工期）**：参考图 V2 左侧四类上下文节点里的 **Skills** 与
+  **References（外部只读）**、以及 **Research 证据归档**。这三类都需要插件目前没有的数据源
+  （技能登记表 / 外部引用表 / 研究归档表）；按「画布上有个入口、用户照做发现无路可走」比
+  「没有这个入口」更糟的判据（计划文档 §11 最高优先级问题类型），**先不做**，等数据源明确。
+
 ### 工作台新增的路由（都在 `/agent-whales/api` 前缀下，读操作不需要 token）
 
 | 路由 | 方法 | 作用 |
@@ -794,10 +811,17 @@ node _scratch/preview.mjs
   （manifest `no-store`、图片 `immutable` + etag、未知 key / 路径穿越 → 404、非 GET → 405）；
   客户端按皮肤分波（L1 base → L2 常用 → L3 其余）、单帧失败只摘该帧、manifest 失败整层退矢量；
   `npm pack` = 39 文件 / 425KB，`art.json` 与 `_contact.png` 不进包。测试 150/150。
-- 已验证 · 体积门禁随 M6 上调（2026-11-09）：`dsh.client` 只认一个 `./client` 导出，装饰层与
-  十屏工作台共用同一个单文件 bundle，`client.js` 到 **约 308KB**（素材依旧出包、不内联）。
-  上限从 200KB 提到 **420KB**（`prepack` + `test/meta.test.mjs` + `test/client.test.mjs` 三处同改），
+- 已验证 · 体积门禁随 M6 画布波次再次上调（2026-11-14）：`dsh.client` 只认一个 `./client` 导出，
+  装饰层 + 十屏工作台 + 画布波次共用同一个单文件 bundle，`client.js` 到 **约 406KB**
+  （素材依旧出包、不内联）。上限 200KB → **420KB**（M6 工作台，2026-11-09）→ **560KB**
+  （M6 画布波次，2026-11-14；`prepack` + `test/meta.test.mjs` + `test/client.test.mjs` 三处同改），
   上限的意义是「别无声膨胀」，不是「永远 127KB」。
+- 已验证 · 画布波次（2026-11-14）：`wbAgentSteps` 六步派生（提案来源全 done / 手动创建前三步
+  skipped / owner 三态 / report 四态）、`wbGrowthLabel` 可读名、Agent 卡真渲染 6 个等宽分段且
+  aria-label 与数据一致；`wbThreadNode` 六行全来自已有事实（坏数据不炸）、画布上真出现 Thread 节点。
+- 已验证 · 全页面交互冒烟（2026-11-14）：`.prd-tmp/smoke-all-pages.cjs` 用真实 useState 的迷你
+  React 挂起 11 个页面，把每个按钮与画布节点点一遍、每个弹窗走一遍「开→取消→遮罩关」——本轮修掉的
+  5 类 bug（useState 元组当值 ×2 / 未声明标识符 ×2 / 声明序错 / props 回调未保护）全部由它抓到。
 - 已验证 · 真机出现：用户截图确认角色、头顶气泡、计数徽章都正常渲染（当时还是 `data:` 内联方案）；
   D1 改成宿主路由后，**真机渲染未复测**——见下面「未验证」。
 - 已验证 · 观感：`preview.still.html` 按 DSH 框架几何（40px 标题栏 + 240px 侧边栏 + 会话头 + `inset:0`
