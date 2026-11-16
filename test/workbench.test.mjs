@@ -1901,3 +1901,107 @@ test("空态引导：点「新建任务」弹画布内模态，取消关得掉�
     api.wbCache.reset();
   }
 });
+
+
+// ── 26. 项目没了别只剩死路：面包屑 + 错误态都能回项目列表 ─────────────────
+
+test("项目 404：顶栏面包屑可点回列表，错误态也有「回项目列表」出口", async () => {
+  // 真机 2026-11-16：localStorage 里记的上次视图指向一个已不存在的项目时，
+  // 画布/任务/简报/执行全部显示「读不到数据 · project not found + 重试」，
+  // 而所有页签都是项目作用域——用户只剩「一键回退」去官方 Chat 一条路。
+  const { shim, mount } = createMount();
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const api = loaded.plugin.__test;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const ok = (data) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data }) });
+    if (target === "/projects") return ok({ projects: [] });
+    // 项目详情 404：正是死路场景
+    if (target === "/projects/ghost") return Promise.resolve({ ok: false, status: 200, json: () => Promise.resolve({ code: 40401, msg: "project not found" }) });
+    if (target === "/projects/ghost/brief") return Promise.resolve({ code: 40401, msg: "project not found" });
+    if (target === "/projects/ghost/mcp-links") return Promise.resolve({ code: 40401, msg: "project not found" });
+    if (target.startsWith("/tasks?projectId=")) return Promise.resolve({ code: 40401, msg: "project not found" });
+    if (target === "/sessions") return ok({ sessions: [] });
+    if (target === "/activity") return ok({ at: Date.now(), active: {} });
+    if (target.startsWith("/canvas")) return ok({ rev: 1, nodes: {} });
+    if (target.startsWith("/inbox")) return ok({ groups: [] });
+    if (target.startsWith("/handoffs")) return ok({ entries: [] });
+    if (target.startsWith("/events")) return ok({ events: [], stats: {}, health: [] });
+    return ok({});
+  };
+  const t = (key, vars) => {
+    const raw = api.WB_TEXT.zh[key];
+    if (raw === undefined) return key;
+    if (!vars) return raw;
+    return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
+  };
+  try {
+    for (const url of ["/projects", "/projects/ghost", "/sessions", "/activity"]) await api.wbCache.read(url).catch(() => {});
+    api.wbRoute.set({ kind: "workbench", projectId: "ghost", tab: "canvas" });
+    const view = mount(api.WhaleWorkbench, {
+      t: t,
+      useSessions: (selector) => selector({ byId: {} }),
+      focusSession: () => true
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    view.rerender();
+    await new Promise((resolve) => setImmediate(resolve));
+    view.rerender();
+
+    const buttons = [];
+    const walkText = (n, out) => {
+      if (n === null || n === undefined || typeof n === "boolean") return;
+      if (typeof n === "string") { out.push(n); return; }
+      if (Array.isArray(n)) { n.forEach((x) => walkText(x, out)); return; }
+      if (typeof n !== "object") return;
+      walkText(n.props ? n.props.children : undefined, out);
+    };
+    const collectButtons = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collectButtons); return; }
+      if (typeof node !== "object") return;
+      if (node.type === "button") {
+        const out = [];
+        walkText(node, out);
+        buttons.push({ text: out.join("").trim(), node: node });
+      }
+      collectButtons(node.props ? node.props.children : undefined);
+    };
+    collectButtons(view.tree);
+
+    // 1) 顶栏面包屑的「项目」必须是可点的（class 标记），且点了回列表
+    const crumb = buttons.filter((b) => b.node.props && b.node.props.className === "daw-wb-crumb-link");
+    assert.equal(crumb.length, 1, "顶栏要有可点的面包屑「项目」");
+    assert.equal(api.wbRoute.get().kind, "workbench", "前置：当前在工作台里");
+    crumb[0].node.props.onClick({ stopPropagation() {} });
+    assert.equal(api.wbRoute.get().kind, "list", "点面包屑必须回到项目列表");
+
+    // 2) 错误态也要有出口（回到工作台再找）
+    api.wbRoute.set({ kind: "workbench", projectId: "ghost", tab: "canvas" });
+    view.rerender();
+    await new Promise((resolve) => setImmediate(resolve));
+    view.rerender();
+    const exits = [];
+    const collectExits = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collectExits); return; }
+      if (typeof node !== "object") return;
+      if (node.type === "button") {
+        const out = [];
+        walkText(node, out);
+        if (out.join("").trim() === "回项目列表") exits.push(node);
+      }
+      collectExits(node.props ? node.props.children : undefined);
+    };
+    collectExits(view.tree);
+    assert.ok(exits.length >= 1, "项目级失败的错误态要有「回项目列表」按钮");
+    exits[0].props.onClick({ stopPropagation() {} });
+    assert.equal(api.wbRoute.get().kind, "list", "点错误态出口也要回到项目列表");
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+    api.wbCache.reset();
+  }
+});

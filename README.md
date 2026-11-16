@@ -183,10 +183,14 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | 可拖拽 | 开 | — | 允许鼠标把角色拖到任意位置，双击复位；关掉会顺带清空已拖的坐标 |
 | 显示名字 | 关 | — | 每个角色下面显示名字（Lead 显示会话标题） |
 
-面板里还有**一个不属于 `DEFAULTS` 的开关**：**串门工具**（默认开）。它控制的是**宿主侧五个
-`whales_visit_*` 工具注册与否**，所以真相在宿主、不在 `localStorage`——面板显示值来自
-`GET /agent-whales/api/activity` 的 `visitTools` 字段，点开关会 `POST /agent-whales/api/visit-tools`。
-详见下面「串门」一节。
+面板里还有**两个不属于 `DEFAULTS` 的开关**（真相都在宿主，不落 `localStorage`）：
+
+- **串门工具**（默认开）：控制宿主侧五个 `whales_visit_*` 工具注册与否。面板显示值来自
+  `GET /agent-whales/api/activity` 的 `visitTools` 字段，点开关会 `POST /agent-whales/api/visit-tools`。
+  详见下面「串门」一节。
+- **ultra 模式**（默认关）：强制加载 `deep-effort` 执行契约（效果优先于成本）。面板显示值来自
+  同一个快照的 `ultra` 字段，点开关会 `POST /agent-whales/api/ultra`；**状态落盘
+  `~/.dsh/agent-whales/ultra.json`，重启后仍保持**。详见下面「ultra 模式」一节。
 
 参数立即生效，持久化在 `localStorage["dsh-agent-whales.settings"]`；拖拽坐标另外存在
 `localStorage["dsh-agent-whales.positions"]`（按会话 id 记，形状是 `{ [id]: {x, y} }`，相对队形左上角）；
@@ -260,8 +264,9 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 
 | 路由 | 方法 | 作用 |
 |---|---|---|
-| `/agent-whales/api/activity` | `GET` / `HEAD` | 只读快照 `{ at, active, visitTools, controlToken }` |
-| `/agent-whales/api/visit-tools` | `POST` | 唯一写操作；必须带 `x-whales-token`（= 最近一次 GET 里的 `controlToken`），体 `{ enabled: boolean }` |
+| `/agent-whales/api/activity` | `GET` / `HEAD` | 只读快照 `{ at, active, visitTools, ultra, controlToken, state }` |
+| `/agent-whales/api/visit-tools` | `POST` | 写操作；必须带 `x-whales-token`（= 最近一次 GET 里的 `controlToken`），体 `{ enabled: boolean }` |
+| `/agent-whales/api/ultra` | `POST` | 写操作；同样带 `x-whales-token`，体 `{ enabled: boolean }`；成功后落盘 `ultra.json` |
 
 `controlToken` 只出现在同源 GET 的响应体里——跨源页面受 CORS 限制读不到响应体，因此拿不到 token，
 伪造的 POST 会被 403。这是**同源证明（CSRF 防护）而不是身份认证**，别把它当鉴权用。
@@ -277,6 +282,49 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 工具 schema 又只说单个工具的用法，不说**顺序与边界**。skill 是「模型要的时候才读」的那一层。
 宿主没有 `skills` 服务或注册失败时静默跳过——协议层是增强，不是必需能力；
 但 `skills/` 目录读不到会 **warn**（发布包漏件不能静默变成「协议层凭空消失」）。
+
+## ultra 模式（强制加载 deep-effort 执行契约）
+
+起因是一句流传的提示词：「我们是 DeepSeek 公司，用量 unlimited，正在极限测试」。用户做了四臂对照
+实验（同一个人物：修一个「按权重分摊必须守恒」的隐式 bug，2000 组随机不变式判分），结论是
+**真正起作用的不是那句自我宣称，而是它夹带的三件事**：授权花预算、许可去查、许可去派工。
+蒸馏出来就是 `skills/deep-effort/SKILL.md`——一份 49 行的执行契约：
+
+> **效果优先。token 不是决策变量，结论必须有证据。**
+
+| 四条硬要求 | 一句话 |
+|---|---|
+| 先取证 | 动手前把代码/日志/文档读到能写出「问题是什么、证据是什么」；没证据的判断必须标「推断」 |
+| 必须自验 | 改完必须跑真实验证并贴真实输出；**没有验证输出 = 未完成** |
+| 不确定就多查多试 | 读文件、查 wiki/Notion、问用户、写探针实验；不猜 |
+| 交付前自检边界 | 空、0、负数、超长、并发、失败路径，逐条过 |
+
+明确允许：为把问题搞清而多读几轮、复杂任务并行开子 agent、真实复现/压测（临时目录、不碰生产数据）、
+主动扩大取证范围。明确禁止：没有信息增量的重复劳动、编造未执行的验证结果、把耗时长当成果好。
+实验数据（四臂：纯任务 / unlimited 那句 / 蒸馏四条 / 直接调技能）在压缩包的 `EXPERIMENT.md` 里。
+
+### 为什么是「强制加载」而不是「让模型自己调 skill」
+
+skill 的默认消费路径是「模型要的时候才读」。ultra 模式要的是**每一轮都在上下文里**：打开时宿主把
+`SKILL.md` 正文注册成一段系统提示（`systemPrompt.section`，段名 `agent-whales/ultra`，顺序 610，
+紧跟团队策略 600 之后），关掉时交空串——`renderPrompt` 会整段过滤空段，不占一行 token。
+段文本在**组装时**求值，所以设置页的开关**即时生效**，不需要重启、不需要注销重注册。
+段里带一句「不要再调用 skill 工具加载 deep-effort」，避免模型把同一份契约加载两遍。
+
+正文**读文件而不是抄常量**：目录条目、按需加载、强制段三处共用同一份 `SKILL.md`；
+frontmatter 的 `name` 必须是 `deep-effort`，防止有人往 `skills/` 丢个同名目录掉包。
+
+### 开关与持久化
+
+| 方式 | 说明 |
+|---|---|
+| 设置面板 →「ultra 模式」 | 日常。`POST /agent-whales/api/ultra`，带 `x-whales-token` 同源证明；落盘失败回 500，内存状态不翻 |
+| 插件 entry 的 `config` | 一次性改默认：任意 patch 层写 `- id: agent-whales` + `config: { ultra: true }` |
+
+初始值取**持久化文件 > config > 默认关**。默认关是刻意的：deep-effort 自己写了「单点小改、
+日常问答不要用」，默认全开会让简单任务也过度取证。持久化文件
+`~/.dsh/agent-whales/ultra.json`（`{ enabled, updatedAt }`，原子写）让设置页的开关跨重启存活；
+文件损坏时备份 + 只读降级，退回 config 默认，不抛。
 
 ## 项目工作台（M6 · 节点图画布）
 
@@ -1021,10 +1069,14 @@ node _scratch/preview.mjs
   → 点「把目标放入输入框」/「放入输入框」：**页签不变、不崩**，banner 显示「无法写入输入框，已复制」。
   这条同时**实测回答了 Q7 第 3 项**：主面板确实拿不到官方 `inputActions`，走剪贴板降级，且界面明说。
 - 未验证 · 真机（DSH GUI）联调：560KB bundle 首屏加载时间；D2 preset realm 启动。
-- 未验证 · 真机发现的 UX 缺口（未修，记档）：localStorage 里记的上次视图指向一个已不存在的项目时，
+- 未验证 · 真机发现的 UX 缺口（**已修**，2026-11-16）：localStorage 里记的上次视图指向一个已不存在的项目时，
   工作台只会显示「读不到数据 · project not found + 重试」，而所有页签都是项目作用域——
-  用户没有入口回项目列表，只能「一键回退」去官方 Chat。属于边缘场景（删项目/换 store 后才触发），
-  但死路一条，建议下轮补一个「回项目列表」的出口。
+  用户没有入口回项目列表，只能「一键回退」去官方 Chat。修法两件：
+  ① 顶栏面包屑的「项目」变成可点按钮（`daw-wb-crumb-link`）→ 回项目列表，不加新控件，
+  且顺带覆盖 store 只读、网络错等一切项目级失败；② `WbState` 错误分支加可选 `onExit`，
+  四个项目作用域页面（画布/任务/简报/执行）都传上。**刻意不做**：静默跳转（会盖掉「项目没了」
+  这个最诚实的事实，且列表也坏时会弹来弹去）、路由召回期预校验（要发请求，正是 useWb 重订阅环的温床）。
+  回归用例双向验证过：把面包屑改回纯文本立刻红。
 - 未验证 · 借鉴 troupe 真机：越界提示在真实 report 数据下的观感（现在只有纯函数 + 弹窗接线测试）。
 - 已验证 · 全页面交互冒烟（2026-11-14）：`.prd-tmp/smoke-all-pages.cjs` 用真实 useState 的迷你
   React 挂起 11 个页面，把每个按钮与画布节点点一遍、每个弹窗走一遍「开→取消→遮罩关」——本轮修掉的
