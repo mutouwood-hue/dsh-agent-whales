@@ -417,6 +417,7 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 | `/tasks/:taskId/commands` | `POST` | 既有五动作：assign / assign-and-dispatch / dispatch / unassign / reopen |
 | `/handoffs?projectId=` | `GET` | 发送记录（交接账本只读，`at` 倒序） |
 | `/inbox?projectId=` | `GET` | 需要我处理四组：提案待确认 / worker 求人 / 超 scope 退回 / 系统提醒 |
+| `/snapshot` | `GET` | 全量快照：五个 store 的**原始内容**（不是视图）+ `present` / `readonly` / `backupPath` 标注。只读、无 token——给「导出快照（ZIP）」按钮供料 |
 | `/sessions` | `GET` | 会话目录（加入对话列表、owner 显示名、画布 Agent 节点用） |
 | `/canvas?projectId=` | `GET` / `PUT` | 画布位置表。节点是派生的，**位置是唯一「人摆过」的状态**。`expectedRevision` CAS，过期 `40902` 并带回当前版本——不覆盖别人刚摆的位置 |
 | `/proposals` · `/proposals/:id/confirm` | `GET` / `POST` | 提案只读展示 + 确认后逐条建任务 |
@@ -448,6 +449,18 @@ W2 审核发现的缺口：画布此前只有人能在浏览器里摆，**agent 
 > `realpath`，把符号链接与 Windows 磁盘大小写一并归一。浏览器半边按同一套词法规则
 > （`wbWhereKey`，另把分隔符折成 `/`）去重——同一个目录的多种写法只会成一个上下文节点。
 > **大小写不折叠**：POSIX 上大小写不同的确是不同目录，Windows 的漂移已由宿主 realpath 修掉。
+
+### 快照导出（ZIP）
+
+项目列表页「**导出快照（ZIP）**」→ `GET /agent-whales/api/snapshot` 拿五个 store 的**原文**
+→ 浏览器半边打成 ZIP 下载（store 不压缩，不引压缩库：备份对象只有几个 JSON，而 client.js
+有 560KB 门禁）。借 chat-demo 历史导出的两条纪律：**导出物自己解释自己**（ZIP 里附 README.txt，
+写明每个文件是干什么的、哪个不在、哪个处于只读降级、损坏的那份被备份去了哪），
+**数据边界写进去**（插件只存这五份 JSON，不含凭据；但含会话 id 与任务正文，分享前自行确认）。
+缺文件与空文件是两件事：`present:false` 给 `null` 而不是 `{}`。
+
+顺手修了一个**按钮撒谎**：发送记录页的「导出证据」以前只是刷新缓存——按钮说了导出却给刷新。
+现在它真的把当前账本原文下载成 JSON。
 ### worker preset（执行器专用）
 
 `presets/dsh-agent-whales-worker/` 随包分发；插件 `apply` 时把它复制到
@@ -831,6 +844,7 @@ npm test          # = node --test test/，跑 test/ 下全部 *.test.mjs
 `visit-trace.test.mjs`（回合轨迹：`foldTurns` / `renderTranscript` 纯函数 + `whales_visit_trace` 读取路径、入参与访问闸，fixture 用真实落盘会话）、
 `landing-path.test.mjs`（落点归一：`normalizeLandingPath` / `canonicalLandingPath` 纯函数 + 入库即归一的端到端 + 画布 `wbWhereKey` 去重）、
 `bundled-skill.test.mjs`（随包协议 skill：frontmatter 解析 / provider 发现与加载 / 缺目录告警 / 注册与卸载 / 仓库副本自身合法）、
+`snapshot-export.test.mjs`（快照导出：宿主路由五文件标注 / CRC-32 标准向量 / UTF-8 与 Node 逐字节一致 / ZIP 结构可解 / README 自解释 / 条目挑选 / 导出流程走到下载）、
 `workbench.test.mjs`（M6 工作台纯逻辑 + 十屏渲染冒烟 + W1.5 事件台）、
 `workbench-draft.test.mjs`（W2 提案带入与目标条）、
 `workbench-replay.test.mjs`（W2 event_replay UI）、
@@ -866,7 +880,7 @@ node _scratch/preview.mjs
 | 文件 | 作用 |
 |---|---|
 | `lib/index.js` | 宿主半边：注册「团队协作」策略段落、MCP 约束层（`mcpLinks` 表 + 全局 `tools.guard()` 只拦 `mcp__` 工具）（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、五个 `whales_visit_*` 串门工具（可运行时开关，其中 `whales_visit_trace` 走 `sessionQuery` 读回合轨迹）、随包协议 skill provider（`skills/` → `ctx.skills`，rank 600 可被项目副本覆盖）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
-| `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层、设置页、状态表情状态机、素材 loader（**不含图片数据**，运行期从宿主路由按皮肤拉）；**M6 项目工作台**（十屏 + 节点画布 + 设计 token，纯逻辑可离线测） |
+| `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层、设置页、状态表情状态机、素材 loader（**不含图片数据**，运行期从宿主路由按皮肤拉）；**M6 项目工作台**（十屏 + 节点画布 + 设计 token，纯逻辑可离线测）；快照 ZIP 打包与下载（CRC-32 / store ZIP / 自解释 README） |
 | `cordis.patch.yml` | 默认层（**唯一真相**）：插入 `agent-whales` + 团队服务/工具/面板三行，并 `disabled` 掉旧 subagent 四行 |
 | `presets/dsh-agent-whales-worker/` | 执行器 preset（随包分发，`apply` 时装到用户 preset 根；执行 Session 专用，不供手动选择） |
 | `skills/whales-project-playbook/SKILL.md` | 随包协议 skill：模型按需加载的项目协作手册（派活 / 盯进度 / 简报 / 画布 / 串门 / 台账与边界），经 `ctx.skills.registerProvider` 注册，rank 600——项目内放同名副本（rank 200）即可覆盖 |
