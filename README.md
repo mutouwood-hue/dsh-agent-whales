@@ -325,6 +325,12 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
   升级后立刻抓到两个真问题：上面的 useWb 环，以及一条用例发现自己没配 fetch（走到错误分支）。
 - **回归用例**（`test/workbench.test.mjs` §24）：`useWb：subscribe 按 url 稳定，store 通知后自动重画`。
   双向验证过——把 `useWb` 改回 inline，它立刻以「setState 循环超过 50 次」红掉。
+- **顺带修一个布局缺陷**（同一次真机联调发现）：`.daw-wb-canvaswrap` 是 `position:absolute;inset:0`，
+  而 `.daw-wb-body` / `.daw-wb-main` / `.daw-wb` 都不是 positioned → 包含块落到初始包含块（视口），
+  **进项目画布后侧栏整个被画布盖住**，且点「需要我处理」报 `intercepts pointer events`。
+  修法是给 `.daw-wb-body` 加 `position:relative`（离画布最近的那层，不必上移）。
+  离线看不见（垫片不算布局），回归用例改成**断言 CSS 契约**：`WB_CSS` 里 `.daw-wb-body` 必须带
+  `position:relative`、`.daw-wb-main` 不必带。
 
 ### 画布 Composer 轻量版 / 已核对 / 规划时提示（2026-11-14 同步页结论落地）
 

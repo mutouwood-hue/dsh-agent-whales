@@ -384,6 +384,26 @@ test("工作台主题：设置切到 dark 时根节点换主题标记", () => {
   plugin.__test.settings.set({ theme: "light" });
 });
 
+test("布局契约：daw-wb-body 必须是 positioned，否则画布盖住侧栏并吃掉点击", () => {
+  // 2026-11-16 真机实测：进项目画布后**侧栏整个消失**，点「需要我处理」报
+  // 「.daw-wb-stage ... intercepts pointer events」。
+  // 根因：`.daw-wb-canvaswrap` 是 position:absolute;inset:0，而 .daw-wb-body /
+  // .daw-wb-main / .daw-wb 都不是 positioned → 包含块落到初始包含块（视口），
+  // 画布铺满视口盖住侧栏，且 .daw-wb-body 的 overflow 也裁不了它
+  // （overflow 只裁包含块链经过自己的后代）。
+  // 离线看不见：jsdom 式垫片不算布局，只有真浏览器的盒子模型会暴露。
+  const { plugin } = loadPlugin();
+  const css = plugin.__test.WB_CSS;
+  // WB_CSS 可能是字符串数组，也可能是拼好的整串（防重构）：两条路都认。
+  const rules = Array.isArray(css) ? css : [String(css)];
+  const joined = rules.join("\n");
+  assert.ok(/\.daw-wb-body\{[^}]*position:relative/.test(joined), "daw-wb-body 必须自己是 positioned，给画布的 inset:0 一个正确的包含块");
+  // 反证：少了这条时画布的包含块会逃出主区
+  assert.ok(!/\.daw-wb-main\{[^}]*position:/.test(joined), "这条规则只需挂在最靠近画布的那层，不必上移到 main");
+  // 顺带钉住画布那两条 absolute 规则还在（它们是被修的一方）
+  assert.match(joined, /\.daw-wb-canvaswrap\{position:absolute;inset:0\}/, "canvaswrap 仍是 inset:0——修的是它的包含块，不是它自己");
+});
+
 test("工作台各页：空数据下都要能渲染（不炸）", () => {
   const { plugin } = loadPlugin();
   installDocumentStub();
