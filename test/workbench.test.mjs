@@ -1757,3 +1757,127 @@ test("useWb：subscribe 按 url 稳定，store 通知后自动重画", async () 
     api.wbCache.reset();
   }
 });
+
+
+// ── 25. 空态引导：新建任务在画布内开弹窗，不崩、不跳走 ───────────────────
+
+test("空态引导：点「新建任务」弹画布内模态，取消关得掉，页面不崩", async () => {
+  // 2026-11-16 真机实测：点「+ 新建任务」→ ReferenceError: views is not defined
+  // → 「slot entry crashed in 'main'」→ 整个工作台白屏（页签全没、节点全没）。
+  // 离线没抓到是因为空 tasks 时那个分支根本不渲染，变量错误要到点下去才暴露。
+  const { shim, mount } = createMount();
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const api = loaded.plugin.__test;
+  loaded.win.fetch = (url) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const ok = (data) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data }) });
+    if (target === "/projects") return ok([{ projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "main" }], links: [], brief: { goal: "g" } }]);
+    if (target === "/projects/p1") return ok({ project: { projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "main" }], links: [], brief: { goal: "g" } } });
+    if (target === "/projects/p1/brief") return ok({ brief: { version: 1, goal: "g", decisions: [], constraints: [] } });
+    if (target === "/projects/p1/mcp-links") return ok({ projectId: "p1", available: [], links: [], members: [{ sessionId: "main" }], mainSessionId: "main" });
+    if (target.startsWith("/tasks?projectId=")) return ok({ source: "project", projectId: "p1", tasks: [] });
+    if (target === "/sessions") return ok({ source: "host", sessions: [{ sessionId: "main", title: "主对话", running: true }] });
+    if (target === "/activity") return ok({ at: Date.now(), active: {} });
+    if (target.startsWith("/canvas")) return ok({ rev: 1, nodes: {} });
+    if (target.startsWith("/inbox")) return ok({ groups: [] });
+    if (target.startsWith("/handoffs")) return ok({ entries: [] });
+    if (target.startsWith("/events")) return ok({ events: [], stats: {}, health: [] });
+    if (target === "/tasks") return ok({ source: "project", tasks: [] });
+    return ok({});
+  };
+  const t = (key, vars) => {
+    const raw = api.WB_TEXT.zh[key];
+    if (raw === undefined) return key;
+    if (!vars) return raw;
+    return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
+  };
+  try {
+    const urls = ["/projects", "/projects/p1", "/projects/p1/brief", "/projects/p1/mcp-links", "/tasks?projectId=p1", "/sessions", "/activity", "/canvas?projectId=p1", "/inbox?projectId=p1", "/handoffs?projectId=p1", "/events?projectId=p1"];
+    for (const url of urls) await api.wbCache.read(url).catch(() => {});
+    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    view.rerender();
+
+    const buttons = [];
+    const collect = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collect); return; }
+      if (typeof node !== "object") return;
+      if (node.type === "button") buttons.push(node);
+      collect(node.props ? node.props.children : undefined);
+    };
+    const textsOf = (node) => {
+      const out = [];
+      const walk = (n) => {
+        if (n === null || n === undefined || typeof n === "boolean") return;
+        if (typeof n === "string") { out.push(n); return; }
+        if (Array.isArray(n)) { n.forEach(walk); return; }
+        if (typeof n !== "object") return;
+        walk(n.props ? n.props.children : undefined);
+      };
+      walk(node);
+      return out.join("");
+    };
+    collect(view.tree);
+    // 引导节点 = 没有 data-kind 的 .daw-wb-node（MCP 占位是 data-kind="guide"）
+    const guides = [];
+    const collectGuides = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collectGuides); return; }
+      if (typeof node !== "object") return;
+      if (typeof node.type === "string" && node.props && typeof node.props.className === "string"
+        && node.props.className.split(" ").indexOf("daw-wb-node") >= 0 && node.props["data-kind"] === undefined) guides.push(node);
+      collectGuides(node.props ? node.props.children : undefined);
+    };
+    collectGuides(view.tree);
+    assert.equal(guides.length, 1, "空画布要有引导节点");
+
+    const newTask = buttons.filter((b) => textsOf(b).indexOf("新建任务") >= 0)[0];
+    assert.ok(newTask, "引导节点要有「新建任务」按钮");
+    // 关键：点了不能抛（抛了就是整个 main 槽位崩掉）
+    assert.doesNotThrow(() => { newTask.props.onClick({ stopPropagation() {} }); view.rerender(); }, "点新建任务不能抛");
+    const modals = [];
+    const collectModals = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collectModals); return; }
+      if (typeof node !== "object") return;
+      if (typeof node.type === "string" && node.props && typeof node.props.className === "string"
+        && node.props.className.split(" ").indexOf("daw-wb-modal") >= 0) modals.push(node);
+      collectModals(node.props ? node.props.children : undefined);
+    };
+    collectModals(view.tree);
+    assert.equal(modals.length, 1, "必须弹出画布内的新建任务模态（不是切页签）");
+    // 页面没崩：节点还在
+    const nodes = [];
+    const collectNodes = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collectNodes); return; }
+      if (typeof node !== "object") return;
+      if (typeof node.type === "string" && node.props && typeof node.props.className === "string"
+        && node.props.className.split(" ").indexOf("daw-wb-node") >= 0) nodes.push(node);
+      collectNodes(node.props ? node.props.children : undefined);
+    };
+    collectNodes(view.tree);
+    assert.ok(nodes.length >= 3, "弹窗开着的时候画布节点也还在（" + nodes.length + " 个）——崩了就会全没");
+    // 取消关得掉（按钮要重新收集：上面的 buttons 是点之前的快照，弹窗里的不在里面）
+    const modalButtons = [];
+    const collectInto = (node, sink) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach((n) => collectInto(n, sink)); return; }
+      if (typeof node !== "object") return;
+      if (node.type === "button") sink.push(node);
+      collectInto(node.props ? node.props.children : undefined, sink);
+    };
+    collectInto(modals[0], modalButtons);
+    const cancel = modalButtons.filter((b) => textsOf(b) === "取消")[0];
+    assert.ok(cancel, "模态里要有取消");
+    cancel.props.onClick({ stopPropagation() {} });
+    view.rerender();
+    modals.length = 0;
+    collectModals(view.tree);
+    assert.equal(modals.length, 0, "取消要能关掉");
+  } finally {
+    api.wbCache.reset();
+  }
+});
