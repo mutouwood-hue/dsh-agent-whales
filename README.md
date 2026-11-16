@@ -9,7 +9,7 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 插件分两半：
 
 - **浏览器半边**（`lib/client.js`）：角色图层、家族树、任务行、气泡与设置页。
-- **宿主半边**（`lib/index.js`）：注册一段「团队协作」系统提示段落、四个串门工具与一个活动接口。
+- **宿主半边**（`lib/index.js`）：注册一段「团队协作」系统提示段落、五个串门工具与一个活动接口。
 
 > ## ⚠️ 装之前必须知道的三件事
 >
@@ -183,7 +183,7 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | 可拖拽 | 开 | — | 允许鼠标把角色拖到任意位置，双击复位；关掉会顺带清空已拖的坐标 |
 | 显示名字 | 关 | — | 每个角色下面显示名字（Lead 显示会话标题） |
 
-面板里还有**一个不属于 `DEFAULTS` 的开关**：**串门工具**（默认开）。它控制的是**宿主侧四个
+面板里还有**一个不属于 `DEFAULTS` 的开关**：**串门工具**（默认开）。它控制的是**宿主侧五个
 `whales_visit_*` 工具注册与否**，所以真相在宿主、不在 `localStorage`——面板显示值来自
 `GET /agent-whales/api/activity` 的 `visitTools` 字段，点开关会 `POST /agent-whales/api/visit-tools`。
 详见下面「串门」一节。
@@ -211,13 +211,14 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 
 ## 串门（自建，不依赖外部插件）
 
-宿主半边自己注册了四个工具，机理与 [`dsh-session-bridge`](https://github.com/heartmove/dsh-session-bridge) 一致（`agent.followup/steer` + 折叠 `session.events`），但只做「去看、去说、去听、去叫醒」这一层：
+宿主半边自己注册了五个工具，机理与 [`dsh-session-bridge`](https://github.com/heartmove/dsh-session-bridge) 一致（`agent.followup/steer` + 折叠 `session.events`），但只做「去看、去说、去听、去叫醒」这一层：
 
 | 工具 | 作用 |
 | --- | --- |
 | `whales_visit_list` | 列出可串门的会话：id / 标题 / 是否在跑 / 所属工作区。只读。 |
 | `whales_visit_send` | 给另一个会话说话。**默认插话**（`mode: "steer"`）：它正在跑的那一轮会在**下一个步边界**注入你这句话，不用等整轮跑完；要排队等它跑完再处理就显式传 `mode: "queue"`。`waitForReply=true` 会阻塞等它回话。 |
-| `whales_visit_read` | 读某个会话最近的对话文本（默认 20 行，上限 100）。 |
+| `whales_visit_read` | 读某个会话最近的对话文本（默认 20 行，上限 100）。**只读活会话**（读内存日志）。 |
+| `whales_visit_trace` | 回放某个会话最近几轮**是怎么干的**：每轮投了什么任务、说过什么、调过哪些工具、哪一步失败与原因、每轮终态。只读、不唤醒、不产生模型调用。走宿主 `sessionQuery.readSession()`——**活会话读内存、离线会话也能读**（读到的是落盘部分）；服务缺失时退到活会话内存快照。`turns` 默认 2、上限 20，正文按条截断并有总量护栏。 |
 | `whales_visit_resume` | 把持久化的离线会话重新拉上线（`agents.resume`，幂等：已在线直接返回），之后才能给它发消息。 |
 
 > **投递方式默认是「插话」（steer）**，2026-10-31 按用户决定改的：智能体之间互相说话不该排队等对方整轮跑完。
@@ -225,7 +226,7 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 > 正在进行的单个步骤（做不到），但也不用等整轮结束。想全局改回排队：给插件 entry 写
 > `config: { visitMode: "queue" }`（兼容 `config: { visitSteer: false }`）；单次调用仍可用 `mode: "queue"`。
 
-**明确不做**：会话创建、离线日志读取、按段落读、看门狗监控、思维链循环检测与任务转移、归档/取消归档——要这些请单独安装 `dsh-session-bridge`（它的工具名是 `session_bridge_*`，与我们不冲突，可以共存）。
+**明确不做**：会话创建、按段落读、看门狗监控、思维链循环检测与任务转移、归档/取消归档——要这些请单独安装 `dsh-session-bridge`（它的工具名是 `session_bridge_*`，与我们不冲突，可以共存）。**离线日志读取已经做了**（`whales_visit_trace` 走 `sessionQuery`），但只有 `whales_visit_trace` 一条路：`whales_visit_read` 仍只读活会话。
 
 装了它之后界面上的表现（气泡会这么说话）：
 
@@ -243,16 +244,16 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 
 ### 串门工具是**可关的**（默认开）
 
-四个工具的 schema 会出现在**每一轮模型请求**里，实测合计约 **1589 字符**（`name` + `description` +
-`parameters`；PTC 模式下 `output.schema` 还会再多约 1430 字符）。同时它们给任何 agent 赋予了
+五个工具的 schema 会出现在**每一轮模型请求**里，实测合计约 **1900 字符**（`name` + `description` +
+`parameters`；PTC 模式下 `output.schema` 还会再多约 1700 字符）。同时它们给任何 agent 赋予了
 「驱动别的会话」的能力——包括 `steer` 打断、`resume` 拉起离线会话。所以给了一个开关：
 
 | 关掉的方式 | 适用 | 说明 |
 |---|---|---|
-| 设置面板 →「串门工具」 | 日常 | 立刻 `POST /agent-whales/api/visit-tools`，宿主**真的把四个工具从工具注册表注销**，不是只藏 UI |
+| 设置面板 →「串门工具」 | 日常 | 立刻 `POST /agent-whales/api/visit-tools`，宿主**真的把五个工具从工具注册表注销**，不是只藏 UI |
 | 插件 entry 的 `config` | 一次性默认关 | 在任意 patch 层写 `- id: agent-whales` + `config: { visitTools: false }`；`apply(ctx, config)` 严格 `=== false` 才关 |
 
-关掉后：模型请求里不再有这四个工具定义；设置面板仍显示真实状态（真相来自宿主，不落 `localStorage`）。
+关掉后：模型请求里不再有这五个工具定义；设置面板仍显示真实状态（真相来自宿主，不落 `localStorage`）。
 重新打开即恢复注册。
 
 **协议**（两个半边就靠它通信，都是本插件的私有路由）：
@@ -806,8 +807,10 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 npm test          # = node --test test/，跑 test/ 下全部 *.test.mjs
 ```
 
-四个文件分工：`client.test.mjs`（基线：契约/计数/素材/排布/家族树/气泡/拖拽/设置/渲染）、
+用例文件分工：`client.test.mjs`（基线：契约/计数/素材/排布/家族树/气泡/拖拽/设置/渲染）、
 `index.test.mjs`（宿主半边）、`client-robustness.test.mjs`（对抗性：畸形输入、缺服务、边界值）、
+`home-paths.test.mjs`（数据根口径：`DSH_HOME` 解析与宿主逐条一致）、
+`visit-trace.test.mjs`（回合轨迹：`foldTurns` / `renderTranscript` 纯函数 + `whales_visit_trace` 读取路径、入参与访问闸，fixture 用真实落盘会话）、
 `workbench.test.mjs`（M6 工作台纯逻辑 + 十屏渲染冒烟 + W1.5 事件台）、
 `workbench-draft.test.mjs`（W2 提案带入与目标条）、
 `workbench-replay.test.mjs`（W2 event_replay UI）、
@@ -842,7 +845,7 @@ node _scratch/preview.mjs
 
 | 文件 | 作用 |
 |---|---|
-| `lib/index.js` | 宿主半边：注册「团队协作」策略段落、MCP 约束层（`mcpLinks` 表 + 全局 `tools.guard()` 只拦 `mcp__` 工具）（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、四个 `whales_visit_*` 串门工具（可运行时开关）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
+| `lib/index.js` | 宿主半边：注册「团队协作」策略段落、MCP 约束层（`mcpLinks` 表 + 全局 `tools.guard()` 只拦 `mcp__` 工具）（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、五个 `whales_visit_*` 串门工具（可运行时开关，其中 `whales_visit_trace` 走 `sessionQuery` 读回合轨迹）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
 | `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层、设置页、状态表情状态机、素材 loader（**不含图片数据**，运行期从宿主路由按皮肤拉）；**M6 项目工作台**（十屏 + 节点画布 + 设计 token，纯逻辑可离线测） |
 | `cordis.patch.yml` | 默认层（**唯一真相**）：插入 `agent-whales` + 团队服务/工具/面板三行，并 `disabled` 掉旧 subagent 四行 |
 | `presets/dsh-agent-whales-worker/` | 执行器 preset（随包分发，`apply` 时装到用户 preset 根；执行 Session 专用，不供手动选择） |
@@ -870,7 +873,7 @@ node _scratch/preview.mjs
 | `test/mcp-canvas.test.mjs` | MCP 约束层浏览器侧纯函数（三类节点派生 / 连线对 / 按会话允许集合 / MCP id 判别 / i18n） |
 | `test/mcp-concurrency-contract.test.mjs` | 探针实测契约的回归（`sessionIdOfAgent` 剥前缀含主会话 / `agent.session.id` 兜底 / 并发确实发生过 / 放行工具里没有 MCP 工具 / 主会话不被当成 worker），fixture 是真机数据 |
 | `test/mcp-canvas-render.test.mjs` | MCP 约束层渲染 + 交互（已连接 chip、Agent 徽标、无服务占位、挂掉不崩、拖线发 POST、判重不发请求、全清发 DELETE） |
-| `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具、活动接口、项目任务表、简报、提案、report、handoffs、inbox、sessions、events 台账与三动作、preset 安装器） |
+| `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具（含 `whales_visit_trace` 的入参与读取路径）、活动接口、项目任务表、简报、提案、report、handoffs、inbox、sessions、events 台账与三动作、preset 安装器） |
 | `test/client-robustness.test.mjs` | 对抗性用例（畸形输入、缺服务、边界值） |
 | `test/meta.test.mjs` | 发布门禁用例（清单契约、`files`/`exports`、patch BOM 与结构、`npm test` 覆盖面） |
 | `test/index.js` | `node --test test/` 的目录入口，导入全部 `*.test.mjs` |
@@ -943,12 +946,12 @@ node _scratch/preview.mjs
   用「尺寸预设·紧凑」或「垂直偏移」调。
 - 已验证 · 串门开关（宿主侧）：`GET /agent-whales/api/activity` 带 `visitTools` + `controlToken`；
   `POST /agent-whales/api/visit-tools` 无/错 token → 403 且状态不变，坏 body → 400，正确 token +
-  `{enabled:false}` → 204 且四个工具**从注册表真的消失**，`{enabled:true}` → 204 恢复且
+  `{enabled:false}` → 204 且五个工具**从注册表真的消失**，`{enabled:true}` → 204 恢复且
   `parameters.type === "object"`；GET/PUT/PATCH/DELETE 打到该路由 → 405；并发 toggle 不重复注册。
 - 已验证 · 串门开关（客户端侧）：点击发出正确的 `x-whales-token` 与 `{enabled}`；403/500/网络失败
   一律把 UI 回滚到宿主真相；未拿到首次快照前开关 `disabled`；连点只发一个请求；老宿主（响应里没有
   `visitTools`）整行隐藏。设置面板显示值**只来自宿主快照，不落 `localStorage`**。
-- 未验证 · 串门开关端到端：「关掉后 4 个工具定义确实不再进模型请求」这条只能由宿主侧注册表证明
+- 未验证 · 串门开关端到端：「关掉后 5 个工具定义确实不再进模型请求」这条只能由宿主侧注册表证明
   （已完成），真实模型请求 payload 未抓包；真实浏览器里点开关、真实 403 触发也未跑。
 - 未验证 · HMR 时序：热重载时若新实例注册早于旧实例注销，可能短暂出现「新实例该工具未注册」，
   客户端下一次轮询会如实显示 `visitTools:false`，重新打开即可自愈；未在真机复现。
