@@ -430,6 +430,12 @@ W2 审核发现的缺口：画布此前只有人能在浏览器里摆，**agent 
 **没有 `node_add` / `node_delete`**：画布节点是**派生**的——上下文节点来自任务落点
 （`worktree` / `execRoot`，§55.3.1）、Agent 节点来自项目成员、Composer 来自主会话。
 允许 agent「增删节点」等于让它伪造这三种事实，所以只开放「摆位置」和「连关联线」。
+
+> **落点入库前归一**（借形 leader-agent 的 realpath 归一思路，只搬归一不搬自动归属）：
+> 尾分隔符、`./`、重复分隔符在宿主侧 `POST /tasks` 入库时修掉；路径已存在时再走
+> `realpath`，把符号链接与 Windows 磁盘大小写一并归一。浏览器半边按同一套词法规则
+> （`wbWhereKey`，另把分隔符折成 `/`）去重——同一个目录的多种写法只会成一个上下文节点。
+> **大小写不折叠**：POSIX 上大小写不同的确是不同目录，Windows 的漂移已由宿主 realpath 修掉。
 ### worker preset（执行器专用）
 
 `presets/dsh-agent-whales-worker/` 随包分发；插件 `apply` 时把它复制到
@@ -811,6 +817,7 @@ npm test          # = node --test test/，跑 test/ 下全部 *.test.mjs
 `index.test.mjs`（宿主半边）、`client-robustness.test.mjs`（对抗性：畸形输入、缺服务、边界值）、
 `home-paths.test.mjs`（数据根口径：`DSH_HOME` 解析与宿主逐条一致）、
 `visit-trace.test.mjs`（回合轨迹：`foldTurns` / `renderTranscript` 纯函数 + `whales_visit_trace` 读取路径、入参与访问闸，fixture 用真实落盘会话）、
+`landing-path.test.mjs`（落点归一：`normalizeLandingPath` / `canonicalLandingPath` 纯函数 + 入库即归一的端到端 + 画布 `wbWhereKey` 去重）、
 `workbench.test.mjs`（M6 工作台纯逻辑 + 十屏渲染冒烟 + W1.5 事件台）、
 `workbench-draft.test.mjs`（W2 提案带入与目标条）、
 `workbench-replay.test.mjs`（W2 event_replay UI）、

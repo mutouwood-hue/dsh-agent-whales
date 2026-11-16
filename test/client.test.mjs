@@ -2749,3 +2749,67 @@ test("M5 P2 简报总预算：12 条长决策共用 2000，超出丢弃并给 om
   const combined = [read.brief && read.brief.goal].concat(read.brief && read.brief.constraints, read.brief && read.brief.decisions, read.conversationBrief && read.conversationBrief.duty, read.conversationBrief && read.conversationBrief.conclusions, read.conversationBrief && read.conversationBrief.artifacts).filter((item) => typeof item === "string");
   assert.ok(combined.length > 0, "必须有内容被返回");
 });
+
+// ── 落点归一：画布上下文节点按同一个目录去重（2026-11-16）──────────────────
+//
+// 借形 fengshenx/dsh-leader-agent 的 realpath 归一思路：落点是手填自由文本，同一个
+// 目录有多种写法（尾分隔符、`./`、重复分隔符、正反斜杠混用）。不归一就会把同一个
+// 目录拆成两个上下文节点——「活在哪跑」悄悄失真，而任务数据一切正常（没有报错）。
+// 宿主侧在落点入库时归一（test/landing-path.test.mjs）；这里测浏览器半边的二道防线。
+
+test("落点 key：同一个目录的各种写法归成一个 key", () => {
+  const { wbWhereKey } = loadPlugin().plugin.__test;
+  const same = [
+    "work/t1",
+    "work/t1/",
+    "work/t1///",
+    "./work/t1",
+    "work/./t1",
+    "work//t1",
+    "work\\t1",
+    "work\\t1\\",
+    "work/a/../t1",
+    "  work/t1  "
+  ];
+  for (const value of same) {
+    assert.equal(wbWhereKey(value), "work/t1", value + " 必须归到 work/t1");
+  }
+  // 带盘符的两种分隔符写法也同一个 key（这条单独验：归到的是它自己，不是 work/t1）
+  assert.equal(wbWhereKey("D:/Repo\\Work/"), wbWhereKey("D:\\Repo\\Work\\"), "混合分隔符折叠后同 key");
+  assert.equal(wbWhereKey("D:/Repo\\Work/"), "D:/Repo/Work");
+  // 不同目录必须是不同 key
+  assert.notEqual(wbWhereKey("work/t1"), wbWhereKey("work/t2"));
+  assert.notEqual(wbWhereKey("work/t1"), wbWhereKey("work/t10"));
+  // UNC 与盘符根的前导分隔符是路径的一部分，不能折掉
+  assert.equal(wbWhereKey("\\\\server\\share\\work\\"), "//server/share/work");
+  assert.equal(wbWhereKey("C:\\"), "C:/");
+  // 大小写不折叠：POSIX 上大小写不同的确是不同目录（Windows 的漂移由宿主 realpath 修）
+  assert.notEqual(wbWhereKey("Work/t1"), wbWhereKey("work/t1"));
+  // 坏输入给空串（空 key 在画布上不成节点）
+  assert.equal(wbWhereKey(undefined), "");
+  assert.equal(wbWhereKey(null), "");
+  assert.equal(wbWhereKey(42), "");
+  assert.equal(wbWhereKey("   "), "");
+  assert.equal(wbWhereKey("."), "", "只剩当前目录语义：按没有落点处理");
+});
+
+test("画布上下文节点：同一目录的多种写法只出一个节点，任务全挂上去", () => {
+  const { wbCanvasNodes } = loadPlugin().plugin.__test;
+  const project = { projectId: "p1", name: "落点", mainSessionId: "s-main", members: [{ sessionId: "s-main", role: "main" }] };
+  const tasks = [
+    { taskId: "t1", subject: "甲", status: "pending", ownerSessionId: null, worktree: "work/t1" },
+    { taskId: "t2", subject: "乙", status: "pending", ownerSessionId: null, worktree: "work/t1/" },
+    { taskId: "t3", subject: "丙", status: "pending", ownerSessionId: null, execRoot: "./work//t1" },
+    { taskId: "t4", subject: "丁", status: "pending", ownerSessionId: null, worktree: "work\\t1" },
+    { taskId: "t5", subject: "另一处", status: "pending", ownerSessionId: null, worktree: "work/t2" },
+    { taskId: "t6", subject: "没落点", status: "pending", ownerSessionId: null }
+  ];
+  const nodes = wbCanvasNodes(project, tasks, [{ sessionId: "s-main", title: "主对话", running: true }]);
+  const contexts = nodes.filter((node) => node.kind === "folder");
+  assert.equal(contexts.length, 2, "work/t1 与 work/t2 两个落点，不是五个");
+  const shared = contexts.filter((node) => node.id === "ctx:work/t1")[0];
+  assert.ok(shared, "work/t1 必须成为上下文节点");
+  assert.equal(shared.tasks.length, 4, "四种写法（含 execRoot）全挂到同一个节点上");
+  assert.equal(shared.title, "work/t1", "标题用首次见到的原样写法");
+  assert.equal(contexts.filter((node) => node.id === "ctx:work/t2").length, 1, "另一个落点单独成节点");
+});
