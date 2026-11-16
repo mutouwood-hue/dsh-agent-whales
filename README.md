@@ -402,8 +402,46 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
   （技能登记表 / 外部引用表 / 研究归档表）；按「画布上有个入口、用户照做发现无路可走」比
   「没有这个入口」更糟的判据（计划文档 §11 最高优先级问题类型），**先不做**，等数据源明确。
 
-### 工作台新增的路由（都在 `/agent-whales/api` 前缀下，读操作不需要 token）
+### 借鉴上游两家：拿了什么、刻意没拿什么（2026-11-16）
 
+对象：`fengshenx/dsh-leader-agent`（同层 DSH bundle）与 `deepseek-ai/chat-demo`（DeepSeek 官方
+聊天前端，**另一层的东西**）。调子是用户定的：「不要为了他改我们的功能，只是如果和我们有接近的
+功能，可以直接拿来用」。
+
+**拿了五处**（每处都在对应章节有详情）：
+
+| 上游 | 拿来什么 | 落在哪 |
+|---|---|---|
+| leader-agent `home-paths.js` | `DSH_HOME` 解析口径（逐条照抄宿主，不 import 宿主包） | `lib/index.js` 数据根 + `test/home-paths.test.mjs` |
+| leader-agent `worker-transcript.js` + `tools/read-worker.js` | 回合级轨迹折叠（turn 边界 / 工具配对 / 失败原因 / 体积护栏） | `whales_visit_trace` + `test/visit-trace.test.mjs` |
+| leader-agent `projects/session-index.js` | realpath 归一**思路**（只搬归一，不搬自动归属） | `normalizeLandingPath` / `wbWhereKey` + `test/landing-path.test.mjs` |
+| leader-agent `skills.js` + `shared/frontmatter.js` | 协议层 skill 随 bundle 分发、模型按需加载 | `skills/whales-project-playbook/` + provider + `test/bundled-skill.test.mjs` |
+| chat-demo 历史导出 | ZIP 导出形状 + 数据边界纪律 | `/api/snapshot` + 快照 ZIP + `test/snapshot-export.test.mjs` |
+
+**刻意没拿**（含理由，避免下次再评估一遍）：
+
+- **完成即唤醒主对话**（leader-agent 的 notification-store + `agent.followup()`）：撞 PRD §38.1
+  「禁宿主代发消息」。**连它的落盘队列一起没拿**——鲸鱼的「需要我处理」四组全是**派生视图**
+  （提案 / 任务 report / store 健康），没有「待投递通知」这个实体；为一个不存在的消费者新增
+  一份存储文件，只会多一条损坏路径。等真有「投递失败要补投」的场景再说。
+- **worker = 普通根会话 + 交付看板**：鲸鱼用 teammate + worker preset + 画布任务板，是同层级的
+  不同实现，换过来等于重写。
+- **身份裁剪工具面**（`tools.restrict({ deny })`）：团队工具是 Agent scope，`restrict` 挡不住，
+  上游自己也只做到告警 + 禁令注入。
+- **按目录自动归属会话**：鲸鱼是显式加入制（一个对话只能属于一个项目，`40701`）。
+- **chat-demo 的 mdast/micromark + GFM + math + PrismJS + KaTeX + Mermaid 自建管线**：
+  单文件 bundle（560KB 门禁）装不下，且宿主有自己的渲染器。
+- **借宿主的 `MarkdownText` 渲染富文本**（本来打算这么做）：**宿主明文禁止**。app.asar 里的
+  插件编写规则原话——「Do not `require('@deepseek-ai/dsh-client-ui-primitives')` or load any
+  other Harness Client package as a module; `dsh.client.inject` entries only order activation
+  and stay allowed. They change without notice, and a throwing component blanks your slot entry
+  （`slot entry crashed in '<slot>'`）」； sanctioned 替代是「Write your own controls instead:
+  copy markup, CSS, and behavior from the primitive's `src/*.tsx`」。所以要做就得**自己写一个
+  最小渲染器**（GFM 子集 + 丢 raw HTML + 链接协议白名单），那是新的不可信文本攻击面——
+  本期的结论是**不做**，简报/report/事件明细继续纯文本展示。上游 leader-agent 的 AGENTS.md
+  说「基线里的宿主包可直接复用」，与宿主自己的规则冲突，以宿主为准。
+
+### 工作台新增的路由（都在 `/agent-whales/api` 前缀下，读操作不需要 token）
 | 路由 | 方法 | 作用 |
 |---|---|---|
 | `/projects` · `/projects/:id` | `GET` | 项目列表 / 单项目（成员、关联线、简报） |
