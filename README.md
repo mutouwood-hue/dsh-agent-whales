@@ -310,7 +310,6 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 `var(--daw-*)`，切主题即换色，没有第二套组件。
 
 ### 真浏览器实跑 + useWb 重订阅环（2026-11-16）
-
 - **新增 `_scratch/live-preview.*`**：把真 `client.js` 弄进真浏览器跑（CDN/本地 React + fetch 垫片 +
   最小 ctx + 真 ReactDOM 挂载）。存在的理由很直接：DSH GUI 要签名 cookie 才进得去，而这类
   「主线程被占满、页面 load 永不触发、且**没有任何报错**」的 bug，只有真 React 能暴露。
@@ -331,6 +330,28 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
   修法是给 `.daw-wb-body` 加 `position:relative`（离画布最近的那层，不必上移）。
   离线看不见（垫片不算布局），回归用例改成**断言 CSS 契约**：`WB_CSS` 里 `.daw-wb-body` 必须带
   `position:relative`、`.daw-wb-main` 不必带。
+
+### tabbit CLI e2e 回归（2026-11-16，借 upstream 五处的验收）
+
+用 Tabbit 的 `tabbit-cli`（`nodejs --task NAME --request-id ID`，PowerShell 下先把多行 JS
+写成**无 BOM 的 UTF-8 文件**再 `< file`，否则中文被管道改写）对**真实的 DSH Web 实例**
+跑了一遍端到端。实例另起（`DSH_HOME` 指到 `.dev/home-e2e`，profile 的 `bundles` 里加
+`dsh-agent-whales`，`node_modules` 用 junction 复用已装好的那份，不联网安装）。
+
+验收结果（真实浏览器，非离线垫片）：
+
+| 项 | 结果 |
+| --- | --- |
+| `GET /agent-whales/api/snapshot` | 200；五文件 `present` 标注正确（缺的给 `null`） |
+| 「导出快照（ZIP）」按钮 | 存在且可点，提示「已导出 1 个文件（ZIP）」 |
+| 落点去重（item#3） | 建 4 条同目录不同写法（`work/e2e-demo` / `work/e2e-demo/` / `./work//e2e-demo` / `work\e2e-demo`）→ 入库前三种归一成 `work/e2e-demo`，画布上**只有 1 个上下文节点**挂着 4 条任务 |
+| 画布布局 | 节点两两求交 **0 处重叠** |
+| 侧栏六个入口 | 项目 / 需要我处理 / 发送记录 / 事件台 / 团队 / 设置 全部可点 |
+| 四个页签 | 画布 / 任务（徽标 4）/ 简报 / 执行 全部可切，内容正常 |
+| 控制台 | 无 `pageerror`、无 `slot entry crashed` |
+
+**这次 e2e 抓到一个离线与单元测试都看不见的真 bug**（画布盖住侧栏，见上一节）。
+另有一条环境侧的观察：新 home 每次加载都弹「开始使用」登录框，脚本要先关掉它才能点别的地方。
 
 ### 画布 Composer 轻量版 / 已核对 / 规划时提示（2026-11-14 同步页结论落地）
 
