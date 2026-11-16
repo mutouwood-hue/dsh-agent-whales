@@ -13,7 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const pluginDir = join(here, "..");
 export const clientPath = join(pluginDir, "lib", "client.js");
 
-/** 极简 React：只支持本插件用到的 createElement + 4 个 hook。 */
+/** 极简 React：只支持本插件用到的 createElement + 5 个 hook。 */
 export function createReactShim() {
   return {
     createElement(type, props, ...children) {
@@ -27,6 +27,12 @@ export function createReactShim() {
       return { current: initial };
     },
     useEffect() {},
+    // 与真 React 同语义：deps 未变就回同一个函数。
+    // 无状态 shim 从不重渲染，直接回 fn 就够（稳定性的意义只在于「跨渲染」）。
+    // 2026-11-16：useWb 靠它把 subscribe 稳定住，否则真浏览器里会重订阅成环。
+    useCallback(fn) {
+      return fn;
+    },
     useSyncExternalStore(_subscribe, getSnapshot) {
       return getSnapshot();
     }
@@ -216,6 +222,38 @@ export function createMount() {
   let passes = 0;
   let tree = null;
 
+  // 轮询定时器收编：wbCache.subscribe 会起 5s setInterval，Node 的测试进程会被它吊着
+  // 永不退出（2026-11-16 实测：每条用例都被报成 HANG，其实只是进程不退）。
+  // 挂载垫片只验「渲染 / 交互」忠实度，不需要真定时器；首次 load 仍会真发（数据要进得来）。
+  // 只收 setInterval，不动 setTimeout——组件里的延迟逻辑照样能跑。
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = function () { return 0; };
+  globalThis.clearInterval = function () {};
+  const restoreTimers = function () {
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+  };
+  if (typeof process === "object" && process && typeof process.on === "function") {
+    process.once("exit", restoreTimers);
+  }
+
+  // store 通知 → 自动重画（真 React 的行为）。没有它，用例必须在每次数据回来后
+  // 手动 rerender()，而且 mount() 那一刻拿到的树永远停在 loading 态——2026-11-16
+  // 就是因此误判过一次「空态入口消失」。
+  let pendingRedraw = false;
+  let currentType = null;
+  let currentProps = null;
+  function scheduleRedraw() {
+    if (pendingRedraw) return;
+    pendingRedraw = true;
+    queueMicrotask(function () {
+      pendingRedraw = false;
+      if (!dirty || currentType === null) return;
+      try { run(currentType, currentProps); } catch (error) { /* 错误留给下一次显式调用暴露 */ }
+    });
+  }
+
   const shim = {
     // client.js 第 36 行是 react.createElement，名字不能改
     createElement: function (type, props) {
@@ -239,26 +277,66 @@ export function createMount() {
       if (!hooks.has(key)) hooks.set(key, { current: initial });
       return hooks.get(key);
     },
+    // 与真 React 同语义：deps 逐项未变就回上一个函数引用。
+    // 2026-11-16：useWb 靠它把 subscribe 稳定住——否则每次渲染都换新 subscribe，
+    // React 会「退订 → 重订阅」，在只有一个订阅者的 URL 上就成环
+    // （真浏览器实测：页面 load 永不触发、主线程被占满、且没有任何报错）。
+    useCallback: function (fn, deps) {
+      const frame = stack[stack.length - 1];
+      const key = frame.id + "#" + frame.index++;
+      if (!hooks.has(key)) hooks.set(key, { fn: fn, deps: deps });
+      const cell = hooks.get(key);
+      const same = Array.isArray(deps) && Array.isArray(cell.deps)
+        && deps.length === cell.deps.length && deps.every((one, i) => one === cell.deps[i]);
+      if (!same) { cell.fn = fn; cell.deps = deps; }
+      return cell.fn;
+    },
     useEffect: function () {},
-    useSyncExternalStore: function (_subscribe, getSnapshot) { return getSnapshot(); }
+    // 忠实模拟 React 的「subscribe 引用变了就退订重订阅」：
+    // 这正是 useWb 传 inline 函数会成环的那条链，旧垫片忽略 subscribe 所以抓不到。
+    // 键必须带调用位（frame.index++）：鲸鱼图层一层里就有 6 个 useSyncExternalStore，
+    // 共用一个键会互相覆盖 → 每次都以为 subscribe 变了 → 无限重订阅。
+    useSyncExternalStore: function (subscribe, getSnapshot) {
+      const frame = stack[stack.length - 1];
+      const key = frame.id + "#" + frame.index++;
+      const cell = hooks.get(key) || { subscribe: null, getSnapshot: null, cleanup: null, value: undefined };
+      if (!hooks.has(key)) hooks.set(key, cell);
+      if (cell.subscribe !== subscribe || cell.getSnapshot !== getSnapshot) {
+        if (typeof cell.cleanup === "function") cell.cleanup();
+        cell.subscribe = subscribe;
+        cell.getSnapshot = getSnapshot;
+        cell.cleanup = typeof subscribe === "function" ? subscribe(function () { dirty = true; scheduleRedraw(); }) : null;
+      }
+      const next = getSnapshot();
+      if (next !== cell.value) { cell.value = next; dirty = true; }
+      return cell.value;
+    }
   };
 
-  function draw(node) {
+  // 按「树路径」给每个组件实例一个稳定键，而不是按组件函数：
+  // 同一个组件的多个实例（如简报页 3 个 WbConversationBrief）会共享一套 hook 格子，
+  // 互相覆盖 → 重订阅永不停 → setState 环（2026-11-16 实测 brief 页挂载即抛）。
+  // 真 React 按 fiber 实例区分，这里用路径近似：树形稳定则路径稳定。
+  function draw(node, key) {
     if (node === null || node === undefined || typeof node === "boolean") return node;
-    if (Array.isArray(node)) return node.map(draw);
+    if (Array.isArray(node)) return node.map((item, i) => draw(item, key + "[" + i + "]"));
     if (typeof node !== "object") return node;
     if (typeof node.type === "function") {
-      stack.push({ id: node.type, index: 0 });
-      const out = draw(node.type(node.props));
+      stack.push({ id: key, index: 0 });
+      const out = draw(node.type(node.props), key + "()");
       stack.pop();
       return out;
     }
     const ref = node.props ? node.props.ref : undefined;
     if (typeof ref === "function") ref(mountedStub());
     else if (ref && typeof ref === "object") ref.current = mountedStub();
+    const children = node.props ? node.props.children : undefined;
+    const drawn = Array.isArray(children)
+      ? children.map((item, i) => draw(item, key + "/" + i))
+      : draw(children, key + "/0");
     return {
       type: node.type,
-      props: Object.assign({}, node.props, { children: draw(node.props ? node.props.children : undefined) })
+      props: Object.assign({}, node.props, { children: drawn })
     };
   }
 
@@ -268,7 +346,7 @@ export function createMount() {
       // 渲染里直接调 setter 会永远不收敛，早炸早发现。
       if (passes > 50) throw new Error("createMount: setState 循环超过 50 次");
       dirty = false;
-      tree = draw({ type: type, props: props });
+      tree = draw({ type: type, props: props }, "root");
     } while (dirty);
     return tree;
   }
@@ -276,10 +354,19 @@ export function createMount() {
   return {
     shim: shim,
     mount: function (type, props) {
+      // 先退订上一轮的所有订阅：React 卸载时会跑 cleanup，垫片不跑就会留下
+      // wbCache 的 5s 轮询，让 node --test 的进程永不退出（2026-11-16 实测）。
+      for (const cell of hooks.values()) {
+        if (cell && typeof cell.cleanup === "function") {
+          try { cell.cleanup(); } catch (error) { /* 退订失败不该挡住下一轮 */ }
+        }
+      }
       hooks.clear();
       passes = 0;
       dirty = true;
       tree = null;
+      currentType = type;
+      currentProps = props;
       run(type, props);
       return {
         get tree() { return tree; },

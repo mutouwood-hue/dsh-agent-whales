@@ -297,7 +297,7 @@ function buttonByText(tree, text) {
   return found;
 }
 
-test("旅程：外壳进新建项目弹窗，填了名称后确认按钮必须可用", () => {
+test("旅程：外壳进新建项目弹窗，填了名称后确认按钮必须可用", async () => {
   // 回归守门：WhaleWorkbench 曾没把 useSessions 传给 WbProjectList（props 不会自动
   // 流向孙组件）→ 列表页 useWbSessions 取不到钩子 → sessionRows 恒为 [] →
   // 「新建项目」的主会话下拉为空、确认按钮永久禁用。用户侧症状：画布建不了项目，
@@ -306,10 +306,28 @@ test("旅程：外壳进新建项目弹窗，填了名称后确认按钮必须�
   // 垫片必须先建再加载：loadPlugin 不传 react 就用默认垫片，那个的 useState
   // setter 是 no-op，「点一下 → 状态变 → 树变」整条链都模拟不出来。
   const { mount, shim } = createMount();
-  const { plugin } = loadPlugin({ react: shim });
+  const { plugin } = loadPlugin({
+    react: shim,
+    // 必须给 fetch：忠实垫片会真的订阅 → 真的发请求。没有它，路由走错误分支，
+    // 空态（「加入已有对话」只在空态出现）就被错误态取代——这条用例 2026-11-16
+    // 就这么红过，当时还以为是产品回归。
+    fetch: (url) => {
+      const target = String(url).replace("/agent-whales/api", "");
+      if (target === "/projects") return { code: 200, msg: "success", data: { projects: [] } };
+      if (target === "/sessions") return { code: 200, msg: "success", data: { sessions: [] } };
+      if (target === "/activity") return { code: 200, msg: "success", data: { at: 0, active: {} } };
+      return { code: 200, msg: "success", data: {} };
+    }
+  });
   installDocumentStub();
   const api = plugin.__test;
   api.wbRoute.set({ kind: "list" });
+  // 先预热缓存再挂载：忠实垫片会真的订阅，而数据是 promise 回来的——
+  // 不预热，mount() 拿到的树还停在 loading 态，空态（「加入已有对话」只在空态出现）
+  // 根本还没渲染。这个文件里的画布用例都是这么写的。
+  for (const url of ["/projects", "/sessions", "/activity"]) {
+    await api.wbCache.read(url).catch(() => {});
+  }
   const state = {
     ids: ["sess-main"],
     byId: { "sess-main": { sessionId: "sess-main", title: "主对话", running: false, origin: "live" } },
@@ -321,6 +339,9 @@ test("旅程：外壳进新建项目弹窗，填了名称后确认按钮必须�
     leadIdOf: (id) => id,
     focusSession: () => true
   });
+  // 等一个宏任务：垫片在 store 通知时自动重画（真 React 的行为），
+  // 而通知是 promise 回调里发出来的——不让事件循环转一圈，树还停在 loading 态。
+  await new Promise((resolve) => setImmediate(resolve));
 
   const openCreate = buttonByText(view.tree, "＋ 新建项目");
   assert.ok(openCreate, "列表页要有「＋ 新建项目」按钮");
@@ -1643,4 +1664,96 @@ test("wbAgentChip：已核对压过已报完工（证据优先）", () => {
   assert.deepEqual(wbAgentChip({ report: { status: "done" }, verified: null }, true), { tone: "ok", key: "done" });
   // 没有核对才看 report
   assert.deepEqual(wbAgentChip({ report: { status: "handed_back" } }, true), { tone: "warn", key: "handed_back" });
+});
+
+
+// ── 24. useWb 的 subscribe 稳定性（真浏览器死循环回归） ───────────────────
+
+test("useWb：subscribe 按 url 稳定，store 通知后自动重画", async () => {
+  // 2026-11-16 真浏览器实测：页面 load 永不触发、主线程被占满、且没有任何报错。
+  // 成因是 useWb 每次渲染都传新的 inline subscribe → React「退订→重订阅」→
+  // wbCache 重订阅再触发一次 load → 同步 publish → 重渲染 → 又换新 subscribe……
+  // 只有一个订阅者的 URL（如 /canvas）上永停。旧垫片忽略 subscribe，结构上抓不到，
+  // 所以这条同时守产品代码与垫片忠实度。
+  const { shim, mount } = createMount();
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const api = loaded.plugin.__test;
+  loaded.win.fetch = (url) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const ok = (data) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data }) });
+    if (target === "/projects") return ok([{ projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1" }], links: [], brief: { goal: "g" } }]);
+    if (target === "/projects/p1") return ok({ project: { projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1" }], links: [], brief: { goal: "g" } } });
+    if (target === "/projects/p1/brief") return ok({ brief: { version: 1, goal: "g", decisions: [], constraints: [] } });
+    if (target === "/projects/p1/mcp-links") return ok({ projectId: "p1", available: [], links: [], members: [{ sessionId: "s1" }], mainSessionId: "main" });
+    if (target.startsWith("/tasks?projectId=")) return ok({ source: "project", projectId: "p1", tasks: [
+      { taskId: "t-1", subject: "接画布", status: "in_progress", ownerSessionId: "s1", worktree: "/d/repo", revision: 3, createdAt: 1 }
+    ] });
+    if (target === "/sessions") return ok({ source: "host", sessions: [{ sessionId: "s1", title: "甲", running: true }] });
+    if (target === "/activity") return ok({ at: Date.now(), active: {} });
+    if (target.startsWith("/canvas")) return ok({ rev: 1, nodes: {} });
+    if (target.startsWith("/inbox")) return ok({ groups: [] });
+    if (target.startsWith("/handoffs")) return ok({ entries: [] });
+    if (target.startsWith("/events")) return ok({ events: [], stats: {}, health: [] });
+    return ok({});
+  };
+  const t = (key, vars) => {
+    const raw = api.WB_TEXT.zh[key];
+    if (raw === undefined) return key;
+    if (!vars) return raw;
+    return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
+  };
+  try {
+    // 订阅计数：subscribe 被调多少次，直接反映「有没有在重订阅」
+    let subscribes = 0;
+    const realSubscribe = api.wbCache.subscribe;
+    api.wbCache.subscribe = function (url, listener) {
+      subscribes += 1;
+      return realSubscribe.call(api.wbCache, url, listener);
+    };
+    // 用任务页：它的 /tasks?projectId= 只有一个订阅者，正是真浏览器里转不动的那个 URL。
+    // （画布页在垫片里复现不出这个环——实测过，别换回去。）
+    const view = mount(api.WbTasksPage, { t: t, projectId: "p1" });
+    const afterMount = subscribes;
+    // 让事件循环转一圈：store 通知（promise 回调）→ 垫片自动重画
+    await new Promise((resolve) => setImmediate(resolve));
+    view.rerender();
+    await new Promise((resolve) => setImmediate(resolve));
+    // 收敛判据：两个相邻 tick 之间订阅次数不再涨。
+    // （树形变化会让路径移位 → 旧格子孤儿化并重新订阅，这是垫片按路径定位的已知代价；
+    //   真 React 按 fiber 位置协调不会这样。要守的是「不停下来」——那才是真浏览器里的死循环。）
+    const settled = subscribes;
+    await new Promise((resolve) => setImmediate(resolve));
+    view.rerender();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(subscribes, settled,
+      "稳定后订阅次数必须收敛（" + afterMount + " → " + settled + " → " + subscribes + "）；一直涨就是真浏览器里那种重订阅成环");
+    assert.ok(subscribes < 40, "订阅次数必须有界（" + subscribes + "），死循环会是几百上千");
+
+    // 关键判据：**单纯重渲染不该引起重订阅**。inline subscribe 每次渲染都是新引用，
+    // React 于是「退订→重订阅」，而 wbCache 的重订阅会再 load 一次（同步 publish）——
+    // 真浏览器里这条链会自己喂自己，直到主线程被占满（页面 load 永不触发、且无任何报错）。
+    // 垫片的渲染环是同步的、microtask 进不来，所以复现不了那个环；但「重渲染 → 重订阅」
+    // 这一步是同步的、测得到，正是环的第一环。
+    const beforeRerender = subscribes;
+    for (let i = 0; i < 4; i += 1) {
+      view.rerender();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(subscribes, beforeRerender,
+      "rerender 不该引起重订阅（" + beforeRerender + " → " + subscribes + "）；inline subscribe 就是这样把环转起来的");
+    // 自动重画真的发生了：任务表把数据渲染出来了（loading 态下它是空的）
+    const rows = [];
+    const collect = (node) => {
+      if (node === null || node === undefined || typeof node === "boolean") return;
+      if (Array.isArray(node)) { node.forEach(collect); return; }
+      if (typeof node !== "object") return;
+      if (typeof node.type === "string" && node.props && typeof node.props.className === "string" && node.props.className.split(" ").indexOf("daw-wb-tr") >= 0) rows.push(node);
+      collect(node.props ? node.props.children : undefined);
+    };
+    collect(view.tree);
+    assert.ok(rows.length >= 1, "数据回来后要能自动重画出任务行（现在 " + rows.length + " 行）");
+  } finally {
+    api.wbCache.reset();
+  }
 });

@@ -296,6 +296,23 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 **主题**默认浅色，设置里可切暗色；两套 token 一一对应（`WB_TOKENS`），组件只引用
 `var(--daw-*)`，切主题即换色，没有第二套组件。
 
+### 真浏览器实跑 + useWb 重订阅环（2026-11-16）
+
+- **新增 `_scratch/live-preview.*`**：把真 `client.js` 弄进真浏览器跑（CDN/本地 React + fetch 垫片 +
+  最小 ctx + 真 ReactDOM 挂载）。存在的理由很直接：DSH GUI 要签名 cookie 才进得去，而这类
+  「主线程被占满、页面 load 永不触发、且**没有任何报错**」的 bug，只有真 React 能暴露。
+- **修 `useWb` 的重订阅环**：原来每次渲染都传新的 inline `subscribe` → React「退订→重订阅」→
+  `wbCache` 重订阅再 `load` 一次 → 同步 `publish` → 重渲染 → 又换新 `subscribe`……在只有一个
+  订阅者的 URL（如 `/canvas`、`/tasks`）上永停。真实宿主只因 fetch 比 effect 慢而被 `inflight`
+  去重挡着，**响应一快就会中招**。改成 `react.useCallback(..., [url])` 按 url 稳定。
+- **测试垫片升级为忠实**（`test/harness.mjs`）：`useSyncExternalStore` 现在真的会
+  「引用变了就退订重订阅」、store 通知会自动重画、按**树路径**给每个组件实例分配 hook 格子
+  （原来按组件函数，同一组件的多个实例会互相覆盖——简报页 3 个 `WbConversationBrief` 就是这么
+  把环转起来的）、挂载前跑 cleanup、收编轮询 `setInterval`（否则测试进程永不退出）。
+  升级后立刻抓到两个真问题：上面的 useWb 环，以及一条用例发现自己没配 fetch（走到错误分支）。
+- **回归用例**（`test/workbench.test.mjs` §24）：`useWb：subscribe 按 url 稳定，store 通知后自动重画`。
+  双向验证过——把 `useWb` 改回 inline，它立刻以「setState 循环超过 50 次」红掉。
+
 ### 画布 Composer 轻量版 / 已核对 / 规划时提示（2026-11-14 同步页结论落地）
 
 > 调子来自同步页 Q1/Q3/Q4 的产品结论（Notion「dsh-agent-whales · PRD/实现/设计 三方同步」）。
@@ -890,8 +907,14 @@ node _scratch/preview.mjs
   提案工具 + confirm→事件台/待办/交接→画布 GET/PUT/GET→MCP 建链幂等 + 不存在服务 40709→
   **跨项目阻塞 40704**→**进程重启后**项目/任务/report/核对字段/画布节点/事件台账全部还在。
   这条补上了一直缺的一角：既有 370 个用例都是「假 fetch + 直接调 handler」，从没验过真实 TCP。
+- **已验证 · 真浏览器（2026-11-16，Tabbit + `_scratch/live-preview`）**：真 React 挂载真 `client.js`，
+  量每个 `.daw-wb-node` 的 `getBoundingClientRect` 并两两求交——**重叠 0 处**；空态引导节点在
+  Composer 正下方（430,470,300），按钮是画布内的「+ 新建任务 / 把目标放入输入框」，不再切页签、
+  不再把用户拽到官方会话面板。同一探针也量出按钮清单与节点种类，供后续回归比对。
 - 未验证 · 真机（DSH GUI）联调：`inputActions` 在主面板是否真的拿得到（拿不到就走剪贴板降级，
-  Composer 上会明说）；560KB bundle 首屏加载时间；D2 preset realm 启动。这些要重启 DSH 才能验。
+  Composer 上会明说）；560KB bundle 首屏加载时间；D2 preset realm 启动。这些要重启 DSH 才能验——
+  GUI 的 launch token 是进程内存里的随机值（`WeakMap` + `randomBytes(32)`），外部拿不到，
+  所以 UI 交互验收需要用户提供带 token 的 URL。
 - 未验证 · 借鉴 troupe 真机：越界提示在真实 report 数据下的观感（现在只有纯函数 + 弹窗接线测试）。
 - 已验证 · 全页面交互冒烟（2026-11-14）：`.prd-tmp/smoke-all-pages.cjs` 用真实 useState 的迷你
   React 挂起 11 个页面，把每个按钮与画布节点点一遍、每个弹窗走一遍「开→取消→遮罩关」——本轮修掉的

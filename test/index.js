@@ -11,6 +11,7 @@
  */
 import "./client.test.mjs";
 import "./index.test.mjs";
+import "./home-paths.test.mjs";
 import "./client-robustness.test.mjs";
 import "./meta.test.mjs";
 import "./workbench.test.mjs";
