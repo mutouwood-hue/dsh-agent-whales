@@ -20,6 +20,7 @@
     "cordis.patch.yml",
     "presets/dsh-agent-whales-worker/preset.yml",
     "presets/dsh-agent-whales-worker/agent.cordis.yml",
+    "skills/*/SKILL.md",
     "locale/*.json",
     "icon.svg",
     "assets/manifest.json",

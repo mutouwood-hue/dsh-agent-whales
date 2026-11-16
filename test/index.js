@@ -14,6 +14,7 @@ import "./index.test.mjs";
 import "./home-paths.test.mjs";
 import "./visit-trace.test.mjs";
 import "./landing-path.test.mjs";
+import "./bundled-skill.test.mjs";
 import "./client-robustness.test.mjs";
 import "./meta.test.mjs";
 import "./workbench.test.mjs";

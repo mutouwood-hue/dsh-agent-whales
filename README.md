@@ -9,7 +9,7 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 插件分两半：
 
 - **浏览器半边**（`lib/client.js`）：角色图层、家族树、任务行、气泡与设置页。
-- **宿主半边**（`lib/index.js`）：注册一段「团队协作」系统提示段落、五个串门工具与一个活动接口。
+- **宿主半边**（`lib/index.js`）：注册一段「团队协作」系统提示段落、五个串门工具、一个随包协议 skill（playbook）与一个活动接口。
 
 > ## ⚠️ 装之前必须知道的三件事
 >
@@ -265,6 +265,18 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 
 `controlToken` 只出现在同源 GET 的响应体里——跨源页面受 CORS 限制读不到响应体，因此拿不到 token，
 伪造的 POST 会被 403。这是**同源证明（CSRF 防护）而不是身份认证**，别把它当鉴权用。
+
+### 随包协议 skill：`whales-project-playbook`
+
+`skills/whales-project-playbook/SKILL.md` 随包分发，宿主半边在 `skills` 服务就绪时用
+`ctx.skills.registerProvider(...)` 注册（provider 名 = 包名，rank **600**；用户在项目里放同名副本
+即可覆盖——项目级 rank 200 优先，与官方 skill-filesystem 的 bundled 语义对齐）。
+
+为什么值得有：本插件的协议很长（提案怎么交、简报怎么省着写、画布为什么不能增删节点、
+串门的访问闸、`已报完工` 与 `已核对` 的边界），全塞系统提示会占**每一轮**的上下文；
+工具 schema 又只说单个工具的用法，不说**顺序与边界**。skill 是「模型要的时候才读」的那一层。
+宿主没有 `skills` 服务或注册失败时静默跳过——协议层是增强，不是必需能力；
+但 `skills/` 目录读不到会 **warn**（发布包漏件不能静默变成「协议层凭空消失」）。
 
 ## 项目工作台（M6 · 节点图画布）
 
@@ -818,6 +830,7 @@ npm test          # = node --test test/，跑 test/ 下全部 *.test.mjs
 `home-paths.test.mjs`（数据根口径：`DSH_HOME` 解析与宿主逐条一致）、
 `visit-trace.test.mjs`（回合轨迹：`foldTurns` / `renderTranscript` 纯函数 + `whales_visit_trace` 读取路径、入参与访问闸，fixture 用真实落盘会话）、
 `landing-path.test.mjs`（落点归一：`normalizeLandingPath` / `canonicalLandingPath` 纯函数 + 入库即归一的端到端 + 画布 `wbWhereKey` 去重）、
+`bundled-skill.test.mjs`（随包协议 skill：frontmatter 解析 / provider 发现与加载 / 缺目录告警 / 注册与卸载 / 仓库副本自身合法）、
 `workbench.test.mjs`（M6 工作台纯逻辑 + 十屏渲染冒烟 + W1.5 事件台）、
 `workbench-draft.test.mjs`（W2 提案带入与目标条）、
 `workbench-replay.test.mjs`（W2 event_replay UI）、
@@ -852,10 +865,11 @@ node _scratch/preview.mjs
 
 | 文件 | 作用 |
 |---|---|
-| `lib/index.js` | 宿主半边：注册「团队协作」策略段落、MCP 约束层（`mcpLinks` 表 + 全局 `tools.guard()` 只拦 `mcp__` 工具）（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、五个 `whales_visit_*` 串门工具（可运行时开关，其中 `whales_visit_trace` 走 `sessionQuery` 读回合轨迹）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
+| `lib/index.js` | 宿主半边：注册「团队协作」策略段落、MCP 约束层（`mcpLinks` 表 + 全局 `tools.guard()` 只拦 `mcp__` 工具）（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、五个 `whales_visit_*` 串门工具（可运行时开关，其中 `whales_visit_trace` 走 `sessionQuery` 读回合轨迹）、随包协议 skill provider（`skills/` → `ctx.skills`，rank 600 可被项目副本覆盖）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
 | `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层、设置页、状态表情状态机、素材 loader（**不含图片数据**，运行期从宿主路由按皮肤拉）；**M6 项目工作台**（十屏 + 节点画布 + 设计 token，纯逻辑可离线测） |
 | `cordis.patch.yml` | 默认层（**唯一真相**）：插入 `agent-whales` + 团队服务/工具/面板三行，并 `disabled` 掉旧 subagent 四行 |
 | `presets/dsh-agent-whales-worker/` | 执行器 preset（随包分发，`apply` 时装到用户 preset 根；执行 Session 专用，不供手动选择） |
+| `skills/whales-project-playbook/SKILL.md` | 随包协议 skill：模型按需加载的项目协作手册（派活 / 盯进度 / 简报 / 画布 / 串门 / 台账与边界），经 `ctx.skills.registerProvider` 注册，rank 600——项目内放同名副本（rank 200）即可覆盖 |
 | `assets/*.webp` | 28 张精灵图（**随包分发**，运行期由宿主路由按皮肤提供；另 2 张 Martty 像素小人的 PNG 源在 `assets/pet/`） |
 | `assets/manifest.json` | 运行期素材清单：`{version, keys:{key:{w,h,bytes,skin}}}`，宿主路由的白名单来源（2.8KB） |
 | `assets/pet/` | 经典皮肤的两张上游 PNG（Martty，MIT）+ 复现说明；`c-idle` / `c-work` 的唯一源 |

@@ -1429,8 +1429,8 @@ test("宿主 apply：服务晚到时用 ctx.inject 等就绪再注册，而不�
 
   assert.deepEqual(
     injectHost.state.injected.map((entry) => entry.names.join("+")).sort(),
-    ["systemPrompt", "tools", "webServer"],
-    "systemPrompt / tools / webServer 三个依赖都必须走 ctx.inject"
+    ["skills", "systemPrompt", "tools", "webServer"],
+    "skills / systemPrompt / tools / webServer 四个依赖都必须走 ctx.inject"
   );
   assert.deepEqual(Object.keys(injectHost.state.tools), [], "服务没就绪前不得注册工具（旧实现的 bug）");
   assert.equal(injectHost.state.routes.length, 0, "服务没就绪前不得注册路由");
