@@ -3794,12 +3794,74 @@ describe("v2.2 波次 5：whales_flow_read / whales_flow_draw", () => {
     edges: [{ from: "s", to: "chk" }, { from: "chk", to: "map", label: "否" }, { from: "chk", to: "ghost", label: "是" }]
   };
 
-  test("flow_read：列出可引用消息编号；非项目会话明确拒绝", async () => {
+  test("flow_read：列出可引用消息编号；非项目会话只读不建项目（flows 空 + 提示）", async () => {
     const { h } = await setup();
     const read = await h.tools.whales_flow_read.execute({}, as);
     assert.deepEqual(read.messages.map((row) => row.ref), ["m1", "m2", "m3"]);
     assert.deepEqual(read.flows, []);
-    await assert.rejects(h.tools.whales_flow_read.execute({}, { agent: { id: "session-old" } }), /不属于任何/);
+    const before = (await h.call("GET", "/agent-whales/api/projects")).body.data.projects.length;
+    const outside = await h.tools.whales_flow_read.execute({}, { agent: { id: "session-old" } });
+    assert.equal(outside.projectId, null);
+    assert.deepEqual(outside.flows, []);
+    assert.match(outside.note, /自动/);
+    assert.equal((await h.call("GET", "/agent-whales/api/projects")).body.data.projects.length, before, "read 不能建项目");
+  });
+
+  test("对话内直接激活：不在项目里的对话首次画图就地建项目（主对话 = 自己，名字取会话标题）", async () => {
+    const h = await m6Harness();
+    host.setEventsStorePathForTests(join(h.dir, "events.json"));
+    const asB = { agent: { id: "session-b" } };
+    h.sessionLogs.set("session-b", [user(1, "导入要先校验表头"), assistant(2, "好，表头不对就给映射建议")]);
+    const thin = await h.tools.whales_flow_draw.execute({ title: "x", nodes: [{ key: "a", shape: "step", text: "一步", sourceMessageIds: ["m1"] }] }, asB);
+    assert.equal(thin.drawn, false);
+    assert.deepEqual((await h.call("GET", "/agent-whales/api/projects")).body.data.projects, [], "画不出来的调用不建项目");
+    const result = await h.tools.whales_flow_draw.execute(flow, asB);
+    assert.equal(result.drawn, true, JSON.stringify(result));
+    assert.equal(result.projectCreated, true);
+    assert.equal(result.projectName, "组员会话");
+    assert.match(result.projectNote, /自动建了项目「组员会话」/);
+    const projects = (await h.call("GET", "/agent-whales/api/projects")).body.data.projects;
+    assert.equal(projects.length, 1);
+    assert.equal(projects[0].mainSessionId, "session-b");
+    assert.equal(projects[0].origin, "conversation");
+    const canvas = await h.call("GET", `/agent-whales/api/canvas?projectId=${projects[0].projectId}`);
+    assert.ok(canvas.body.data.elements.find((el) => el.id === "flow:main"), "图落在新项目的画布上");
+    // 第二次：已经在项目里，不再新建
+    const proto = await h.tools.whales_prototype_draw.execute({ title: "导入弹窗", sourceMessageIds: ["m1"], puck: { content: [{ type: "Heading", props: { text: "导入" } }] } }, asB);
+    assert.equal(proto.drawn, true, JSON.stringify(proto));
+    assert.equal(proto.projectCreated, false);
+    assert.equal(proto.projectId, projects[0].projectId);
+    assert.equal((await h.call("GET", "/agent-whales/api/projects")).body.data.projects.length, 1);
+  });
+
+  test("对话内直接激活：子会话画图时以根会话建项目并把父链登记进去；父已在项目 → 并入；被移出过 → 不拉回", async () => {
+    const h = await m6Harness();
+    host.setEventsStorePathForTests(join(h.dir, "events.json"));
+    const asWorker = { agent: { id: "session-worker" } };
+    h.sessionLogs.set("session-worker", [user(1, "导入要先校验表头"), assistant(2, "好，表头不对就给映射建议")]);
+    const created = await h.tools.whales_flow_draw.execute(flow, asWorker);
+    assert.equal(created.projectCreated, true, JSON.stringify(created));
+    let project = (await h.call("GET", "/agent-whales/api/projects")).body.data.projects[0];
+    assert.equal(project.mainSessionId, "session-a", "根会话当主对话，不让子代理当主");
+    assert.equal(project.name, "主线会话");
+    assert.ok(project.members.some((m) => m.sessionId === "session-worker" && m.parentSessionId === "session-a"));
+    assert.ok(project.links.some((link) => [link.a, link.b].sort().join("~") === "session-a~session-worker"));
+
+    const h2 = await m6Harness();
+    host.setEventsStorePathForTests(join(h2.dir, "events.json"));
+    const projectId = await createProject(h2);
+    h2.sessionLogs.set("session-worker", [user(1, "导入要先校验表头"), assistant(2, "好，表头不对就给映射建议")]);
+    const joined = await h2.tools.whales_flow_draw.execute(flow, asWorker);
+    assert.equal(joined.projectCreated, false);
+    assert.equal(joined.projectJoined, true);
+    assert.equal(joined.projectId, projectId);
+    // 用户把子会话移出 → 再画不拉回、也不另建
+    await h2.call("DELETE", `/agent-whales/api/projects/${projectId}/members/session-worker`);
+    project = (await h2.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project;
+    assert.deepEqual(project.dismissed, ["session-worker"]);
+    h2.sessionLogs.set("session-worker", h2.sessionLogs.get("session-worker").concat([user(3, "a"), user(4, "b")]));
+    await assert.rejects(h2.tools.whales_flow_draw.execute(flow, asWorker), /移出过/);
+    assert.equal((await h2.call("GET", "/agent-whales/api/projects")).body.data.projects.length, 1);
   });
 
   test("flow_draw：没证据的节点丢掉（含编造的 m99），边跟着丢；直接落画布、带 agent 来源与消息证据", async () => {

@@ -671,6 +671,8 @@ test("宿主半边：注册团队协作策略，拿不到 systemPrompt 或注册
     assert.equal(sections.length, 3, "团队策略段 + ultra 段 + 流程图段（v2.2 波次 5）");
     const flow = sections.find((section) => section.name === "agent-whales:flow");
     assert.ok(flow && flow.text.includes("whales_flow_draw") && flow.text.includes("sourceMessageIds"), "流程图段必须点名 flow 工具与证据要求（四层机制第 2 层）");
+    assert.equal(flow.text.includes("当前对话属于某个鲸鱼项目"), false, "不能再把「已在项目里」当画图前提：对话内直接激活");
+    assert.ok(flow.text.includes("projectCreated"), "要告诉模型首次画图会自动建项目、并转述给用户");
     const byName = new Map(sections.map((section) => [section.name, section]));
     assert.ok(byName.has("agent-whales/team-policy"), "团队策略段必须在");
     assert.ok(byName.has("agent-whales/ultra"), "ultra 段必须在");

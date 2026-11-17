@@ -329,6 +329,36 @@ test("目标条：没有提案时整个条不渲染——不占传统对话的�
   assert.equal(buttonsOf(tree).length, 0, "更不该放按钮");
 });
 
+test("目标条：对话已属于某个项目（含对话内画图自动建的）→ 只给一条窄的「打开画布」，点了进那个项目的画布", async () => {
+  const { plugin } = loadPlugin();
+  installDocumentStub();
+  const api = plugin.__test;
+  await prime(api, { "/projects": { projects: [{ projectId: "proj-chat", name: "素材替换方案", mainSessionId: "s-main", members: [], origin: "conversation" }] } });
+  try {
+    const tree = render(h(api.WhaleGoalBar, goalProps(api)));
+    assert.ok(tree, "在项目里就要有入口");
+    const texts = [];
+    collectText(tree, texts);
+    assert.ok(texts.join("|").includes("素材替换方案"));
+    const buttons = buttonsOf(tree);
+    assert.equal(buttons.length, 1);
+    assert.equal(buttons[0].props.children, "打开画布");
+    buttons[0].props.onClick();
+    assert.deepEqual(api.wbRoute.get(), { kind: "workbench", projectId: "proj-chat", tab: "canvas" });
+  } finally {
+    api.wbRoute.set({ kind: "list" });
+  }
+});
+
+test("wbProjectOfSession：主对话或成员都算，按 ids 顺序找，找不到给 null", () => {
+  const { wbProjectOfSession } = testApi();
+  const projects = { projects: [{ projectId: "p1", mainSessionId: "s-a", members: [{ sessionId: "s-w" }] }, { projectId: "p2", mainSessionId: "s-b" }] };
+  assert.equal(wbProjectOfSession(projects, ["s-w"]).projectId, "p1");
+  assert.equal(wbProjectOfSession(projects, [undefined, "s-b"]).projectId, "p2");
+  assert.equal(wbProjectOfSession(projects, ["s-x"]), null);
+  assert.equal(wbProjectOfSession(undefined, ["s-a"]), null);
+});
+
 test("目标条：提案接口报错时也不渲染（拿不到数据就不表态）", async () => {
   const { plugin } = loadPlugin();
   installDocumentStub();
