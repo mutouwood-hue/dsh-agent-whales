@@ -15,7 +15,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -31,6 +31,9 @@ const ISOLATED_STORE_DIR = mkdtempSync(join(tmpdir(), "aw-index-"));
 host.setProjectStorePathForTests(join(ISOLATED_STORE_DIR, "projects.json"));
 host.setProposalStorePathForTests(join(ISOLATED_STORE_DIR, "proposals.json"));
 host.setHandoffsStorePathForTests(join(ISOLATED_STORE_DIR, "handoffs.json"));
+// ultra 模式（2026-11-16）：状态文件同样指到临时目录——否则本文件的用例会读写真实的
+// ~/.dsh/agent-whales/ultra.json，把用户机器上的开关状态当成测试副作用翻掉。
+host.setUltraModePathForTests(join(ISOLATED_STORE_DIR, "ultra.json"));
 // W1：preset 安装器的目标根也指向临时目录——否则本文件每次 host.apply 都会往真实
 // ~/.dsh/.agent-presets 写文件（那是生产行为，不该由单元测试触发）。
 process.env.DSH_AGENT_WHALES_PRESET_DIR = join(ISOLATED_STORE_DIR, "presets");
@@ -835,7 +838,8 @@ test("宿主 apply：tools.register 抛错只丢工具能力，不影响策略�
     effect(run) { return run(); },
     on() { return () => {}; }
   });
-  assert.equal(sections.length, 1, "团队策略仍然注册");
+  assert.equal(sections.length, 3, "团队策略、ultra 段与流程图段（v2.2 波次 5）都注册");
+  assert.deepEqual(sections.map((section) => section.name).sort(), ["agent-whales/team-policy", "agent-whales/ultra", "agent-whales:flow"].sort());
   assert.equal(routes.length, 1, "活动路由仍然注册");
 });
 
@@ -996,6 +1000,202 @@ test("串门工具开关：config.visitTools=false 时初始不注册，POST 仍
   assert.equal(turnedOn.status, 204);
   assert.deepEqual(visitToolNames(registry), KNOWN_TOOLS.slice().sort());
   assert.equal(getActivity(route).visitTools, true);
+});
+
+// ── 8b) ultra 模式：强制加载 deep-effort 执行契约 ──────────────────────────
+//
+// 2026-11-16：用户用四臂对照实验蒸馏出 deep-effort（49 行执行契约），随插件分发；
+// ultra 模式打开时把正文注册成系统提示段，关掉时交空段。开关走设置页 → POST /api/ultra，
+// 状态落盘 ultra.json，重启后仍保持（用户明确要求「记住」）。
+
+const ULTRA_FILE = join(ISOLATED_STORE_DIR, "ultra.json");
+
+/**
+ * 挂一个带 systemPrompt + webServer 的假宿主；ultraFile 可换状态文件路径（隔离用）。
+ *
+ * 每次都显式 setUltraModePathForTests：汇总执行（test/index.js）时多个测试文件共享模块状态，
+ * bundled-skill.test.mjs 在 import 阶段就把路径指到它自己的临时目录了——不显式指回，
+ * 本文件的用例会读写到别人的文件上去。
+ */
+function mountUltraHost(config, ultraFile) {
+	host.setUltraModePathForTests(ultraFile === undefined ? ULTRA_FILE : ultraFile);
+	const sections = [];
+	const routes = [];
+	host.apply({
+		get(name) {
+			if (name === "systemPrompt") return { section(section) { sections.push(section); return () => {}; } };
+			if (name === "webServer") return { register(route) { routes.push(route); return () => {}; } };
+			return undefined;
+		},
+		effect(run) { return run(); },
+		on() { return () => {}; }
+	}, config);
+	assert.equal(routes.length, 1, "活动路由必须挂载一次");
+	return { sections, route: routes[0] };
+}
+
+/** 取 ultra 段（按名字找，避免依赖注册顺序）。 */
+function ultraSection(sections) {
+	const section = sections.find((item) => item.name === "agent-whales/ultra");
+	assert.ok(section, "ultra 段必须注册");
+	return section;
+}
+
+/** POST /agent-whales/api/ultra（请求体语义与 postVisitTools 相同）。 */
+function postUltra(route, options = {}) {
+	const { token, body, method = "POST" } = options;
+	return new Promise((resolve, reject) => {
+		const req = new EventEmitter();
+		req.method = method;
+		req.url = "/agent-whales/api/ultra";
+		req.headers = token === undefined ? {} : { "x-whales-token": token };
+		const headers = {};
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			reject(new Error("POST /ultra 1s 内没有响应（handler 可能挂起）"));
+		}, 1_000);
+		const res = {
+			statusCode: 0,
+			headersSent: false,
+			setHeader(key, value) { headers[String(key).toLowerCase()] = value; },
+			end(text) {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				this.headersSent = true;
+				resolve({ status: this.statusCode, headers, body: text });
+			}
+		};
+		try {
+			route.handler(req, res);
+		} catch (error) {
+			settled = true;
+			clearTimeout(timer);
+			reject(error);
+			return;
+		}
+		setImmediate(() => {
+			if (settled) return;
+			try {
+				if (body !== undefined) req.emit("data", Buffer.isBuffer(body) ? body : Buffer.from(body));
+				req.emit("end");
+			} catch (error) {
+				if (!settled) { settled = true; clearTimeout(timer); reject(error); }
+			}
+		});
+	});
+}
+
+test("ultra 模式：默认关闭——GET 回 ultra=false，提示段交空串（不占 token）", () => {
+	rmSync(ULTRA_FILE, { force: true });
+	const { sections, route } = mountUltraHost();
+	const snapshot = getActivity(route);
+	assert.equal(snapshot.ultra, false, "无持久化文件、无 config 时默认关");
+	assert.equal(ultraSection(sections).text(), "", "关闭时整段消失（renderPrompt 过滤空段）");
+});
+
+test("ultra 模式：config.ultra=true 时默认打开，段里是 deep-effort 正文", () => {
+	rmSync(ULTRA_FILE, { force: true });
+	const { sections, route } = mountUltraHost({ ultra: true });
+	assert.equal(getActivity(route).ultra, true, "config 可以一劳永逸改默认");
+	const text = ultraSection(sections).text();
+	assert.ok(text.includes("先取证"), "契约四条硬要求要在段里");
+	assert.ok(text.includes("必须自验"), "契约四条硬要求要在段里");
+	assert.ok(text.includes("不要再调用 skill 工具加载 deep-effort"), "要有防重复加载的表头");
+	assert.ok(text.includes("效果优先"), "成本立场要在段里");
+});
+
+test("ultra 模式：无 token / 错 token 403，坏 body 400，都不改状态与文件", async () => {
+	rmSync(ULTRA_FILE, { force: true });
+	const { route } = mountUltraHost();
+	const token = getActivity(route).controlToken;
+
+	assert.equal((await postUltra(route, { body: JSON.stringify({ enabled: true }) })).status, 403, "无 token 必须 403");
+	assert.equal((await postUltra(route, { token: "deadbeef", body: JSON.stringify({ enabled: true }) })).status, 403, "错 token 必须 403");
+	assert.equal((await postUltra(route, { token, method: "GET" })).status, 405, "开关路由只接受 POST");
+	for (const body of ["", "not-json", "null", "[]", '{"enabled":"false"}', '{"enabled":1}', "{}"]) {
+		assert.equal((await postUltra(route, { token, body })).status, 400, "body=" + JSON.stringify(body) + " 必须 400");
+	}
+	assert.equal(getActivity(route).ultra, false, "失败的请求不得改变开关真相");
+	assert.equal(existsSync(ULTRA_FILE), false, "失败的请求不得落盘");
+});
+
+test("ultra 模式：{enabled:true} → 204，GET 与段文本即时翻转，状态落盘", async () => {
+	rmSync(ULTRA_FILE, { force: true });
+	const { sections, route } = mountUltraHost();
+	const token = getActivity(route).controlToken;
+
+	const turnedOn = await postUltra(route, { token, body: JSON.stringify({ enabled: true }) });
+	assert.equal(turnedOn.status, 204);
+	assert.equal(getActivity(route).ultra, true, "GET 必须立刻反映打开状态");
+	assert.ok(ultraSection(sections).text().includes("先取证"), "打开后段里要有契约正文");
+
+	const persisted = JSON.parse(readFileSync(ULTRA_FILE, "utf8"));
+	assert.equal(persisted.enabled, true, "状态必须落盘（用户要求重启后仍生效）");
+	assert.equal(typeof persisted.updatedAt, "number", "带时间戳便于排查");
+
+	const turnedOff = await postUltra(route, { token, body: JSON.stringify({ enabled: false }) });
+	assert.equal(turnedOff.status, 204);
+	assert.equal(getActivity(route).ultra, false);
+	assert.equal(ultraSection(sections).text(), "", "关掉后段回到空串");
+	assert.equal(JSON.parse(readFileSync(ULTRA_FILE, "utf8")).enabled, false, "关闭也要落盘");
+});
+
+test("ultra 模式：重启（重新 apply）后读持久化文件，开关保持", () => {
+	rmSync(ULTRA_FILE, { force: true });
+	const first = mountUltraHost();
+	const token = getActivity(first.route).controlToken;
+	// 同步等落盘：POST 的 setEnabled 先写盘再翻内存，204 回来时文件已经写好了。
+	return postUltra(first.route, { token, body: JSON.stringify({ enabled: true }) }).then((result) => {
+		assert.equal(result.status, 204);
+		// 模拟 DSH 重启：同一个状态文件、全新的插件实例。
+		const second = mountUltraHost();
+		assert.equal(getActivity(second.route).ultra, true, "重启后必须还是打开的");
+		assert.ok(ultraSection(second.sections).text().includes("先取证"), "重启后契约照样强制加载");
+	});
+});
+
+test("ultra 模式：持久化优先于 config（文件说关，config 说开也没用）", () => {
+	writeFileSync(ULTRA_FILE, JSON.stringify({ enabled: false, updatedAt: 1 }), "utf8");
+	const { sections, route } = mountUltraHost({ ultra: true });
+	assert.equal(getActivity(route).ultra, false, "用户翻过的开关不能被 config 默认值盖掉");
+	assert.equal(ultraSection(sections).text(), "");
+});
+
+test("ultra 模式：状态文件损坏时不抛，退回 config 默认并进入只读", () => {
+	const broken = join(ISOLATED_STORE_DIR, "ultra-broken.json");
+	writeFileSync(broken, "{ not json", "utf8");
+	try {
+		const { sections, route } = mountUltraHost(undefined, broken);
+		assert.equal(getActivity(route).ultra, false, "坏文件按「没有持久化」处理");
+		assert.equal(ultraSection(sections).text(), "");
+		const backups = readdirSync(ISOLATED_STORE_DIR).filter((name) => name.startsWith("ultra-broken.json.corrupt-"));
+		assert.ok(backups.length >= 1, "坏文件必须被备份而不是静默丢弃");
+	} finally {
+		for (const name of readdirSync(ISOLATED_STORE_DIR)) {
+			if (name.startsWith("ultra-broken.json")) rmSync(join(ISOLATED_STORE_DIR, name), { force: true });
+		}
+		host.setUltraModePathForTests(ULTRA_FILE);
+	}
+});
+
+test("ultra 模式：落盘失败（只读降级）时 POST 回 500，内存状态不翻", async () => {
+	// 把状态文件路径占成一个目录：读抛 EISDIR → 只读降级；写也必然失败。
+	const asDirectory = join(ISOLATED_STORE_DIR, "ultra-as-dir");
+	rmSync(asDirectory, { recursive: true, force: true });
+	mkdirSync(asDirectory, { recursive: true });
+	try {
+		const { route } = mountUltraHost(undefined, asDirectory);
+		const token = getActivity(route).controlToken;
+		const result = await postUltra(route, { token, body: JSON.stringify({ enabled: true }) });
+		assert.equal(result.status, 500, "持久化是这个开关的硬承诺：写不进去必须明说失败");
+		assert.equal(getActivity(route).ultra, false, "内存状态不得翻——否则界面显示开着、重启后却关了");
+	} finally {
+		rmSync(asDirectory, { recursive: true, force: true });
+		host.setUltraModePathForTests(ULTRA_FILE);
+	}
 });
 
 // ── 9. tools/execute 采集：脏事件不污染活动表、不中断 waterfall ──────────
@@ -1429,8 +1629,9 @@ test("宿主 apply：服务晚到时用 ctx.inject 等就绪再注册，而不�
 
   assert.deepEqual(
     injectHost.state.injected.map((entry) => entry.names.join("+")).sort(),
-    ["skills", "systemPrompt", "tools", "webServer"],
-    "skills / systemPrompt / tools / webServer 四个依赖都必须走 ctx.inject"
+    // systemPrompt 出现三次：团队策略段、ultra 段与流程图段（v2.2 波次 5）各自一条（各自兜底，互不拖累）。
+    ["skills", "systemPrompt", "systemPrompt", "systemPrompt", "tools", "webServer"],
+    "skills / systemPrompt×2 / tools / webServer 这些依赖都必须走 ctx.inject"
   );
   assert.deepEqual(Object.keys(injectHost.state.tools), [], "服务没就绪前不得注册工具（旧实现的 bug）");
   assert.equal(injectHost.state.routes.length, 0, "服务没就绪前不得注册路由");
@@ -1441,8 +1642,12 @@ test("宿主 apply：服务晚到时用 ctx.inject 等就绪再注册，而不�
   assert.equal(injectedToolNames.filter((name) => name.startsWith("whales_visit_")).length, 5, "tools 就绪后五个串门工具必须全部注册");
   assert.ok(injectedToolNames.includes("whales_propose_tasks"), "tools 就绪后提案工具也必须注册");
   assert.equal(injectHost.state.routes.length, 1, "webServer 就绪后路由必须注册");
-  assert.equal(injectHost.state.sections.length, 1, "systemPrompt 就绪后策略段必须注册");
-  assert.equal(injectHost.state.sections[0].name, "agent-whales/team-policy");
+  assert.equal(injectHost.state.sections.length, 3, "systemPrompt 就绪后团队策略段、ultra 段与流程图段都必须注册");
+  assert.deepEqual(
+    injectHost.state.sections.map((section) => section.name).sort(),
+    ["agent-whales/team-policy", "agent-whales/ultra", "agent-whales:flow"].sort(),
+    "段的名字与顺序无关，按名字比对"
+  );
 
   // 路由真的能服务请求（素材路由是 D1 的产物，最容易被这个 bug 打掉）。
   const manifest = callRoute(injectHost.state.routes[0], { method: "GET", url: "/agent-whales/api/art/manifest" });
@@ -1490,7 +1695,7 @@ test("宿主 apply：服务重载（作用域释放 + 重新注入）不重复�
   host.apply(injectHost.ctx);
   flushInjected(injectHost);
   const toolCount = Object.keys(injectHost.state.tools).length;
-  assert.equal(toolCount, 13, "5 个串门工具 + 提案工具 + 2 个简报工具 + 5 个画布工具");
+  assert.equal(toolCount, 16, "5 个串门工具 + 提案工具 + 2 个简报工具 + 2 个流程图工具 + 原型工具 + 5 个画布工具");
   assert.equal(injectHost.state.routes.length, 1);
 
   disposeInjected(injectHost);
@@ -1517,7 +1722,7 @@ test("M5 系统提示：团队策略段含「项目简报（按需读取）」�
 // webServer 路由与 sessions/agents/sessionPersistence，store 每个用例一份临时目录。
 
 /** M6 专用假宿主：路由 + 三个只读会话服务 + tools；store 指向本用例专属临时目录。 */
-function m6Harness() {
+function m6Harness(extraServices = {}) {
   const dir = mkdtempSync(join(tmpdir(), "aw-m6-"));
   host.setProjectStorePathForTests(join(dir, "projects.json"));
   host.setProposalStorePathForTests(join(dir, "proposals.json"));
@@ -1542,6 +1747,8 @@ function m6Harness() {
   const archived = new Set(["session-old"]);
   host.apply({
     get(name) {
+      // v2.2 波次 2（只加不改）：用例可额外注入服务（sessionController / workspaceRegistry）。
+      if (Object.prototype.hasOwnProperty.call(extraServices, name)) return extraServices[name];
       if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
       if (name === "sessions") return {
         list: () => rows.map((row) => Object.assign({}, row)),
@@ -1595,7 +1802,7 @@ function m6Harness() {
     });
     let parsed;
     try { parsed = JSON.parse(settled.body); } catch (error) { parsed = undefined; }
-    return { status: settled.status, headers: settled.headers, body: parsed };
+    return { status: settled.status, headers: settled.headers, body: parsed, text: settled.body === undefined ? "" : String(settled.body) };
   }
   return {
     dir,
@@ -1604,6 +1811,10 @@ function m6Harness() {
     route,
     sessionLogs,
     listeners,
+    /** v2.2 波次 6（只加不改）：拿原始响应正文（组件包 bundle.js / styles.css 不是 JSON）。 */
+    rawText(method, url) {
+      return request(method, url, {}, undefined);
+    },
     /** 带同源 token 的常规调用。 */
     call(method, url, body) {
       const headers = token === undefined ? {} : { "x-whales-token": token };
@@ -3179,5 +3390,576 @@ describe("Q3 已核对（verify 命令）与 Q4 规划时提示", () => {
     const hint = await assign(libOther, "session-b", "q4-4");
     assert.ok(typeof hint === "string" && hint.indexOf("建议补一条依赖") >= 0, "重叠且无顺序必须提示");
     assert.ok(hint.indexOf(lib) >= 0, "提示要指认对手任务：" + hint);
+  });
+});
+
+// ── 画布优先（PRD v2.2 九（续二））：画布 Composer 读主对话回复 ───────────────────
+describe("画布优先 GET /agent-whales/api/sessions/:id/messages", () => {
+  const userEvent = (seq, text) => ({ type: "user/message", seq, data: { content: [{ type: "text", text }], source: { kind: "user" } } });
+  const assistantEvent = (seq, text) => ({ type: "assistant/message", seq, data: { message: { content: [{ type: "text", text }] } } });
+
+  test("折叠成 user/assistant 行、按 limit 取尾部、正文封顶、seq 透出", async () => {
+    const h = await m6Harness();
+    const long = "长".repeat(4100);
+    h.sessionLogs.set("session-a", [
+      userEvent(1, "第一句"),
+      assistantEvent(2, "收到"),
+      { type: "tool/call", seq: 3, data: { name: "pwsh" } },
+      userEvent(4, "给审批流做导入导出"),
+      assistantEvent(5, long)
+    ]);
+    const res = await h.call("GET", "/agent-whales/api/sessions/session-a/messages?limit=2");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.code, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.sessionId, "session-a");
+    assert.equal(res.body.data.total, 4, "工具调用不算消息行");
+    assert.equal(res.body.data.rows.length, 2);
+    assert.deepEqual(res.body.data.rows[0], { role: "user", text: "给审批流做导入导出", seq: 4 });
+    assert.equal(res.body.data.rows[1].role, "assistant");
+    assert.equal(res.body.data.rows[1].text.length, 4001, "单条正文封顶 4000 字 + 省略号");
+    assert.ok(res.body.data.rows[1].text.endsWith("…"));
+
+    const all = await h.call("GET", "/agent-whales/api/sessions/session-a/messages");
+    assert.equal(all.body.data.rows.length, 4, "默认 8 条以内全给");
+    const capped = await h.call("GET", "/agent-whales/api/sessions/session-a/messages?limit=9999");
+    assert.equal(capped.body.data.rows.length, 4, "limit 上限 40，不会越界");
+  });
+
+  test("读不到的会话回 200 + 404 业务码，不刷 500；非 GET 405；编码的 id 能解", async () => {
+    const h = await m6Harness();
+    const missing = await h.call("GET", "/agent-whales/api/sessions/session-nope/messages");
+    assert.equal(missing.status, 200);
+    assert.notEqual(missing.body.code, 200, "读不到就不能假装成功");
+    const post = await h.call("POST", "/agent-whales/api/sessions/session-a/messages", {});
+    assert.equal(post.status, 405);
+    assert.equal(post.headers["allow"], "GET, HEAD");
+    h.sessionLogs.set("session-b", [userEvent(1, "hi")]);
+    const encoded = await h.call("GET", "/agent-whales/api/sessions/" + encodeURIComponent("session-b") + "/messages");
+    assert.equal(encoded.body.data.rows.length, 1);
+  });
+
+  test("目录路由不被子路径吞掉：/sessions 仍回目录", async () => {
+    const h = await m6Harness();
+    const list = await h.call("GET", "/agent-whales/api/sessions");
+    assert.equal(list.body.data.source, "host");
+  });
+});
+
+// ── v2.2 波次 2：子会话自动入项目 + §51.4 组建方案 ─────────────────────────────
+describe("v2.2 波次 2：组建方案（提案带对话与关联）", () => {
+  test("校验：main 保留、与任务 key 撞名、未知关联端、超过 6 个都拒；合法的原样带出", () => {
+    const base = { leadSessionId: "s", items: [{ key: "T1", title: "任务" }] };
+    assert.match(host.validateProposal({ ...base, conversations: [{ key: "main", title: "x" }] }).error, /reserved/);
+    assert.match(host.validateProposal({ ...base, conversations: [{ key: "T1", title: "x" }] }).error, /duplicate key/);
+    assert.match(host.validateProposal({ ...base, conversations: [{ key: "be", title: "后端" }], links: [{ a: "be", b: "fe" }] }).error, /unknown link end/);
+    assert.match(host.validateProposal({ ...base, conversations: Array.from({ length: 7 }, (_, i) => ({ key: "c" + i, title: "c" })) }).error, /exceeds 6/);
+    assert.match(host.validateProposal({ ...base, links: [{ a: "main", b: "main" }] }).error, /two different ends/);
+    const ok = host.validateProposal({ ...base, conversations: [{ key: "be", title: "后端", duty: "写接口", agentPreset: "dsh-agent-whales-worker" }, { key: "fe", title: "前端" }], links: [{ a: "be", b: "fe" }] });
+    assert.equal(ok.error, undefined);
+    assert.deepEqual(ok.conversations, [{ key: "be", title: "后端", duty: "写接口", agentPreset: "dsh-agent-whales-worker" }, { key: "fe", title: "前端", duty: "" }]);
+    assert.deepEqual(ok.links, [{ a: "be", b: "fe" }]);
+    assert.deepEqual(host.validateProposal(base).conversations, [], "老提案不带这两类条目照常通过");
+  });
+
+  test("确认：逐个建对话（主对话所在工作区 + preset）→ 入项目、连主对话、写职责简报 → 建任务并按对话 key 指派，不派发", async () => {
+    const createdRequests = [];
+    let seq = 0;
+    const h = await m6Harness({
+      sessionController: { create: async (request) => { createdRequests.push(request); seq += 1; return { sessionId: "session-new-" + seq }; } },
+      workspaceRegistry: { list: () => [{ id: "ws-main", sessionIds: ["session-a"] }] }
+    });
+    host.setEventsStorePathForTests(join(h.dir, "events.json"));
+    const projectId = await createProject(h);
+    const proposal = await h.tools.whales_propose_tasks.execute({
+      projectId,
+      conversations: [{ key: "be", title: "后端", duty: "写导入导出接口", agentPreset: "dsh-agent-whales-worker" }, { key: "fe", title: "前端" }],
+      links: [{ a: "be", b: "fe" }],
+      items: [{ key: "T1", title: "导入接口", suggestedOwner: "be" }, { key: "T2", title: "导入弹窗", suggestedOwner: "fe", blockedByKeys: ["T1"] }, { key: "T3", title: "验收" }]
+    }, { agent: { id: "session-a" } });
+    const stored = JSON.parse(readFileSync(join(h.dir, "proposals.json"), "utf8"))["session-a"];
+    assert.equal(host.proposalView(stored).conversations.length, 2, "确认前就能看到将新建几个对话");
+    const viaRoute = await h.call("GET", "/agent-whales/api/proposals?leadSessionId=session-a");
+    assert.equal(viaRoute.body.code, 200, "项目提案不依赖宿主团队服务：" + JSON.stringify(viaRoute.body));
+    assert.equal(viaRoute.body.data.proposal.conversations.length, 2);
+
+    const confirmed = await h.call("POST", `/agent-whales/api/proposals/${proposal.proposalId}/confirm`, { leadSessionId: "session-a", version: proposal.version, requestId: "team-1" });
+    assert.equal(confirmed.body.code, 200, JSON.stringify(confirmed.body));
+    assert.deepEqual(createdRequests, [{ workspaceId: "ws-main", agentPreset: "dsh-agent-whales-worker" }, { workspaceId: "ws-main" }]);
+    assert.deepEqual(confirmed.body.data.conversations.map((row) => row.sessionId), ["session-new-1", "session-new-2"]);
+    assert.equal(confirmed.body.data.failed, undefined, JSON.stringify(confirmed.body.data.failed));
+    const owners = Object.fromEntries(confirmed.body.data.created.map((row) => [row.key, row.ownerSessionId]));
+    assert.deepEqual(owners, { T1: "session-new-1", T2: "session-new-2", T3: undefined });
+
+    const project = (await h.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project;
+    const added = project.members.filter((member) => member.addedBy === "proposal").map((member) => [member.sessionId, member.title]);
+    assert.deepEqual(added, [["session-new-1", "后端"], ["session-new-2", "前端"]]);
+    const pairs = project.links.map((link) => [link.a, link.b].sort().join("~")).sort();
+    assert.deepEqual(pairs, ["session-a~session-new-1", "session-a~session-new-2", "session-new-1~session-new-2"], "新对话自动连主对话 + 提案里的额外互发线");
+    const brief = await h.call("GET", "/agent-whales/api/briefs/session-new-1");
+    assert.equal(brief.body.data.brief.duty, "写导入导出接口", "职责写进对话简报（人代写）");
+    const tasks = (await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`)).body.data.tasks;
+    const t1 = tasks.find((task) => task.subject === "导入接口");
+    assert.equal(t1.ownerSessionId, "session-new-1");
+    assert.equal(t1.status, "pending", "确认不等于开工：只指派不派发");
+
+    const again = await h.call("POST", `/agent-whales/api/proposals/${proposal.proposalId}/confirm`, { leadSessionId: "session-a", version: proposal.version, requestId: "team-2" });
+    assert.equal(again.body.data.already, true);
+    assert.equal(createdRequests.length, 2, "同版本再确认不会重复建对话");
+  });
+
+  test("建对话失败逐项记录，可同版本重试补建（已建的不重复）", async () => {
+    let fail = true;
+    let seq = 0;
+    const h = await m6Harness({
+      sessionController: { create: async () => { if (fail) throw new Error("model not configured"); seq += 1; return { sessionId: "session-late-" + seq }; } }
+    });
+    host.setEventsStorePathForTests(join(h.dir, "events.json"));
+    const projectId = await createProject(h);
+    const proposal = await h.tools.whales_propose_tasks.execute({
+      projectId, conversations: [{ key: "qa", title: "测试" }], items: [{ key: "T1", title: "回归", suggestedOwner: "qa" }]
+    }, { agent: { id: "session-a" } });
+    const first = await h.call("POST", `/agent-whales/api/proposals/${proposal.proposalId}/confirm`, { leadSessionId: "session-a", version: proposal.version, requestId: "f-1" });
+    assert.equal(first.body.code, 200);
+    assert.deepEqual(first.body.data.failed.map((row) => [row.key, row.status]), [["conversation:qa", "failed"]]);
+    assert.equal(first.body.data.created[0].ownerSessionId, undefined, "对话没建成，任务照建但不指派");
+    fail = false;
+    const retry = await h.call("POST", `/agent-whales/api/proposals/${proposal.proposalId}/confirm`, { leadSessionId: "session-a", version: proposal.version, requestId: "f-2" });
+    assert.equal(retry.body.data.retried, true);
+    assert.deepEqual(retry.body.data.conversations.map((row) => row.sessionId), ["session-late-1"]);
+    assert.equal(retry.body.data.created.length, 1, "任务不重复建");
+  });
+
+  test("不带 projectId 的提案不能带对话 / 关联", async () => {
+    const h = await m6Harness();
+    await assert.rejects(
+      h.tools.whales_propose_tasks.execute({ conversations: [{ key: "x", title: "x" }], items: [{ key: "T1", title: "t" }] }, { agent: { id: "session-a" } }),
+      /need a projectId/
+    );
+  });
+});
+
+describe("v2.2 波次 2：子会话自动入项目", () => {
+  test("父会话在项目里 → 子会话自动入项目、连父会话、标 auto；手动移出后不再拉回；手动加回则解除", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const adopted = await h.call("POST", `/agent-whales/api/projects/${projectId}/adopt`, {});
+    assert.equal(adopted.body.code, 200, JSON.stringify(adopted.body));
+    assert.deepEqual(adopted.body.data.adopted, [{ projectId, sessionId: "session-worker", parentSessionId: "session-a" }]);
+    let project = (await h.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project;
+    const worker = project.members.find((member) => member.sessionId === "session-worker");
+    assert.equal(worker.addedBy, "auto");
+    assert.equal(worker.parentSessionId, "session-a");
+    assert.ok(project.links.some((link) => [link.a, link.b].sort().join("~") === "session-a~session-worker"), "自动连父会话");
+
+    const again = await h.call("POST", `/agent-whales/api/projects/${projectId}/adopt`, {});
+    assert.deepEqual(again.body.data.adopted, [], "幂等");
+
+    await h.call("DELETE", `/agent-whales/api/projects/${projectId}/members/session-worker`);
+    project = (await h.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project;
+    assert.deepEqual(project.dismissed, ["session-worker"]);
+    const after = await h.call("POST", `/agent-whales/api/projects/${projectId}/adopt`, {});
+    assert.deepEqual(after.body.data.adopted, [], "用户移出过的不再拉回");
+
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-worker" });
+    project = (await h.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project;
+    assert.deepEqual(project.dismissed, [], "手动加回即解除");
+  });
+
+  test("adopt：缺 token 403、非 POST 405、项目不存在回业务码", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const noToken = await h.raw("POST", `/agent-whales/api/projects/${projectId}/adopt`, {}, {});
+    assert.equal(noToken.status, 403);
+    const get = await h.call("GET", `/agent-whales/api/projects/${projectId}/adopt`);
+    assert.equal(get.status, 405);
+    const missing = await h.call("POST", "/agent-whales/api/projects/nope/adopt", {});
+    assert.notEqual(missing.body.code, 200);
+  });
+
+  test("tools/result：spawn_teammate 结束后自动收编；无关工具不触发", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const listener = h.listeners["tools/result"];
+    assert.equal(typeof listener, "function");
+    listener({ name: "pwsh", agent: { id: "session-a" } }, {});
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    let project = (await h.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project;
+    assert.equal(project.members.some((member) => member.sessionId === "session-worker"), false, "无关工具不碰 store");
+    listener({ name: "spawn_teammate", agent: { id: "session-a" } }, {});
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    project = (await h.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project;
+    assert.equal(project.members.some((member) => member.sessionId === "session-worker" && member.addedBy === "auto"), true);
+  });
+});
+
+// ── v2.2 波次 3：画布元素表 + 依赖线落库 ───────────────────────────────────────
+describe("v2.2 波次 3：画布元素表", () => {
+  test("元素增删改走同一个 rev（CAS）；PUT 位置表不清空元素；人改过的 agent 元素锁定", async () => {
+    const h = await m6Harness();
+    await h.token();
+    const projectId = await createProject(h);
+    const empty = await h.call("GET", `/agent-whales/api/canvas?projectId=${projectId}`);
+    assert.deepEqual(empty.body.data.elements, []);
+    const rev0 = empty.body.data.rev;
+
+    const added = await h.call("POST", "/agent-whales/api/canvas/elements", {
+      projectId, expectedRevision: rev0,
+      upsert: [
+        { id: "n1", kind: "note", x: 10, y: 20, data: { text: "便签" } },
+        { id: "f1", kind: "flow", data: { shape: "step", text: "校验表头" } },
+        { id: "e1", kind: "edge", data: { source: "n1", target: "f1" } },
+        { id: "bad", kind: "spaceship" }
+      ]
+    });
+    assert.equal(added.body.code, 200, JSON.stringify(added.body));
+    assert.equal(added.body.data.rev, rev0 + 1);
+    assert.deepEqual(added.body.data.rejected.map((row) => row.id), ["bad"]);
+    const f1 = added.body.data.elements.find((el) => el.id === "f1");
+    assert.equal(f1.x, null, "省略坐标 = null，交给客户端自动布局");
+    assert.equal(f1.userEdited, true, "人建的元素就是人的");
+
+    const stale = await h.call("POST", "/agent-whales/api/canvas/elements", { projectId, expectedRevision: rev0, upsert: [{ id: "n2", kind: "note" }] });
+    assert.equal(stale.body.code, 40902, "过期 rev 不覆盖");
+
+    const moved = await h.call("PUT", `/agent-whales/api/canvas?projectId=${projectId}`, { expectedRevision: rev0 + 1, nodes: { "session-a": { x: 1, y: 2 } } });
+    assert.equal(moved.body.code, 200);
+    const after = await h.call("GET", `/agent-whales/api/canvas?projectId=${projectId}`);
+    assert.equal(after.body.data.elements.length, 3, "拖派生节点不能清空元素表");
+
+    // agent 写：人改过的跳过并点名；agent 自己的可改
+    const agentWrite = await host.applyCanvasElements(projectId, { expectedRevision: after.body.data.rev, by: "agent", sessionId: "session-a", upsert: [
+      { id: "f1", kind: "flow", data: { text: "被 agent 覆盖" } },
+      { id: "f2", kind: "flow", data: { text: "agent 新画的" }, provenance: { sourceMessageIds: ["msg-1"] } }
+    ] });
+    assert.deepEqual(agentWrite.locked, ["f1"]);
+    const f2 = agentWrite.elements.find((el) => el.id === "f2");
+    assert.equal(f2.provenance.by, "agent");
+    assert.equal(f2.provenance.sessionId, "session-a");
+    assert.deepEqual(f2.provenance.sourceMessageIds, ["msg-1"]);
+    assert.equal(f2.userEdited, false);
+
+    // 删除元素顺带删挂在上面的创作连线
+    const removed = await h.call("POST", "/agent-whales/api/canvas/elements", { projectId, expectedRevision: agentWrite.rev, remove: ["n1"] });
+    assert.deepEqual(removed.body.data.elements.map((el) => el.id).sort(), ["f1", "f2"]);
+  });
+
+  test("元素写入：缺 token 403、非 POST 405、缺 rev 拒绝、edge 缺端点拒绝", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    const noToken = await h.raw("POST", "/agent-whales/api/canvas/elements", {}, { projectId, expectedRevision: 0, upsert: [] });
+    assert.equal(noToken.status, 403);
+    const get = await h.call("GET", "/agent-whales/api/canvas/elements");
+    assert.equal(get.status, 405);
+    const noRev = await h.call("POST", "/agent-whales/api/canvas/elements", { projectId });
+    assert.equal(noRev.body.code, 40001);
+    assert.match(host.cleanCanvasElement({ id: "e", kind: "edge", data: { source: "a" } }).error, /data.target/);
+    assert.match(host.cleanCanvasElement({ id: "big", kind: "note", data: { text: "x".repeat(17000) } }).error, /16KB/);
+  });
+});
+
+describe("v2.2 波次 3：依赖线（实线）落库为 blockedBy", () => {
+  async function setup() {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+    const make = async (subject, owner) => {
+      const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject });
+      const taskId = created.body.data.task.taskId;
+      await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner, expectedRevision: 1, requestId: "a-" + taskId });
+      return taskId;
+    };
+    return { h, projectId, make };
+  }
+
+  test("A→B：B 的未完成任务都等 A 的未完成任务；再画一次幂等；删线去掉；反向画成环整次拒绝", async () => {
+    const { h, projectId, make } = await setup();
+    const a1 = await make("后端接口", "session-a");
+    const b1 = await make("前端弹窗", "session-b");
+    const b2 = await make("前端校验", "session-b");
+    const add = await h.call("POST", `/agent-whales/api/projects/${projectId}/dependencies`, { from: "session-a", to: "session-b", action: "add" });
+    assert.equal(add.body.code, 200, JSON.stringify(add.body));
+    assert.deepEqual(add.body.data.changed.map((row) => [row.taskId, row.blockedBy]).sort(), [[b1, [a1]], [b2, [a1]]].sort());
+    const again = await h.call("POST", `/agent-whales/api/projects/${projectId}/dependencies`, { from: "session-a", to: "session-b" });
+    assert.deepEqual(again.body.data.changed, [], "幂等");
+    const cycle = await h.call("POST", `/agent-whales/api/projects/${projectId}/dependencies`, { from: "session-b", to: "session-a" });
+    assert.equal(cycle.body.code, 40705, "反向会成环，整次拒绝");
+    const tasks = (await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`)).body.data.tasks;
+    assert.deepEqual(tasks.find((task) => task.taskId === a1).blockedBy, [], "成环被拒时不能半写");
+    const remove = await h.call("POST", `/agent-whales/api/projects/${projectId}/dependencies`, { from: "session-a", to: "session-b", action: "remove" });
+    assert.equal(remove.body.data.changed.length, 2);
+    const cleared = (await h.call("GET", `/agent-whales/api/tasks?projectId=${projectId}`)).body.data.tasks;
+    assert.deepEqual(cleared.find((task) => task.taskId === b1).blockedBy, []);
+  });
+
+  test("没有未完成任务的一端：拒绝并说明要先派任务；非成员 / 自连 / 缺 token 都拒", async () => {
+    const { h, projectId, make } = await setup();
+    await make("前端弹窗", "session-b");
+    const none = await h.call("POST", `/agent-whales/api/projects/${projectId}/dependencies`, { from: "session-a", to: "session-b" });
+    assert.notEqual(none.body.code, 200);
+    assert.match(none.body.msg, /先给它们派任务/);
+    const stranger = await h.call("POST", `/agent-whales/api/projects/${projectId}/dependencies`, { from: "session-a", to: "session-old" });
+    assert.equal(stranger.body.code, 40703);
+    const self = await h.call("POST", `/agent-whales/api/projects/${projectId}/dependencies`, { from: "session-a", to: "session-a" });
+    assert.equal(self.status, 400);
+    const noToken = await h.raw("POST", `/agent-whales/api/projects/${projectId}/dependencies`, {}, { from: "session-a", to: "session-b" });
+    assert.equal(noToken.status, 403);
+  });
+});
+
+// ── v2.2 波次 4：文件 / 外部引用节点 ───────────────────────────────────────────
+describe("v2.2 波次 4：文件 / 外部引用", () => {
+  const call = (seq, name, args) => ({ type: "tool/call", seq, time: 1000 + seq, data: { name, arguments: JSON.stringify(args) } });
+  const user = (seq, text) => ({ type: "user/message", seq, time: 1000 + seq, data: { content: [{ type: "text", text }], source: { kind: "user" } } });
+
+  test("referencesFromEvents：读写分类、路径归一去重、@路径、链接分 notion/feishu/web", () => {
+    const refs = host.referencesFromEvents([
+      call(1, "read", { file_path: "D:\\work\\a.go" }),
+      call(2, "edit", { file_path: "d:/work/a.go" }),
+      call(3, "write", { file_path: "D:/work/b.tsx" }),
+      call(4, "grep", { pattern: "x", path: "D:/work/src/" }),
+      call(5, "web_fetch", { url: "https://example.com/doc" }),
+      call(6, "mcp__pencil__execute", { uri: "file:///D:/design/a.pen" }),
+      call(7, "pwsh", { command: "Get-Content x" }),
+      user(8, "看下 @\"D:\\需求\\导入 导出.md\" 和 https://app.notion.com/p/abc ，还有 https://xxx.feishu.cn/docx/123。"),
+      { type: "user/message", seq: 9, data: { content: [{ type: "text", text: "https://agent.example/relay" }], source: { kind: "agent-message" } } },
+      { type: "tool/call", seq: 10, data: { name: "read", arguments: "{坏 json" } }
+    ]);
+    const files = refs.files;
+    assert.deepEqual(Object.keys(files).sort(), ["d:/design/a.pen", "d:/work/a.go", "d:/work/b.tsx", "d:/work/src", "d:/需求/导入 导出.md"]);
+    assert.equal(files["d:/work/a.go"].read, 1);
+    assert.equal(files["d:/work/a.go"].write, 1, "大小写 / 分隔符不同的同一文件合并");
+    assert.equal(files["d:/work/b.tsx"].write, 1);
+    assert.equal(files["d:/需求/导入 导出.md"].ref, 1, "@\"带空格的路径\" 记为引用");
+    assert.deepEqual(Object.values(refs.links).map((row) => [row.url, row.kind]).sort(), [
+      ["https://app.notion.com/p/abc", "notion"],
+      ["https://example.com/doc", "web"],
+      ["https://xxx.feishu.cn/docx/123", "feishu"]
+    ], "中文标点不吞进链接；agent 中继消息里的链接不算用户引用");
+    assert.deepEqual(host.referencesFromEvents(undefined), { files: {}, links: {} });
+  });
+
+  test("GET /projects/:id/references：成员会话合并 + report 产物记为改过；只读不要 token", async () => {
+    const h = await m6Harness();
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-b" });
+    h.sessionLogs.set("session-a", [call(1, "read", { file_path: "D:/repo/spec.md" }), user(2, "参考 https://app.notion.com/p/prd")]);
+    h.sessionLogs.set("session-b", [call(1, "write", { file_path: "D:/repo/spec.md" }), call(2, "edit", { file_path: "D:/repo/ui.tsx" })]);
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "交付" });
+    const taskId = created.body.data.task.taskId;
+    await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign", owner: "session-b", expectedRevision: 1, requestId: "r-assign" });
+    const reported = await h.call("PUT", `/agent-whales/api/tasks/${taskId}/report`, { projectId, expectedRevision: 2, report: { status: "done", summary: "ok", artifacts: [{ kind: "file", ref: "D:/repo/out.zip" }] } });
+    assert.equal(reported.body.code, 200, JSON.stringify(reported.body));
+    const res = await h.raw("GET", `/agent-whales/api/projects/${projectId}/references`, {});
+    assert.equal(res.status, 200);
+    assert.equal(res.body.code, 200, JSON.stringify(res.body));
+    const byKey = Object.fromEntries(res.body.data.files.map((file) => [file.key, file]));
+    assert.deepEqual(Object.keys(byKey["d:/repo/spec.md"].sessions).sort(), ["session-a", "session-b"]);
+    assert.equal(byKey["d:/repo/spec.md"].sessions["session-a"].read, 1);
+    assert.equal(byKey["d:/repo/spec.md"].sessions["session-b"].write, 1);
+    assert.equal(byKey["d:/repo/ui.tsx"].sessions["session-b"].write, 1);
+    assert.ok(byKey["d:/repo/out.zip"], "report 产物要成为文件节点：" + Object.keys(byKey).join(","));
+    assert.equal(byKey["d:/repo/out.zip"].sessions["session-b"].write, 1, "report 产物记为 owner 改过");
+    assert.deepEqual(res.body.data.links.map((link) => [link.url, link.kind, link.sessions]), [["https://app.notion.com/p/prd", "notion", ["session-a"]]]);
+    const post = await h.call("POST", `/agent-whales/api/projects/${projectId}/references`, {});
+    assert.equal(post.status, 405);
+  });
+});
+
+// ── v2.2 波次 5：流程图工具 ───────────────────────────────────────────────────
+describe("v2.2 波次 5：whales_flow_read / whales_flow_draw", () => {
+  const user = (seq, text) => ({ type: "user/message", seq, data: { content: [{ type: "text", text }], source: { kind: "user" } } });
+  const assistant = (seq, text) => ({ type: "assistant/message", seq, data: { message: { content: [{ type: "text", text }] } } });
+  const as = { agent: { id: "session-a" } };
+  async function setup() {
+    const h = await m6Harness();
+    host.setEventsStorePathForTests(join(h.dir, "events.json"));
+    const projectId = await createProject(h);
+    h.sessionLogs.set("session-a", [
+      user(1, "导入要先校验表头"),
+      assistant(2, "好，表头不对就给映射建议"),
+      user(3, "重复单据跳过")
+    ]);
+    return { h, projectId };
+  }
+  const draw = (h, args) => h.tools.whales_flow_draw.execute(args, as);
+  const flow = {
+    title: "表单导入",
+    nodes: [
+      { key: "s", shape: "start", text: "上传文件", sourceMessageIds: ["m1"] },
+      { key: "chk", shape: "decision", text: "表头匹配？", sourceMessageIds: ["m1", "m2"] },
+      { key: "map", shape: "step", text: "给映射建议", sourceMessageIds: ["m2"] },
+      { key: "ghost", shape: "step", text: "编造的步骤", sourceMessageIds: ["m99"] },
+      { key: "dup", shape: "step", text: "跳过重复", sourceMessageIds: [] }
+    ],
+    edges: [{ from: "s", to: "chk" }, { from: "chk", to: "map", label: "否" }, { from: "chk", to: "ghost", label: "是" }]
+  };
+
+  test("flow_read：列出可引用消息编号；非项目会话明确拒绝", async () => {
+    const { h } = await setup();
+    const read = await h.tools.whales_flow_read.execute({}, as);
+    assert.deepEqual(read.messages.map((row) => row.ref), ["m1", "m2", "m3"]);
+    assert.deepEqual(read.flows, []);
+    await assert.rejects(h.tools.whales_flow_read.execute({}, { agent: { id: "session-old" } }), /不属于任何/);
+  });
+
+  test("flow_draw：没证据的节点丢掉（含编造的 m99），边跟着丢；直接落画布、带 agent 来源与消息证据", async () => {
+    const { h, projectId } = await setup();
+    const result = await draw(h, flow);
+    assert.equal(result.drawn, true, JSON.stringify(result));
+    assert.equal(result.nodes, 3);
+    assert.equal(result.edges, 2, "指向被丢节点的边不画");
+    assert.deepEqual(result.dropped.map((row) => row.key).sort(), ["dup", "ghost"]);
+    const canvas = await h.call("GET", `/agent-whales/api/canvas?projectId=${projectId}`);
+    const elements = canvas.body.data.elements;
+    const group = elements.find((el) => el.id === "flow:main");
+    assert.equal(group.kind, "group");
+    assert.equal(group.data.title, "表单导入");
+    const chk = elements.find((el) => el.id === "flow:main:chk");
+    assert.equal(chk.data.shape, "decision");
+    assert.equal(chk.provenance.by, "agent");
+    assert.deepEqual(chk.provenance.sourceMessageIds, ["m1", "m2"]);
+    assert.equal(chk.userEdited, false, "AI 生成、未被人改过");
+    assert.equal(chk.x, null, "坐标留给画布自动布局");
+    const edge = elements.find((el) => el.id === "flow:main:e:chk>map");
+    assert.equal(edge.data.label, "否");
+    assert.equal(edge.data.source, "flow:main:chk");
+  });
+
+  test("证据不足回「暂不足以生成流程图」；节流：用户没再说 2 句不重画；人改过的节点重画不覆盖", async () => {
+    const { h, projectId } = await setup();
+    const thin = await draw(h, { title: "x", nodes: [{ key: "a", shape: "step", text: "只有一步", sourceMessageIds: ["m1"] }] });
+    assert.equal(thin.drawn, false);
+    assert.equal(thin.reason, "暂不足以生成流程图");
+
+    await draw(h, flow);
+    const throttled = await draw(h, flow);
+    assert.equal(throttled.drawn, false);
+    assert.match(throttled.reason, /节流/);
+
+    // 人改了「映射建议」节点的文字 → 锁定
+    const canvas = await h.call("GET", `/agent-whales/api/canvas?projectId=${projectId}`);
+    const edited = await h.call("POST", "/agent-whales/api/canvas/elements", { projectId, expectedRevision: canvas.body.data.rev, upsert: [Object.assign({}, canvas.body.data.elements.find((el) => el.id === "flow:main:map"), { data: { flowId: "main", key: "map", shape: "step", text: "人改过的文字" } })] });
+    assert.equal(edited.body.code, 200, JSON.stringify(edited.body));
+
+    // 用户又说了两句 → 可以重画；新版本去掉了 map、加了 end
+    h.sessionLogs.set("session-a", h.sessionLogs.get("session-a").concat([user(4, "导入完给个报告"), user(5, "失败的行单独导出")]));
+    const redraw = await draw(h, {
+      title: "表单导入 v2",
+      nodes: [
+        { key: "s", shape: "start", text: "上传文件", sourceMessageIds: ["m1"] },
+        { key: "chk", shape: "decision", text: "表头匹配？", sourceMessageIds: ["m1"] },
+        { key: "end", shape: "end", text: "出导入报告", sourceMessageIds: ["m4"] }
+      ],
+      edges: [{ from: "s", to: "chk" }, { from: "chk", to: "end", label: "是" }]
+    });
+    assert.equal(redraw.drawn, true, JSON.stringify(redraw));
+    const after = (await h.call("GET", `/agent-whales/api/canvas?projectId=${projectId}`)).body.data.elements;
+    const map = after.find((el) => el.id === "flow:main:map");
+    assert.ok(map, "人改过的节点不会被重画删掉");
+    assert.equal(map.data.text, "人改过的文字");
+    assert.ok(after.find((el) => el.id === "flow:main:end"), "新增的节点补上");
+    assert.equal(after.find((el) => el.id === "flow:main").data.title, "表单导入 v2");
+  });
+
+  test("flowId / title 校验", async () => {
+    const { h } = await setup();
+    await assert.rejects(draw(h, Object.assign({}, flow, { flowId: "Bad Id!" })), /flowId/);
+    await assert.rejects(draw(h, Object.assign({}, flow, { title: "" })), /title/);
+  });
+});
+
+// ── v2.2 波次 6：原型帧 + 组件库 ───────────────────────────────────────────────
+describe("v2.2 波次 6：组件包 / 原型", () => {
+  test("组件包列表：内置 shadcn 永远在；本地包要 manifest + bundle.js，坏的进 invalid 并说原因", () => {
+    const dir = mkdtempSync(join(tmpdir(), "whales-packs-"));
+    try {
+      mkdirSync(join(dir, "cds"));
+      writeFileSync(join(dir, "cds", "manifest.json"), JSON.stringify({ name: "CDS（本地）", license: "UNLICENSED", version: "3.0.8" }));
+      writeFileSync(join(dir, "cds", "bundle.js"), "module.exports = {};");
+      writeFileSync(join(dir, "cds", "styles.css"), ".x{}");
+      mkdirSync(join(dir, "nobundle"));
+      writeFileSync(join(dir, "nobundle", "manifest.json"), "{}");
+      mkdirSync(join(dir, "badjson"));
+      writeFileSync(join(dir, "badjson", "manifest.json"), "{坏");
+      mkdirSync(join(dir, "Bad Name"));
+      mkdirSync(join(dir, "shadcn"));
+      const result = host.listComponentPacks(dir);
+      assert.deepEqual(result.packs.map((p) => p.id), ["shadcn", "cds"]);
+      assert.equal(result.packs[0].builtin, true);
+      const cds = result.packs[1];
+      assert.deepEqual([cds.name, cds.license, cds.version, cds.hasStyles, cds.builtin], ["CDS（本地）", "UNLICENSED", "3.0.8", true, false]);
+      assert.deepEqual(result.invalid.map((row) => row.id).sort(), ["Bad Name", "badjson", "nobundle", "shadcn"].sort());
+      assert.deepEqual(host.listComponentPacks(join(dir, "nope")).packs.map((p) => p.id), ["shadcn"], "目录不存在只给内置包");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /component-packs 与文件下发：只读、只允许 bundle.js / styles.css、拒绝路径穿越", async () => {
+    const h = await m6Harness();
+    const packs = join(h.dir, "component-packs", "cds");
+    mkdirSync(packs, { recursive: true });
+    writeFileSync(join(packs, "manifest.json"), JSON.stringify({ name: "CDS" }));
+    writeFileSync(join(packs, "bundle.js"), "module.exports = { Button: function () {} };");
+    const list = await h.raw("GET", "/agent-whales/api/component-packs", {});
+    assert.equal(list.body.code, 200);
+    assert.deepEqual(list.body.data.packs.map((p) => p.id), ["shadcn", "cds"]);
+    const bundle = await h.rawText("GET", "/agent-whales/api/component-packs/cds/bundle.js");
+    assert.equal(bundle.status, 200);
+    assert.match(bundle.headers["content-type"], /javascript/);
+    assert.match(bundle.text, /Button/);
+    assert.equal((await h.rawText("GET", "/agent-whales/api/component-packs/cds/manifest.json")).status, 404, "只下发 bundle.js / styles.css");
+    assert.equal((await h.rawText("GET", "/agent-whales/api/component-packs/..%2F..%2Fsecret/bundle.js")).status, 404);
+    assert.equal((await h.rawText("GET", "/agent-whales/api/component-packs/cds/styles.css")).status, 404, "没有 styles.css 就 404，不编");
+    assert.equal((await h.call("POST", "/agent-whales/api/component-packs", {})).status, 405);
+  });
+
+  test("原型数据校验：只认通用词表、插槽必须是数组、补齐 id、层级与数量有上限", () => {
+    const ok = host.validatePrototypeData({ content: [
+      { type: "Heading", props: { text: "导入" } },
+      { type: "Card", props: { title: "上传", content: [{ type: "Upload", props: {} }, { type: "Columns", props: { left: [{ type: "Input", props: {} }] } }] } }
+    ] });
+    assert.equal(ok.error, undefined, ok.error);
+    assert.equal(ok.count, 5);
+    assert.equal(ok.data.content[0].props.id, "Heading-1");
+    assert.deepEqual(ok.data.content[1].props.content[1].props.right, [], "没写的插槽补成空数组");
+    assert.match(host.validatePrototypeData({ content: [{ type: "AntdTable", props: {} }] }).error, /不认识的组件 AntdTable/);
+    assert.match(host.validatePrototypeData({ content: [{ type: "Card", props: { content: "x" } }] }).error, /插槽/);
+    assert.match(host.validatePrototypeData({}).error, /content/);
+    let deep = [{ type: "Text", props: {} }];
+    for (let i = 0; i < 7; i++) deep = [{ type: "Section", props: { content: deep } }];
+    assert.match(host.validatePrototypeData({ content: deep }).error, /6 层/);
+  });
+
+  test("whales_prototype_draw：要消息证据；落成 AI 原型元素；人改过就锁定、不覆盖", async () => {
+    const h = await m6Harness();
+    host.setEventsStorePathForTests(join(h.dir, "events.json"));
+    const projectId = await createProject(h);
+    h.sessionLogs.set("session-a", [{ type: "user/message", seq: 1, data: { content: [{ type: "text", text: "导入弹窗要有上传区和映射表" }], source: { kind: "user" } } }]);
+    const as = { agent: { id: "session-a" } };
+    const puck = { content: [{ type: "Dialog", props: { title: "导入", content: [{ type: "Upload", props: {} }, { type: "Table", props: { columns: "源字段,目标字段", rows: 2 } }] } }] };
+    const noRef = await h.tools.whales_prototype_draw.execute({ title: "导入弹窗", puck, sourceMessageIds: ["m9"] }, as);
+    assert.equal(noRef.drawn, false);
+    const drawn = await h.tools.whales_prototype_draw.execute({ title: "导入弹窗", puck, sourceMessageIds: ["m1"] }, as);
+    assert.equal(drawn.drawn, true, JSON.stringify(drawn));
+    assert.equal(drawn.components, 3);
+    const canvas = await h.call("GET", `/agent-whales/api/canvas?projectId=${projectId}`);
+    const el = canvas.body.data.elements.find((row) => row.id === "proto:main");
+    assert.equal(el.kind, "prototype");
+    assert.equal(el.provenance.by, "agent");
+    assert.equal(el.data.puck.content[0].type, "Dialog");
+    // 人在画布上改过（经元素路由）→ 锁定
+    await h.call("POST", "/agent-whales/api/canvas/elements", { projectId, expectedRevision: canvas.body.data.rev, upsert: [Object.assign({}, el, { data: Object.assign({}, el.data, { title: "人改的标题" }) })] });
+    const again = await h.tools.whales_prototype_draw.execute({ title: "导入弹窗 v2", puck, sourceMessageIds: ["m1"] }, as);
+    assert.equal(again.drawn, false);
+    assert.match(again.reason, /锁定/);
+    await assert.rejects(h.tools.whales_prototype_draw.execute({ title: "x", puck: { content: [{ type: "Nope" }] }, sourceMessageIds: ["m1"] }, as), /不认识的组件/);
+  });
+
+  test("原型元素单独放宽到 64KB，其他元素仍 16KB", () => {
+    const big = "x".repeat(20000);
+    assert.equal(host.cleanCanvasElement({ id: "p", kind: "prototype", data: { puck: { content: [], note: big } } }).error, undefined);
+    assert.match(host.cleanCanvasElement({ id: "n", kind: "note", data: { text: big } }).error, /16KB/);
+    assert.match(host.cleanCanvasElement({ id: "p", kind: "prototype", data: { note: "x".repeat(70000) } }).error, /64KB/);
   });
 });

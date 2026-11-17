@@ -27,6 +27,12 @@ import "./mcp-constraint.test.mjs";
 import "./mcp-canvas.test.mjs";
 import "./mcp-canvas-render.test.mjs";
 import "./mcp-concurrency-contract.test.mjs";
+// 画布优先（PRD v2.2 九（续二））：从画布开始 / Composer 卡真对话面。
+import "./canvas-first.test.mjs";
+// 波次 3：新画布（React Flow 按需 chunk）与两种线。
+import "./flow-canvas.test.mjs";
+// 波次 6：原型 chunk 行为（真 React 18；tools/flow-chunk 没装依赖时自动跳过并说明）。
+import "./proto-chunk.test.mjs";
 // 真 HTTP E2E：宿主半边跑在真 http server 上，真 socket 走完整闭环 + 重启持久化。
 // 既有用例都是「假 fetch + 直接调 handler」，从没验过真实 TCP 上的一次请求/响应。
 import "./e2e-http.test.mjs";

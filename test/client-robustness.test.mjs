@@ -467,6 +467,17 @@ function visitToolsSwitch(plugin) {
   return found;
 }
 
+/** 同上，找「ultra 模式」那个 Switch 元素。 */
+function ultraSwitch(plugin) {
+  const raw = plugin.__test.WhaleSettingsSection(settingsPropsFor());
+  let found = null;
+  walk(raw, (node) => {
+    if (found !== null) return;
+    if (node.props && node.props.label === "ultra" && typeof node.props.onChange === "function") found = node;
+  });
+  return found;
+}
+
 /** 让 fetch promise 链落地（事件循环跑一轮 macrotask 即足够）。 */
 function flushAsync() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -555,6 +566,91 @@ test("串门开关：未就绪时点击不发请求（不能拿空 token 去打�
   }
 });
 
+// ── 6b) 「ultra 模式」开关：与串门同构，但默认关、且宿主负责持久化 ──────────
+
+test("ultra 开关：快照未到达前 disabled；拿到 ultra 后启用并跟随宿主值", () => {
+  const { plugin } = loadPlugin();
+  const before = ultraSwitch(plugin);
+  assert.ok(before, "设置页必须有 ultra 模式开关");
+  assert.equal(before.props.disabled, true, "没有第一次 activity 快照时必须 disabled");
+  assert.equal(before.props.checked, false, "未就绪时显示宿主默认值 false（模式默认关），但不可点");
+
+  plugin.__test.toolActivity.apply({ active: {}, ultra: false, controlToken: "token-1" });
+  const ready = ultraSwitch(plugin);
+  assert.equal(ready.props.disabled, false, "拿到快照后必须可点");
+  assert.equal(ready.props.checked, false);
+
+  plugin.__test.toolActivity.apply({ active: {}, ultra: true, controlToken: "token-2" });
+  const on = ultraSwitch(plugin);
+  assert.equal(on.props.disabled, false);
+  assert.equal(on.props.checked, true, "开关必须跟随宿主真相，而不是 localStorage");
+});
+
+test("ultra 开关：点击发出正确的 POST（URL / 方法 / token 头 / body）", async () => {
+  const { plugin } = loadPlugin();
+  plugin.__test.toolActivity.apply({ active: {}, ultra: false, controlToken: "token-abc123" });
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, options) => {
+    calls.push({ url, options });
+    return Promise.resolve({ ok: true, status: 204 });
+  };
+  try {
+    ultraSwitch(plugin).props.onChange(true);
+    await flushAsync();
+    assert.equal(calls.length, 1, "一次点击只能发一个 POST");
+    assert.equal(calls[0].url, "/agent-whales/api/ultra");
+    assert.equal(calls[0].options.method, "POST");
+    assert.equal(calls[0].options.headers["content-type"], "application/json");
+    assert.equal(calls[0].options.headers["x-whales-token"], "token-abc123", "必须带最近一次 GET 拿到的 token");
+    assert.deepEqual(JSON.parse(calls[0].options.body), { enabled: true });
+    assert.equal(plugin.__test.toolActivity.getSnapshot().ultra, true, "204 后宿主真相立即更新，不必等 2s 轮询");
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+  }
+});
+
+test("ultra 开关：403 / 网络失败时回滚到宿主原值，不停在乐观态", async () => {
+  const { plugin } = loadPlugin();
+  plugin.__test.toolActivity.apply({ active: {}, ultra: false, controlToken: "token-xyz" });
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = () => Promise.resolve({ ok: false, status: 403 });
+    ultraSwitch(plugin).props.onChange(true);
+    await flushAsync();
+    assert.equal(plugin.__test.toolActivity.getSnapshot().ultra, false, "403 不能把宿主真相改成 true");
+    const after403 = ultraSwitch(plugin);
+    assert.equal(after403.props.checked, false, "下一次渲染必须回到原值 false");
+    assert.equal(after403.props.disabled, false, "失败后要能再次点击，不能永久 busy");
+
+    globalThis.fetch = () => Promise.reject(new Error("network down"));
+    ultraSwitch(plugin).props.onChange(true);
+    await flushAsync();
+    assert.equal(plugin.__test.toolActivity.getSnapshot().ultra, false, "网络失败同样不得写脏状态");
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+  }
+});
+
+test("ultra 开关：未就绪时点击不发请求（不能拿空 token 去打宿主）", async () => {
+  const { plugin } = loadPlugin();
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => { calls.push(url); return Promise.resolve({ ok: true, status: 204 }); };
+  try {
+    const node = ultraSwitch(plugin);
+    assert.equal(node.props.disabled, true);
+    node.props.onChange(true);
+    await flushAsync();
+    assert.deepEqual(calls, [], "未拿到 controlToken 前不得发请求");
+  } finally {
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+  }
+});
+
 test("i18n：装饰层与工作台两份词典的 zh/en 键集合都必须一致且非空", () => {
   const { plugin } = loadPlugin();
   installDocumentStub();
@@ -589,7 +685,7 @@ test("i18n：装饰层与工作台两份词典的 zh/en 键集合都必须一致
     }
   }
   const decoration = dictionaries.find((row) => row.namespace === "agent-whales");
-  for (const key of ["visitTools", "visitToolsHint"]) {
+  for (const key of ["visitTools", "visitToolsHint", "ultra", "ultraHint"]) {
     for (const lang of ["zh", "en"]) {
       const value = decoration.dict[lang][key];
       assert.equal(typeof value, "string", lang + "." + key + " 必须是字符串");

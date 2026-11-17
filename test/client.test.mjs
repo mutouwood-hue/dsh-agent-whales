@@ -9,8 +9,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { findByClass, installDocumentStub, loadPlugin, pluginDir, render, walk } from "./harness.mjs";
 import { pathToFileURL } from "node:url";
@@ -190,8 +191,8 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
 
   plugin.apply(ctx);
 
-  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "sidebar.panellist", "conversation.input.dock"]);
-  assert.equal(registrations.length, 6);
+  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "whales.canvas.session", "sidebar.panellist", "conversation.input.dock"]);
+  assert.equal(registrations.length, 7);
   for (const entry of registrations.slice(0, 2)) {
     assert.equal(entry.options.id, "agent-whales");
     assert.equal(typeof entry.component, "function");
@@ -213,13 +214,24 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
   assert.equal(workbenchSeat.options.id, undefined, "keyed 槽不认 id（那是 list 槽的选项）");
   assert.equal(workbenchSeat.options.order, undefined, "keyed 槽不认 order");
   assert.equal(typeof workbenchSeat.component, "function");
-  const entrySeat = registrations[4];
+  // 画布优先（v2.2 九（续二））：工作台声明一个 session 作用域子槽，渲染器才会下发
+  // SessionProvider + renderSlot；inject 下发稳定的 retainSession / createSession。
+  assert.deepEqual(workbenchSeat.options.children, { "whales.canvas.session": { kind: "single", scope: "session" } });
+  const injected = workbenchSeat.options.inject();
+  assert.equal(typeof injected.retainSession, "function");
+  assert.equal(typeof injected.createSession, "function");
+  assert.equal(workbenchSeat.options.inject().retainSession, injected.retainSession, "retainSession 引用必须稳定（effect 依赖）");
+  const sessionSeat = registrations[4];
+  assert.equal(sessionSeat.options.name, "whales.canvas.session");
+  assert.equal(sessionSeat.options.key, undefined);
+  assert.equal(typeof sessionSeat.component, "function");
+  const entrySeat = registrations[5];
   assert.equal(entrySeat.options.name, "sidebar.panellist");
   assert.equal(entrySeat.options.id, "whales-canvas");
   assert.equal(typeof entrySeat.options.order, "number", "list 槽用 {id, order}");
   assert.equal(typeof entrySeat.component, "function");
   // W2/D2：目标条叠在 conversation.input.dock 上——**不影子**官方 composer（不设 priority）
-  const dockSeat = registrations[5];
+  const dockSeat = registrations[6];
   assert.equal(dockSeat.options.name, "conversation.input.dock");
   assert.equal(dockSeat.options.priority, undefined, "D2 硬约束：叠加上方目标条，不影子官方输入区");
   assert.equal(typeof dockSeat.component, "function");
@@ -635,14 +647,19 @@ test("渲染：设置页显示实时数量与全部控件", () => {
   assert.equal(ranges.length, 4, "偏移 / 大小 / 不透明度 / 速度 四个滑杆");
   const switches = findByClass(tree, "daw-switch");
   // 2026-10-30 新增「状态表情」「出错表情」两个开关（v0.23 状态信号接线）
-  assert.equal(switches.length, 13, "启用 / 粒子 / 对话气泡 / 俏皮话 / 状态表情 / 出错表情 / 没活也挂着 / 团队汇总 / 串门工具 / 显示任务 / 已收工子级 / 可拖拽 / 显示名字");
+  // 2026-11-16 新增「ultra 模式」（强制加载 deep-effort 执行契约）
+  assert.equal(switches.length, 14, "启用 / 粒子 / 对话气泡 / 俏皮话 / 状态表情 / 出错表情 / 没活也挂着 / 团队汇总 / 串门工具 / ultra 模式 / 显示任务 / 已收工子级 / 可拖拽 / 显示名字");
   const segments = findByClass(tree, "daw-seg");
   assert.equal(segments.length, 5, "计数方式 / 水平位置 / 形象风格 / 动画强度 / 尺寸预设五组分段控件");
 });
 
-// ── 4. 宿主半边：团队协作策略 ─────────────────────────────────────────────
+// ── 4. 宿主半边：团队协作策略 + ultra 模式段 ──────────────────────────────
 test("宿主半边：注册团队协作策略，拿不到 systemPrompt 或注册失败时都不拖垮本行", async () => {
   const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+  // ultra 段读的是持久化状态文件：指到临时路径，避免用例读到你机器上的真实开关状态。
+  // 汇总执行（test/index.js）时多个文件共享模块状态，所以用完必须还原。
+  const previousUltraFile = host.ultraModeFileForTests();
+  host.setUltraModePathForTests(join(mkdtempSync(join(tmpdir(), "aw-client-ultra-")), "ultra.json"));
 
   const sections = [];
   const labels = [];
@@ -650,15 +667,30 @@ test("宿主半边：注册团队协作策略，拿不到 systemPrompt 或注册
     get: (name) => (name === "systemPrompt" ? { section: (section) => { sections.push(section); return () => {}; } } : undefined),
     effect: (run, label) => { labels.push(label); return run(); }
   });
-  assert.equal(sections.length, 1, "只注册一个提示段落");
-  assert.equal(sections[0].name, "agent-whales/team-policy");
-  assert.ok(Number.isFinite(sections[0].order), "order 必须是有限数字");
-  // 真实 dsh-system-prompt 契约：text 可以是 string，也可以是 (context) => string 的惰性段落。
-  const policyText = typeof sections[0].text === "function" ? sections[0].text({}) : sections[0].text;
-  assert.equal(typeof policyText, "string", "段落文本要么是 string，要么是返回 string 的函数");
-  assert.ok(policyText.includes("spawn_teammate"), "策略里要点名团队工具");
-  assert.ok(policyText.includes("默认先起团队"), "默认行为是起团队");
-  assert.ok(labels.every((label) => typeof label === "string" && label.length > 0), "每个 effect 都要有名字");
+  try {
+    assert.equal(sections.length, 3, "团队策略段 + ultra 段 + 流程图段（v2.2 波次 5）");
+    const flow = sections.find((section) => section.name === "agent-whales:flow");
+    assert.ok(flow && flow.text.includes("whales_flow_draw") && flow.text.includes("sourceMessageIds"), "流程图段必须点名 flow 工具与证据要求（四层机制第 2 层）");
+    const byName = new Map(sections.map((section) => [section.name, section]));
+    assert.ok(byName.has("agent-whales/team-policy"), "团队策略段必须在");
+    assert.ok(byName.has("agent-whales/ultra"), "ultra 段必须在");
+    const team = byName.get("agent-whales/team-policy");
+    assert.ok(Number.isFinite(team.order), "order 必须是有限数字");
+    // 真实 dsh-system-prompt 契约：text 可以是 string，也可以是 (context) => string 的惰性段落。
+    const policyText = typeof team.text === "function" ? team.text({}) : team.text;
+    assert.equal(typeof policyText, "string", "段落文本要么是 string，要么是返回 string 的函数");
+    assert.ok(policyText.includes("spawn_teammate"), "策略里要点名团队工具");
+    assert.ok(policyText.includes("默认先起团队"), "默认行为是起团队");
+
+    // ultra 段：默认关闭 → 空串（renderPrompt 会过滤空段，不占 token）。
+    const ultra = byName.get("agent-whales/ultra");
+    assert.equal(ultra.order, 610, "紧跟 TEAM_POLICY(600) 之后的空位");
+    assert.equal(ultra.interpolate, false, "技能正文按字面保留，不当提示词变量解析");
+    assert.equal(ultra.text(), "", "模式关闭时交空段");
+    assert.ok(labels.every((label) => typeof label === "string" && label.length > 0), "每个 effect 都要有名字");
+  } finally {
+    host.setUltraModePathForTests(previousUltraFile);
+  }
 
   // 没有 systemPrompt 服务：安静跳过，不抛
   assert.doesNotThrow(() => host.apply({ get: () => undefined, effect: (run) => run() }));
@@ -925,7 +957,7 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
     effect: (run) => { run(); return () => {}; }
   });
 
-  assert.deepEqual(Object.keys(registered).sort(), ["whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_canvas_layout", "whales_canvas_link", "whales_canvas_list", "whales_canvas_unlink", "whales_propose_tasks", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send", "whales_visit_trace"]);
+  assert.deepEqual(Object.keys(registered).sort(), ["whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_canvas_layout", "whales_canvas_link", "whales_canvas_list", "whales_canvas_unlink", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send", "whales_visit_trace"]);
   assert.equal(typeof registered.whales_visit_send.output.render, "function", "工具必须带 output.render");
   // 网关按 OpenAI function calling 校验：parameters 必须是 { type: "object", properties } 的 JSON Schema。
   // 传「属性表」或空对象会让整轮请求 400（真实事故：whales_visit_list 变成 type: null）。

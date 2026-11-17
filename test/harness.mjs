@@ -101,11 +101,11 @@ export function loadPlugin(options = {}) {
   // eslint-disable-next-line no-new-func
   new Function("window", code)(win);
   if (registration === null) throw new Error("client.js 没有调用 window.__ModuleLoader__.load");
-  const plugin = registration.factory((spec) => {
+  const plugin = registration.factory(Object.assign((spec) => {
     requireLog.push(spec);
     if (spec === "react") return react;
     throw new Error("client.js 只允许 require(\"react\")，出现了：" + spec);
-  });
+  }, typeof options.requireAsync === "function" ? { async: options.requireAsync } : {}));
   return { registration, plugin, react, requireLog, win, storage };
 }
 
@@ -215,12 +215,16 @@ export function findByClass(tree, className) {
  *   view.tree        —— 当前渲染树（handler 会变，每次交互后要重新取）
  *   view.rerender()  —— 缓存变了（invalidate 之后）手动重画
  */
-export function createMount() {
+export function createMount(options = {}) {
   const hooks = new Map();
   const stack = [];
   let dirty = false;
   let passes = 0;
   let tree = null;
+  // 可选的 useEffect 支持（2026-11-17 画布优先波次加）：默认关，既有用例行为不变。
+  // 开启后按「deps 变了才跑」排队，每次绘制后冲刷；effect 里的 setState 会继续重画。
+  const effectsOn = options.effects === true;
+  const effectQueue = [];
 
   // 轮询定时器收编：wbCache.subscribe 会起 5s setInterval，Node 的测试进程会被它吊着
   // 永不退出（2026-11-16 实测：每条用例都被报成 HANG，其实只是进程不退）。
@@ -269,6 +273,8 @@ export function createMount() {
       return [cell.value, function (next) {
         cell.value = typeof next === "function" ? next(cell.value) : next;
         dirty = true;
+        // effect 模式下异步回来的 setState（fetch 完成）也要重画，与真 React 一致。
+        if (effectsOn) scheduleRedraw();
       }];
     },
     useRef: function (initial) {
@@ -291,7 +297,18 @@ export function createMount() {
       if (!same) { cell.fn = fn; cell.deps = deps; }
       return cell.fn;
     },
-    useEffect: function () {},
+    useEffect: function (fn, deps) {
+      if (!effectsOn) return;
+      const frame = stack[stack.length - 1];
+      const key = frame.id + "#" + frame.index++;
+      const cell = hooks.get(key) || { deps: undefined, cleanup: null, effect: true };
+      if (!hooks.has(key)) hooks.set(key, cell);
+      const same = Array.isArray(deps) && Array.isArray(cell.deps)
+        && deps.length === cell.deps.length && deps.every((one, i) => one === cell.deps[i]);
+      if (same) return;
+      cell.deps = deps;
+      effectQueue.push({ cell, fn });
+    },
     // 忠实模拟 React 的「subscribe 引用变了就退订重订阅」：
     // 这正是 useWb 传 inline 函数会成环的那条链，旧垫片忽略 subscribe 所以抓不到。
     // 键必须带调用位（frame.index++）：鲸鱼图层一层里就有 6 个 useSyncExternalStore，
@@ -340,13 +357,27 @@ export function createMount() {
     };
   }
 
+  function flushEffects() {
+    while (effectQueue.length > 0) {
+      const item = effectQueue.shift();
+      if (typeof item.cell.cleanup === "function") {
+        try { item.cell.cleanup(); } catch (error) { /* cleanup 失败不挡后续 */ }
+      }
+      const out = item.fn();
+      item.cell.cleanup = typeof out === "function" ? out : null;
+    }
+  }
+
   function run(type, props) {
+    let local = 0;
     do {
       passes += 1;
-      // 渲染里直接调 setter 会永远不收敛，早炸早发现。
-      if (passes > 50) throw new Error("createMount: setState 循环超过 50 次");
+      local += 1;
+      // 渲染里直接调 setter 会永远不收敛，早炸早发现（按单次 run 计，不跨交互累计）。
+      if (local > 50) throw new Error("createMount: setState 循环超过 50 次");
       dirty = false;
       tree = draw({ type: type, props: props }, "root");
+      if (effectsOn) flushEffects();
     } while (dirty);
     return tree;
   }
@@ -370,7 +401,13 @@ export function createMount() {
       run(type, props);
       return {
         get tree() { return tree; },
-        rerender: function () { dirty = true; run(type, props); return tree; }
+        rerender: function () { dirty = true; run(type, props); return tree; },
+        /** 等异步回来的 setState 把树重画完（effect 模式下 fetch 是 Promise）。 */
+        settle: async function (rounds = 5) {
+          for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve));
+          if (dirty) run(type, props);
+          return tree;
+        }
       };
     }
   };

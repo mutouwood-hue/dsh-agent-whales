@@ -21,6 +21,9 @@ const pluginDir = join(here, "..");
 
 // host.apply 会顺手装 worker preset：不把目标根指到临时目录就会往真实 ~/.dsh 写文件。
 process.env.DSH_AGENT_WHALES_PRESET_DIR = mkdtempSync(join(tmpdir(), "aw-skill-presets-"));
+// 同理，ultra 模式的状态文件（宿主 apply 会读它决定初始开关）也要指开——只读不写，
+// 但读到你机器上的真实开关会让「默认关」的断言变成偶然。
+host.setUltraModePathForTests(join(mkdtempSync(join(tmpdir(), "aw-skill-ultra-")), "ultra.json"));
 
 describe("parseSkillFrontmatter", () => {
 	test("三个顶层标量 + 正文分开", () => {
@@ -135,10 +138,17 @@ describe("createBundledSkillProvider", () => {
 		assert.ok((data.description || "").length > 0, "description 不能空");
 		assert.equal(data.name, "whales-project-playbook", "目录名与 frontmatter 的 name 必须一致");
 		assert.ok(body.includes("# 鲸鱼项目协作协议"), "正文不能空");
+		// 2026-11-16 新增的 deep-effort（ultra 模式强制加载的那份契约）：同样要过发布门禁。
+		// 它同时是「系统提示段」的正文来源，所以 name 掉包会被 deepEffortSectionText 拒收。
+		const effort = readFileSync(join(pluginDir, "skills", "deep-effort", "SKILL.md"), "utf8");
+		const effortParsed = parseSkillFrontmatter(effort);
+		assert.equal(effortParsed.data.name, "deep-effort", "目录名与 frontmatter 的 name 必须一致");
+		assert.ok((effortParsed.data.description || "").length > 0, "deep-effort 的 description 不能空");
+		assert.ok(effortParsed.body.includes("先取证"), "deep-effort 正文不能空（四条硬要求之一要在）");
 		// provider 直接读仓库副本也要能发现（等于验证 files 白名单漏项时的症状）
 		const provider = createBundledSkillProvider({ skillsRoot: pathToFileURL(join(pluginDir, "skills") + "\\"), providerName: "dsh-agent-whales" });
-		const names = provider.list().map((candidate) => candidate.name);
-		assert.deepEqual(names, ["whales-project-playbook"]);
+		const names = provider.list().map((candidate) => candidate.name).sort();
+		assert.deepEqual(names, ["deep-effort", "whales-project-playbook"]);
 	});
 });
 
@@ -169,7 +179,7 @@ describe("随包 skill 注册进宿主", () => {
 		const provider = registered[0];
 		assert.equal(provider.name, "dsh-agent-whales", "provider 名 = 包名（用户对得上来源）");
 		const candidates = provider.list();
-		assert.deepEqual(candidates.map((candidate) => candidate.name), ["whales-project-playbook"]);
+		assert.deepEqual(candidates.map((candidate) => candidate.name).sort(), ["deep-effort", "whales-project-playbook"], "协议层 + deep-effort 两个随包 skill 都要能发现");
 		// 卸载真的会发生：清理函数倒序跑（后注册的先清理）
 		assert.ok(cleanups.length > 0, "必须把 disposer 挂到 ctx.effect，否则热重载会重复注册");
 		for (const cleanup of cleanups.slice().reverse()) cleanup();

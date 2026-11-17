@@ -357,6 +357,177 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 **主题**默认浅色，设置里可切暗色；两套 token 一一对应（`WB_TOKENS`），组件只引用
 `var(--daw-*)`，切主题即换色，没有第二套组件。
 
+### 画布优先（PRD v2.2 九（续二）· 波次 1，2026-11-17）
+
+用户不必先开 DSH 对话：项目列表的主按钮是「**✦ 从画布开始**」，写下目标点发送 →
+`ctx.sessions.create({workspaceId})` 建主对话（不跳页，默认第一个工作区）→ `POST /projects`
+自动建项目（名取首句首行、目标 = 原话）→ 直接进项目画布，Composer 卡挂上后**补交这一句**
+（`wbPendingFirst` 暂存，取走即删，只交一次）。之后就在画布 Composer 卡里接着说：
+Enter 发送、Shift+Enter 换行、输入法组合中不发，「在对话中打开」跳官方 Chat（同一个会话）。
+
+- **怎么拿到真输入接口**：工作台 `main` 条目声明 session 作用域子槽
+  `whales.canvas.session`，渲染器因此下发 `SessionProvider` + `renderSlot`；
+  `ctx.sessions.retain(mainSessionId, {source: "whalesCanvas"})` 拿引用 →
+  `SessionProvider session={ref}` → 子槽组件 `WbSessionComposer` 拿到该会话的
+  `inputActions` / `useSession` / `useInput`。发送 = `setDraft` + `submit`，与官方输入框同一条提交链。
+  官方 `ui-subagent` 右侧栏对话是同一做法（源码逐字核实）。卸载即 `release`。
+- **回复怎么上画布**：新路由 `GET /sessions/:id/messages?limit=`（只读、无 token），
+  走 `sessionQuery.readSession` 折叠 user/assistant 文本行，单条 4000 字封顶、最多 40 条；
+  卡上显示「最近一轮」（最后一条用户消息 + 它之后的最后一条回复，新问题没回就不拿旧回复充数），
+  运行中 2.5s 一拉，跑完再拉一次。读不到回 200 + 业务码，不刷 500。
+- **边界**：只有用户点了 / 回车了才提交（禁止清单第 1 条不变）；唯一的「补交」是用户在
+  「从画布开始」里亲手点的那一句。拿不到 `SessionProvider` 的旧宿主自动退回 Q1「放入输入框」。
+  `SessionProvider` 在引用失效时会抛，外面包了 `WbBoundary`，不会带崩工作台。
+- **真机证据**（隔离实例 `127.0.0.1:3091` + Tabbit）：从画布开始 → 新会话出现在 DSH 侧栏
+  「默认工作区」下 → 首句（seq 8）与画布卡里回车的第二句（seq 23）都进了会话日志；控制台 0 错误。
+  截图 `.dev/evidence-2026-11-17/w1-*.png`。**未验**：隔离实例没配模型，回复上画布只有单测覆盖。
+- 顺带修：宿主 `WorkspaceView` 是 `{workspaceId, path, title}`，按 `{id, name}` 认会让工作区下拉为空。
+- 测试：`test/canvas-first.test.mjs` 13 例 + `index.test.mjs` 3 例；`test/harness.mjs` 的
+  `createMount({ effects: true })` 新增可选 `useEffect` 支持（默认关，既有用例行为不变）。
+
+### 子会话自动入项目 + §51.4 组建方案（PRD v2.2 · 波次 2，2026-11-17）
+
+- **组建方案**：`whales_propose_tasks` 在项目提案里多两类条目——`conversations`
+  （`{key, title, duty?, agentPreset?}`，最多 6 个，`main` 保留）与 `links`（两端写 `main` 或对话 key）。
+  任务的 `suggestedOwner` 写对话 key 时，确认后**直接指派给新对话（只指派、不派发——确认不等于开工）**。
+  画布提案卡在确认前就列出「将新建 N 个对话 + 各自 preset + 职责」（PRD 原话：新建之前就显示数量）。
+- **确认时**按「建对话 → 建关联 → 建任务」逐项执行：宿主 `sessionController.create`
+  （落在主对话所在工作区、可带 preset）→ 登记成员（`addedBy: "proposal"`、带角色名 `title`）并自动连主对话 →
+  职责写进对话简报（人代写 `proxy`）→ 提案里的额外互发线。逐项结果，失败的记 `conversation:<key>`，
+  同版本重试只补缺的（`confirmed.conversations` 记 key → sessionId，不重复建）。
+- **子会话自动入项目**：父会话是项目成员、自己还不属于任何项目的会话，自动登记（`addedBy: "auto"`、
+  `parentSessionId`）并与父会话连互发线；孙会话跟着进。触发：① 宿主 `tools/result` 里
+  `spawn_teammate` / `subagent` 等派生工具结束后延迟 0.3s / 2s 各收一次（与活动采集共用一个监听器）；
+  ② 画布发现候选（`wbAdoptCandidates`）时调 `POST /projects/:id/adopt` 兜底。用户手动移出的记入
+  `project.dismissed`，不再拉回；手动加回即解除。只读预检：没有可收的就不抢写锁、不重写 store。
+- **顺带修（真机抓到）**：① 画布全屏后提案卡被 `.daw-wb-stage` 盖住、「确认」点不到 → 改成浮在画布左下的
+  `daw-wb-floatpanel`，已确认的默认收起；② Agent 列行距 138 小于卡高 148，两张卡叠 10px → 改 168
+  （与占位 / MCP 列同口径）；③ 新会话没标题时 Agent 卡和 Thread「执行顺序」都显示 sessionId → 用角色名兜底；
+  ④ 项目提案的 `GET /proposals` 不再依赖宿主团队服务（团队包缺失时画布提案卡也看得到）。
+- **真机证据**（隔离实例 + Tabbit）：预置一份组建方案 → 画布上点「确认」→ 宿主真建出 2 个会话，
+  成员 / 3 条互发线 / 2 条任务（owner 已指派、`pending`）全部到位，Agent 卡显示「后端 / 前端」，
+  节点两两求交 0 处，控制台 0 错误。截图 `.dev/evidence-2026-11-17/w2-*.png`。
+  **未验**：隔离实例没有模型、也没装团队包，`spawn_teammate` 真派生 → 自动入项目只有单测（含监听器触发）覆盖。
+
+### 画布元素化 + React Flow 底座 + 两种线（PRD v2.2 · 波次 3，2026-11-17）
+
+- **新画布 = React Flow 12.12.1 + dagre 3.1.3（均 MIT）**，打成插件的**包内按需 chunk**
+  `lib/client.flow.js`（约 257KB，`tools/flow-chunk/build.mjs` 用 esbuild 生成，勿手改）。
+  宿主契约（`dsh-client-modules` 源码逐字核实）：主包 `require.async("./client.flow.js")` →
+  宿主按 `/plugins/dsh-agent-whales/client.flow.js?rev=` 拉同目录文件；chunk 自己
+  `__ModuleLoader__.load({ id, chunk: "client.flow.js", factory })`。React / ReactDOM 不打包，
+  用宿主共享模块表里同一份（页面实测 18.3.1）——**主包仍只同步 `require("react")`，
+  `client.js` 约 500KB，560KB 门禁不动**。
+- **不写第二套节点 UI**：经典舞台的每张卡（Agent / Composer / 上下文 / MCP / Thread / 占位）
+  构建时留引用，React Flow 的自定义节点直接装同一个元素；卡头是拖拽把手（卡里有输入框）。
+  四边各一个入口 + 出口锚点，边按两端相对位置自动选边（同列上下排走上下边）。
+- **两种线（需求负责人决策）**：实线 + 箭头 = **依赖**（上游 → 下游，可在画布上画 / 删，落库为任务
+  `blockedBy`，新路由 `POST /projects/:id/dependencies {from,to,action}`：下游未完成任务全部等上游
+  未完成任务；成环 40705 整次拒绝不半写；两端没有任务时拒绝并说「先派任务」）；
+  虚线 = **允许互发**（`project.links`，不变）。上下文 → Agent 改成**粗管**（只读），
+  MCP 约束改**点线**；左上角连线模式条（允许互发 / 依赖）+ 常驻五行**线型图例**。
+- **元素表**：`canvas.json` 每页多一个 `elements`（与位置表共用 rev / CAS）。种类
+  `note / group / file / link / flow / prototype / library / edge`，坐标可省略（null → 自动布局），
+  `provenance {by, sessionId, sourceMessageIds}`；人写的标 `userEdited`，**agent 写入跳过人改过的元素
+  并在 `locked` 里点名**（D-2 手改锁定）；删元素顺带删挂在上面的创作连线；单元素 data ≤ 16KB、
+  每页 ≤ 400 个。新路由 `POST /canvas/elements`（带 token）；`PUT /canvas` 与 `whales_canvas_layout`
+  只覆盖位置表、**不再清空元素表**。
+- **新 / 经典切换**：工具条按钮，`localStorage` 记住，默认新画布；宿主没有 `require.async`
+  （旧宿主 / 离线垫片）或 chunk 加载失败时自动用经典舞台，并在按钮 title 里说原因。
+- **顺带修（真机抓到）**：画布全屏后**工具条与提示条一直被 `inset:0` 的舞台盖住**——「删除」
+  「一键全清」从来点不到 → 改为浮在舞台上（底部居中 / 顶部居中）；新画布 fitView 不放大过 100%；
+  缩放控件挪到右上，避开左下的提案浮层；画布页签说明从「只承载三类节点」改成超级画布口径。
+- **真机证据**（隔离实例 + Tabbit）：chunk `200` 加载、React Flow 渲染 6 个节点（Agent 卡显示
+  「后端 / 前端」）、0 重叠、Composer 卡在新画布里照常可用；**点依赖线 → 工具条「删除」→ 任务
+  `blockedBy` 清空；切「依赖」模式从「后端」右锚点拖到「前端」左锚点 → `导入弹窗.blockedBy =
+  [导入接口]`，画布出现实线并标「等待 ptask-…」，提示「已加依赖：1 条任务改为等待上游」**；
+  控制台 0 错误。截图 `.dev/evidence-2026-11-17/w3-*.png`。
+- 测试：`test/flow-canvas.test.mjs` 8 例（边规格 / 选边 / 节点清单 / chunk 四态 / 引擎偏好 /
+  接线 / chunk 契约）+ `index.test.mjs` 4 例（元素表 CAS 与锁定 / 依赖落库）。
+
+### 文件 / 外部引用节点（PRD v2.2 · 波次 4，2026-11-17）
+
+- **只认事实，不靠模型自报**：新路由 `GET /projects/:id/references`（只读、无 token）把三路来源合并——
+  ① 成员会话日志 `tool/call` 里读 / 写类工具的路径参数（`file_path / path / paths / uri=file://…`；
+  工具名含 write / edit / patch / create… 记「改过」，其余记「读过」；`pwsh` 这类命令行不猜）；
+  ② 任务 `report.artifacts`（记为 owner「改过」）；③ 用户消息里的 `@路径`（含 `@"带空格的路径"`）记「@引用」，
+  以及 http(s) 链接（含 `web_fetch` 的 url）。链接按域名分 **Notion / 飞书 / 网页**（D-1 扩展：外部引用也做节点）。
+  agent 中继消息里的链接不算用户引用。路径归一去重（分隔符、尾斜杠、Windows 盘符大小写）；
+  日志只扫尾部 3000 条、每会话 10 秒缓存（画布 5 秒轮询，长会话不能每次全量解析）。
+- **画布**：文件 / 链接节点排在左列上下文节点下面，用「上下文」同款粗管连到碰过它的对话，
+  边上标「读过 / 改过 / @引用」（改过更粗）；**每个对话只展示最近 4 个文件，其余折叠成「还有 N 个较早的文件」**；
+  链接最多 8 个，双击在新窗口打开；点选看「谁读过 / 改过几次」。新旧两种画布都能显示。
+- **顺带修（真机抓到）**：文件节点比首帧晚到，落在初始视口外 → 节点集合变化时自动 `fitView`；
+  文件卡按 72px 排会两两相叠 → 改按真实卡高 108px 行距，长链接 / 长路径断行。
+- **真机证据**：在画布 Composer 卡里发一句带 `@"D:\…\README.md"`、Notion 链接、普通网页链接的话 →
+  宿主 references 返回 1 个文件 + 2 个链接（notion / web 分类正确）→ 画布出现 3 个节点、3 条「@引用」粗管，
+  9 个节点 0 重叠、全部在视口内，控制台 0 错误。截图 `.dev/evidence-2026-11-17/w4-file-link-nodes.png`。
+  **未验**：隔离实例没有模型，「agent 读写文件 → 读过 / 改过」只有单测（含真实 tool/call 事件形状）。
+
+### 流程图自动生成，直接画在画布上（PRD v2.2 · 波次 5，2026-11-17）
+
+- **两个新工具**：`whales_flow_read`（读项目画布上已有的流程图，含人改过锁定的节点；并列出当前会话里
+  可引用的消息编号 `m<序号>`）与 `whales_flow_draw`（`{flowId?, title, nodes:[{key, shape: start|end|step|decision,
+  text, sourceMessageIds}], edges:[{from, to, label?}]}`）。**直接落画布**（九.2 决策），不先过提案。
+- **硬约束保留**：每个节点必须引用调用方会话里**真实存在**的消息编号，引用不到的（含编造的 `m99`）直接丢掉并在
+  `dropped` 里说明，指向被丢节点的边一起丢；有证据的节点不足 2 个时回「暂不足以生成流程图」并说缺什么。
+  **节流**：同一张图画过之后，用户新说的话不到 2 句不重画（v2.1 当初禁止自动生成的理由是「太吵」）。
+  **手改锁定**：人改过的节点（拖动 / 改字）重画时不动、也不会被删，只补新增；标题与 AI 节点照常更新。
+- **四层机制第 2 层**：新增系统提示段 `agent-whales:flow`（order 640，静态文本），点名两个工具与证据规则——
+  讨论里出现步骤 / 分支时由 Lead 自己判断何时画，不做无人值守定时生成。
+- **画布**：流程图是一个绿色虚线分组框（排在 Agent 列右侧），里面起止 = 胶囊、步骤 = 圆角矩形、判断 = 菱形，
+  流程线绿色带箭头和「是 / 否 / 例外」标签，dagre 自上而下自动排版（人拖过的位置保持）。AI 画的节点带「AI」角标，
+  悬停看来源消息编号；分组标题栏有「＋ 步骤」「撤销 AI 生成」（只删 AI 画的且人没改过的）；双击改字、拖动、
+  在同一张图的两个步骤之间拖线建流程线、选中后工具条「删除」。经典画布只显示一行摘要。
+- **真机证据**：用插件自己的 `applyCanvasElements`（与 `whales_flow_draw` 同一写入路径）在隔离 home 预置一张
+  5 步流程图 → 画布出现分组框 + 5 个形状节点 + 5 条流程线、全部带 AI 角标，与其他节点 0 重叠；**双击「给字段映射建议」
+  改字 → 该节点 `userEdited=true`；点「撤销 AI 生成」→ 只剩人改过的那一步与分组框**；控制台 0 错误。
+  截图 `.dev/evidence-2026-11-17/w5-*.png`。**未验**：隔离实例没有模型，「Lead 自己调 `whales_flow_draw`」只有单测。
+- **踩坑记录**：一度以为新画布卡死主线程——实际是前几轮验证留在 Tabbit 里的 7 个同源 DSH 页面占满了浏览器对
+  `127.0.0.1:3091` 的长连接名额，新页面连 HTML 都拿不到。关掉旧标签即恢复；为排查顺手做了
+  `_scratch/flow-preview.mjs`（真 React 18 + 真 chunk + 罐头数据），确认渲染本身不卡。
+
+### 原型帧 + 组件库节点（PRD v2.2 · 波次 6，2026-11-17）
+
+- **架构（已确认）**：React Flow 是底座，Puck（`@puckeditor/core` 0.24，MIT）只活在「原型帧」节点里。
+  原型 JSON 只写**通用词表**（`lib/prototype-vocab.js`，22 个：Heading / Text / Button / Input / Textarea / Select /
+  Checkbox / Switch / Badge / Alert / Upload / Table / Tabs / Stat / Navbar / Sidebar / Divider / Image / Card /
+  Section / Columns / Dialog；Card / Section / Dialog / Columns 带插槽），**不写具体组件库**。
+- **组件库节点（D-6：换节点 = 换组件）**：画布上一个组件库节点决定所有原型帧用哪套实现，下拉切换即全部重渲染，
+  节点上显示「覆盖通用词表 N / 22」、缺哪些、License。包里没有的组件画虚线占位并写明「当前组件包没有 X」，
+  不偷偷换成别家实现。没有组件库节点时用内置包。
+- **内置 shadcn/ui 风格包**：按 shadcn/ui（MIT）new-york · zinc 的类名与 CSS 变量复刻外观（原型只要长得对、字段可改，
+  不带 Radix 交互），Tailwind 3 只扫这一个文件生成约 19KB 样式，覆盖 22 / 22。
+- **本地导入（如 CDS）**：`~/.dsh/agent-whales/component-packs/<id>/{manifest.json, bundle.js, styles.css}`，
+  新路由 `GET /component-packs`（列表 + 坏包原因）与 `GET /component-packs/:id/bundle.js|styles.css`（只下发这两个文件，
+  4MB 上限，拒绝路径穿越）。bundle.js 是 CommonJS，**只能 require react / react-dom / react/jsx-runtime**（共享同一份 React），
+  导出组件表或 `(React) => 组件表` 都认。**它在浏览器里与插件同权限运行，只放你信任的包。**
+  CDS 适配模板 `tools/component-packs/cds/`（适配代码是本插件的，MIT；`@company/cds-react` 是 UNLICENSED 受控包，
+  **不随插件分发**）：`node tools/component-packs/cds/build.mjs --cds <装了 cds-react 的 node_modules>`，产物 112KB，
+  CDS 3.0.8 覆盖 22 / 22。
+- **样式隔离**：预览是 iframe + `createPortal`，组件包 CSS 只注进 iframe（真机核实 DSH 页面上没有泄漏）；
+  编辑器里组件包 CSS 经 Puck 的 `overrides.iframe` 只注入 Puck 自己的画布 iframe。
+- **按需加载，主包门禁不动**：`lib/client.proto.js`（41KB：原型帧 / 组件库节点 / 内置包 / Puck 数据渲染器）
+  在画布上有原型或组件库节点时才加载；`lib/client.puck.js`（1.1MB：完整 Puck 编辑器，含 tiptap / prosemirror / dnd-kit，
+  均 MIT）只在第一次点「编辑」时加载。预览不用 Puck 的 `Render`——它会把整套富文本编辑器带进来，自己按同口径渲染
+  `{type, props}` 树（slot 是子数组）。两个 chunk 由 `tools/flow-chunk/build-proto.mjs` 生成，勿手改。
+- **agent 侧**：新工具 `whales_prototype_draw {prototypeId?, title, width?, puck, sourceMessageIds}`——词表外的组件、
+  插槽不是数组、嵌套 > 6 层、节点 > 200 个都拒；要消息证据；人改过的原型锁定，再画回「已锁定，换一个 prototypeId」。
+  原型元素单独放宽到 64KB（其他元素仍 16KB），元素写入路由的请求体上限放到 256KB。系统提示段第 5 条点名它。
+- **画布操作**：工具条「＋ 原型帧」「＋ 组件库」；原型帧卡头「编辑」开全屏 Puck（左侧 22 个积木、右侧字段、Publish 保存，
+  保存走元素表 CAS，人改过即锁定）；拖动卡头移位置；选中后工具条「删除」。
+- **顺带修（真机抓到）**：① 画布浮层容器 `position:relative` 的空盒让原型编辑器 `inset:0` 塌成 0×0 → `display:contents`；
+  ② Puck 检测不到自己的样式会把编辑器 `visibility:hidden` → 编辑器 chunk 加载即注入它的样式；
+  ③ `WbCanvasPage` 里 `canvasSnap` 等 hook 在「项目还没到」的早退之后（项目从无到有时 hook 数量会变）→ 挪到早退之前。
+- **真机证据**（隔离实例 + Tabbit）：画布出现组件库节点 + 原型帧（shadcn，iframe 里 `bg-primary` 等 shadcn 类名）→
+  下拉切到「CDS 3.0.8（本地）」→ 拉取 `bundle.js` / `styles.css`、原型帧改用 CDS 渲染（DataTable、Upload、FormField…）、
+  License 显示 UNLICENSED、DSH 页面无样式泄漏 → 点「编辑」加载 Puck，22 个积木与 CDS 渲染的画布 → Publish →
+  元素 `userEdited=true`、编辑器关闭；控制台 0 错误。截图 `.dev/evidence-2026-11-17/w6-*.png`。
+  **未验**：隔离实例没有模型，「Lead 自己调 `whales_prototype_draw`」只有单测。
+- 测试：`test/proto-chunk.test.mjs`（真 React 18：内置包覆盖率、Puck 数据渲染与插槽嵌套、缺组件占位、本地包
+  require 白名单 / 两种导出 / 404）、`flow-canvas.test.mjs` 5 例、`index.test.mjs` 5 例（组件包列表与下发、原型校验、
+  原型工具、元素大小上限）。
+
 ### 真浏览器实跑 + useWb 重订阅环（2026-11-16）
 - **新增 `_scratch/live-preview.*`**：把真 `client.js` 弄进真浏览器跑（CDN/本地 React + fetch 垫片 +
   最小 ctx + 真 ReactDOM 挂载）。存在的理由很直接：DSH GUI 要签名 cookie 才进得去，而这类
@@ -520,7 +691,12 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 | 路由 | 方法 | 作用 |
 |---|---|---|
 | `/projects` · `/projects/:id` | `GET` | 项目列表 / 单项目（成员、关联线、简报） |
-| `/projects/:id/members` · `/members/:sid` | `POST` / `DELETE` | 加入 / 移除项目对话（一个对话只能属于一个项目，`40701`） |
+| `/projects/:id/members` · `/members/:sid` | `POST` / `DELETE` | 加入 / 移除项目对话（一个对话只能属于一个项目，`40701`；移除会记入 `dismissed`） |
+| `/projects/:id/adopt` | `POST` | 子会话自动入项目的兜底：把父会话在本项目里的子会话收进来（带 token） |
+| `/projects/:id/dependencies` | `POST` | 画布依赖线（实线）落库：`{from, to, action: add\|remove}` → 任务 `blockedBy`，成环 40705（带 token） |
+| `/projects/:id/references` | `GET` | 文件 / 外部引用节点：会话日志读写路径 + report 产物 + 用户 @ 与链接（只读） |
+| `/canvas/elements` | `POST` | 画布元素表增删改（便签 / 分组 / 流程图 / 原型帧 / 组件库 / 创作连线），与位置表共用 rev（带 token） |
+| `/component-packs` · `/component-packs/:id/bundle.js\|styles.css` | `GET` | 组件包列表（内置 shadcn + 本地导入）与本地包文件下发（只读） |
 | `/projects/:id/links` | `POST` / `DELETE` | 建 / 删无向关联线（同项目、无向、幂等） |
 | `/projects/:id/brief` | `GET` / `PUT` | 项目简报读写（`expectedVersion` CAS） |
 | `/briefs/:sessionId` | `GET` / `PUT` | 对话简报读写（人可代写，标 `proxy`） |
@@ -532,6 +708,7 @@ Composer（主对话）。Agent ↔ Agent 是**无向关联线**（项目 `links
 | `/inbox?projectId=` | `GET` | 需要我处理四组：提案待确认 / worker 求人 / 超 scope 退回 / 系统提醒 |
 | `/snapshot` | `GET` | 全量快照：五个 store 的**原始内容**（不是视图）+ `present` / `readonly` / `backupPath` 标注。只读、无 token——给「导出快照（ZIP）」按钮供料 |
 | `/sessions` | `GET` | 会话目录（加入对话列表、owner 显示名、画布 Agent 节点用） |
+| `/sessions/:id/messages?limit=` | `GET` | 画布 Composer 读主对话最近几轮（user/assistant 文本行，默认 8、上限 40，单条 4000 字封顶） |
 | `/canvas?projectId=` | `GET` / `PUT` | 画布位置表。节点是派生的，**位置是唯一「人摆过」的状态**。`expectedRevision` CAS，过期 `40902` 并带回当前版本——不覆盖别人刚摆的位置 |
 | `/proposals` · `/proposals/:id/confirm` | `GET` / `POST` | 提案只读展示 + 确认后逐条建任务 |
 
@@ -927,7 +1104,7 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 
 ## 版本与兼容性
 
-当前插件版本：**0.24.0**（M6 项目工作台：节点画画布 + 任务表 report 四态 + 简报按需读取 + worker preset）。
+当前插件版本：**0.25.0**（M6 项目工作台：节点画画布 + 任务表 report 四态 + 简报按需读取 + worker preset + **ultra 模式：强制加载 deep-effort 执行契约**）。
 
 | 宿主 | 团队段 | 说明 |
 |---|---|---|
@@ -956,7 +1133,7 @@ npm test          # = node --test test/，跑 test/ 下全部 *.test.mjs
 `home-paths.test.mjs`（数据根口径：`DSH_HOME` 解析与宿主逐条一致）、
 `visit-trace.test.mjs`（回合轨迹：`foldTurns` / `renderTranscript` 纯函数 + `whales_visit_trace` 读取路径、入参与访问闸，fixture 用真实落盘会话）、
 `landing-path.test.mjs`（落点归一：`normalizeLandingPath` / `canonicalLandingPath` 纯函数 + 入库即归一的端到端 + 画布 `wbWhereKey` 去重）、
-`bundled-skill.test.mjs`（随包协议 skill：frontmatter 解析 / provider 发现与加载 / 缺目录告警 / 注册与卸载 / 仓库副本自身合法）、
+`bundled-skill.test.mjs`（随包协议 skill：frontmatter 解析 / provider 发现与加载 / 缺目录告警 / 注册与卸载 / 仓库副本自身合法 / **deep-effort 同过发布门禁**）、
 `snapshot-export.test.mjs`（快照导出：宿主路由五文件标注 / CRC-32 标准向量 / UTF-8 与 Node 逐字节一致 / ZIP 结构可解 / README 自解释 / 条目挑选 / 导出流程走到下载）、
 `workbench.test.mjs`（M6 工作台纯逻辑 + 十屏渲染冒烟 + W1.5 事件台）、
 `workbench-draft.test.mjs`（W2 提案带入与目标条）、
@@ -975,7 +1152,9 @@ teams 模式、选择器引用稳定性）、素材表（每个精灵是 WebP da
 点开才出孙级、孤儿降级为根、成环不死循环、行里保留父会话 key）、任务与气泡（进行中优先、无主任务归 Lead、
 气泡三层回退）、子 agent 折叠渲染与「收工灰显 / 开关关闭即隐藏」、拖拽（自己的坐标优先、子级跟随祖先、
 坐标取整与清空）、设置夹值、组件渲染（渲染出几只、关闭开关、缺宿主钩子不抛、设置页控件齐全），
-以及宿主半边（注册恰好一个策略段落、无 `systemPrompt` 服务时静默跳过、`section()` 抛错被兜住）。
+以及宿主半边（注册两个策略段落、无 `systemPrompt` 服务时静默跳过、`section()` 抛错被兜住、
+**ultra 模式开关的全链路**：GET 回显 / 403 / 400 / 204 / 落盘 / 重启读回 / 持久化优先于 config /
+只读降级回 500 且内存不翻）。
 
 视觉核对：`node _scratch/preview.mjs` 生成页面，再用 headless Chrome 截图：
 
@@ -992,11 +1171,12 @@ node _scratch/preview.mjs
 
 | 文件 | 作用 |
 |---|---|
-| `lib/index.js` | 宿主半边：注册「团队协作」策略段落、MCP 约束层（`mcpLinks` 表 + 全局 `tools.guard()` 只拦 `mcp__` 工具）（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、五个 `whales_visit_*` 串门工具（可运行时开关，其中 `whales_visit_trace` 走 `sessionQuery` 读回合轨迹）、随包协议 skill provider（`skills/` → `ctx.skills`，rank 600 可被项目副本覆盖）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
+| `lib/index.js` | 宿主半边：注册「团队协作」策略段落、**ultra 模式（强制加载 deep-effort 执行契约：`systemPrompt` 段 + `POST /api/ultra` 开关 + `ultra.json` 持久化）**、MCP 约束层（`mcpLinks` 表 + 全局 `tools.guard()` 只拦 `mcp__` 工具）（官方 `team:policy` 在时让位；`spawn_teammate` 不可见时不输出）、五个 `whales_visit_*` 串门工具（可运行时开关，其中 `whales_visit_trace` 走 `sessionQuery` 读回合轨迹）、随包协议 skill provider（`skills/` → `ctx.skills`，rank 600 可被项目副本覆盖）；监听 `tools/execute` / `tools/result` 记「当前工具」，用 `GET /agent-whales/api/activity` 提供给浏览器半边，`POST /agent-whales/api/visit-tools` 接受开关。服务缺失一律静默降级 |
 | `lib/client.js` | 浏览器半边：设置 store、计数逻辑（纯函数）、家族树、图层、设置页、状态表情状态机、素材 loader（**不含图片数据**，运行期从宿主路由按皮肤拉）；**M6 项目工作台**（十屏 + 节点画布 + 设计 token，纯逻辑可离线测）；快照 ZIP 打包与下载（CRC-32 / store ZIP / 自解释 README） |
 | `cordis.patch.yml` | 默认层（**唯一真相**）：插入 `agent-whales` + 团队服务/工具/面板三行，并 `disabled` 掉旧 subagent 四行 |
 | `presets/dsh-agent-whales-worker/` | 执行器 preset（随包分发，`apply` 时装到用户 preset 根；执行 Session 专用，不供手动选择） |
 | `skills/whales-project-playbook/SKILL.md` | 随包协议 skill：模型按需加载的项目协作手册（派活 / 盯进度 / 简报 / 画布 / 串门 / 台账与边界），经 `ctx.skills.registerProvider` 注册，rank 600——项目内放同名副本（rank 200）即可覆盖 |
+| `skills/deep-effort/SKILL.md` | 随包执行契约 skill（49 行）：效果优先于成本，四条硬要求（先取证 / 必须自验 / 不确定就多查 / 交付前自检边界）。**ultra 模式打开时由宿主读它、注册成系统提示段强制加载**（顺序 610）；关掉时交空段。frontmatter 的 `name` 必须是 `deep-effort`（掉包防护） |
 | `assets/*.webp` | 28 张精灵图（**随包分发**，运行期由宿主路由按皮肤提供；另 2 张 Martty 像素小人的 PNG 源在 `assets/pet/`） |
 | `assets/manifest.json` | 运行期素材清单：`{version, keys:{key:{w,h,bytes,skin}}}`，宿主路由的白名单来源（2.8KB） |
 | `assets/pet/` | 经典皮肤的两张上游 PNG（Martty，MIT）+ 复现说明；`c-idle` / `c-work` 的唯一源 |
@@ -1021,7 +1201,7 @@ node _scratch/preview.mjs
 | `test/mcp-canvas.test.mjs` | MCP 约束层浏览器侧纯函数（三类节点派生 / 连线对 / 按会话允许集合 / MCP id 判别 / i18n） |
 | `test/mcp-concurrency-contract.test.mjs` | 探针实测契约的回归（`sessionIdOfAgent` 剥前缀含主会话 / `agent.session.id` 兜底 / 并发确实发生过 / 放行工具里没有 MCP 工具 / 主会话不被当成 worker），fixture 是真机数据 |
 | `test/mcp-canvas-render.test.mjs` | MCP 约束层渲染 + 交互（已连接 chip、Agent 徽标、无服务占位、挂掉不崩、拖线发 POST、判重不发请求、全清发 DELETE） |
-| `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、串门工具（含 `whales_visit_trace` 的入参与读取路径）、活动接口、项目任务表、简报、提案、report、handoffs、inbox、sessions、events 台账与三动作、preset 安装器） |
+| `test/index.test.mjs` | 宿主半边用例（策略段落注册与兜底、**ultra 模式（默认关 / config 默认 / 持久化优先 / 落盘失败 500 / 坏文件降级 / 段文本与防重复加载表头）**、串门工具（含 `whales_visit_trace` 的入参读取路径）、活动接口、项目任务表、简报、提案、report、handoffs、inbox、sessions、events 台账与三动作、preset 安装器） |
 | `test/client-robustness.test.mjs` | 对抗性用例（畸形输入、缺服务、边界值） |
 | `test/meta.test.mjs` | 发布门禁用例（清单契约、`files`/`exports`、patch BOM 与结构、`npm test` 覆盖面） |
 | `test/index.js` | `node --test test/` 的目录入口，导入全部 `*.test.mjs` |
@@ -1058,6 +1238,13 @@ node _scratch/preview.mjs
   提案工具 + confirm→事件台/待办/交接→画布 GET/PUT/GET→MCP 建链幂等 + 不存在服务 40709→
   **跨项目阻塞 40704**→**进程重启后**项目/任务/report/核对字段/画布节点/事件台账全部还在。
   这条补上了一直缺的一角：既有 370 个用例都是「假 fetch + 直接调 handler」，从没验过真实 TCP。
+- **已验证 · ultra 模式（2026-11-16，`test/index.test.mjs` + `test/client-robustness.test.mjs`）**：
+  默认关（`GET /activity` 回 `ultra:false`、段交空串）；`config: { ultra: true }` 可改默认；
+  设置页开关 `POST /api/ultra`（同源 token，403/400/204 分级）→ `ultra.json` 原子落盘 →
+  **重新 apply（模拟重启）后读回打开状态**；持久化优先于 config；坏文件备份 + 只读降级不抛；
+  落盘失败回 500 且内存状态不翻（不会出现「界面开着、重启后关了」）；段文本含四条硬要求与
+  防重复加载表头，`interpolate: false` 按字面保留。客户端：未就绪 disabled、跟随宿主真相、
+  403/网络失败回滚、未拿到 token 不发请求。
 - **已验证 · 真浏览器（2026-11-16，Tabbit + `_scratch/live-preview`）**：真 React 挂载真 `client.js`，
   量每个 `.daw-wb-node` 的 `getBoundingClientRect` 并两两求交——**重叠 0 处**；空态引导节点在
   Composer 正下方（430,470,300），按钮是画布内的「+ 新建任务 / 把目标放入输入框」，不再切页签、
