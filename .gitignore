@@ -23,3 +23,9 @@ Desktop.ini
 
 # PRD 工作期临时脚本（改 lib/client.js 与测试用，不入库）
 .prd-tmp/
+
+# 本地真机验证目录：隔离 DSH home（会话日志）、Tabbit 截图、本机构建的受控组件包（CDS，UNLICENSED）——一律不入库
+.dev/
+
+# chunk 构建中间产物（tools/flow-chunk/build-proto.mjs 每次重新生成）
+tools/flow-chunk/proto/shadcn.generated.css
