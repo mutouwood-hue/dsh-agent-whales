@@ -3963,3 +3963,39 @@ describe("v2.2 波次 6：组件包 / 原型", () => {
     assert.match(host.cleanCanvasElement({ id: "p", kind: "prototype", data: { note: "x".repeat(70000) } }).error, /64KB/);
   });
 });
+
+// ── 2026-11-17：DSH v0.2.1-rc.2 Agent Teams 迁移（成员 = subagent，无 tryMembership / listMembers）──
+describe("新宿主团队 API：GET /tasks?leadSessionId", () => {
+  function modernTeams(enabledFor) {
+    return {
+      isEnabled: (agent) => enabledFor.has(agent.id),
+      listTasks: () => [{ id: "1", subject: "拆分", revision: 1 }]
+    };
+  }
+  const subagents = {
+    rootOf: (agent) => (agent.id === "session-worker" ? { id: "session-a" } : agent),
+    listDescendants: async (root) => (root === "session-a" ? [{ sessionId: "session-worker", description: "执行器", status: "idle", parentSessionId: "session-a" }] : [])
+  };
+
+  test("根会话 + Team 模式开 → 任务快照 + 子代理树补成员；没开 / 不是根 → 403", async () => {
+    const enabled = new Set(["session-a", "session-worker"]);
+    const h = await m6Harness({ agentTeams: modernTeams(enabled), subagents });
+    const ok = await h.raw("GET", "/agent-whales/api/tasks?leadSessionId=session-a", {});
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.deepEqual(ok.body.data.tasks.map((task) => task.subject), ["拆分"]);
+    assert.deepEqual(ok.body.data.members, [{ id: "session-worker", name: "执行器", role: "member", status: "idle", parentId: "session-a" }]);
+    const child = await h.raw("GET", "/agent-whales/api/tasks?leadSessionId=session-worker", {});
+    assert.equal(child.status, 403, "子代理不是 Lead");
+    enabled.delete("session-a");
+    const off = await h.raw("GET", "/agent-whales/api/tasks?leadSessionId=session-a", {});
+    assert.equal(off.status, 403, "Team 模式没开");
+  });
+
+  test("两代 API 都没有 → unavailable（不崩）", async () => {
+    const h = await m6Harness({ agentTeams: { listTasks: () => [] }, subagents: undefined });
+    const res = await h.raw("GET", "/agent-whales/api/tasks?leadSessionId=session-a", {});
+    assert.equal(res.status, 200);
+    assert.notEqual(res.body.code, 200);
+    assert.match(res.body.msg, /unavailable/);
+  });
+});

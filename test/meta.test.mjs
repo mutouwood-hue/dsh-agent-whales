@@ -164,8 +164,21 @@ function parsePatchYaml(text) {
       return;
     }
 
-    // 普通顶层条目的续行，例如 `disabled: true`。
+    // 普通顶层条目的续行，例如 `disabled: true`；或 id 覆盖的 `config:` 块（2026-11-17 起用于 agent-team）。
     const { key, value } = splitKeyValue(content, lineNumber);
+    if (key === "config" && value === "") {
+      if (top.config !== undefined) throw new Error(`第 ${lineNumber} 行 config 重复`);
+      config = {};
+      configIndent = indent;
+      top.config = config;
+      return;
+    }
+    if (config !== null && indent > configIndent) {
+      assignKey(config, key, value, lineNumber);
+      return;
+    }
+    config = null;
+    configIndent = null;
     assignKey(top, key, value, lineNumber);
   });
 
@@ -354,6 +367,7 @@ test("cordis.patch.yml：能被严格子集解析器解析成结构化补丁", (
   assert.ok(Array.isArray(patch) && patch.length > 0, "补丁至少有一个条目");
   const disabled = [];
   const inserts = [];
+  const overrides = [];
 
   for (const top of patch) {
     assert.ok(top && typeof top === "object" && !Array.isArray(top), "顶层条目必须是映射");
@@ -376,53 +390,28 @@ test("cordis.patch.yml：能被严格子集解析器解析成结构化补丁", (
         assert.equal(top.disabled, true, "disabled 只接受 true");
         disabled.push(top);
       }
+      if (top.config !== undefined) overrides.push(top);
     }
   }
 
   assert.ok(inserts.length > 0, "补丁必须至少插入一个条目");
 
-  // 用户拍板（2026-10-30）：团队能力保留内置。默认补丁 = 插件本体 + 官方
-  // agent-team-profile 等价的团队段。期望值来源：desktop runtime app.asar 内官方
-  // @deepseek-ai/dsh-experimental-agent-team-profile/cordis.patch.yml，逐字段核对后写死。
-  const expectedInserts = ["agent-whales", "agent-team", "tool-agent-team", "ui-agent-team"];
-  const expectedDisabled = [
-    "tool-subagent-control",
-    "tool-subagent-list-agents",
-    "tool-subagent",
-    "tool-subagent-fork"
-  ];
-  const expectedConfig = {
-    "agent-team": { maxMembers: 8, maxTasks: 256, maxMessageBytes: 65536, disposalTimeoutMs: 5000 },
-    "tool-agent-team": { freshProvider: "spawn", forkProvider: "fork" }
-  };
-  const expectedNames = {
-    "agent-whales": manifest.name,
-    "agent-team": "@deepseek-ai/dsh-experimental-agent-team",
-    "tool-agent-team": "@deepseek-ai/dsh-experimental-tool-agent-team",
-    "ui-agent-team": "@deepseek-ai/dsh-experimental-client-ui-agent-team"
-  };
-
-  assert.deepEqual(
-    [...new Set(inserts.map((item) => item.id))].sort(),
-    [...expectedInserts].sort(),
-    "默认层 insert 集合必须恰好是插件本体 + 团队三件套"
-  );
-  assert.deepEqual(
-    disabled.map((entry) => entry.id).sort(),
-    [...expectedDisabled].sort(),
-    "默认层 disabled 集合必须恰好是会被团队工具取代的 4 个官方 subagent 工具"
-  );
-  for (const item of inserts) {
-    assert.equal(item.name, expectedNames[item.id], item.id + " 的包名与官方团队段不一致");
-    if (expectedConfig[item.id] === undefined) {
-      assert.equal(item.config, undefined, item.id + " 不应带 config");
-    } else {
-      assert.deepEqual(
-        item.config,
-        expectedConfig[item.id],
-        item.id + ".config 必须与官方 agent-team-profile 逐字段一致"
-      );
-    }
+  // 2026-11-17 迁移（DSH v0.2.1-rc.2「Agent Teams 使用子代理和 Session id」）：官方 dsh-base / dsh-web-app
+  // 已直接挂载 agent-team / tool-agent-team / ui-agent-team，成员是标准 subagent。本补丁只插插件本体，
+  // 不再插团队三件套（旧包名 + 已移除配置键会让 agent-team 激活失败，真机报错原文见 README），
+  // 也不再关 subagent 四件套（团队正跑在它们上面）。
+  assert.deepEqual(inserts.map((item) => item.id), ["agent-whales"], "默认层只插入插件本体");
+  assert.equal(inserts[0].name, manifest.name);
+  assert.equal(inserts[0].config, undefined, "agent-whales 不应带 config");
+  assert.deepEqual(disabled, [], "不得再关掉任何官方行（subagent 工具是团队的底座）");
+  // 「每次对话默认带着团队能力」（2026-10-17 需求）改为对官方 agent-team 行做 id 覆盖。
+  // 配置键只能用新服务接受的两个（maxTasks / defaultEnabled）——旧键会让宿主直接拒绝激活。
+  assert.deepEqual(overrides.map((entry) => entry.id), ["agent-team"]);
+  assert.deepEqual(overrides[0].config, { maxTasks: 256, defaultEnabled: true });
+  assert.equal(overrides[0].name, undefined, "id 覆盖不带包名：包由官方 bundle 决定，不能再写死旧的 experimental 包名");
+  const text2 = readFileSync(patchPath, "utf8").split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
+  for (const removed of ["maxMembers", "maxMessageBytes", "disposalTimeoutMs", "freshProvider", "forkProvider", "dsh-experimental-"]) {
+    assert.equal(text2.includes(removed), false, "补丁正文不得再出现已移除的 " + removed);
   }
 
   const ids = [...disabled.map((entry) => entry.id), ...inserts.map((entry) => entry.id)];

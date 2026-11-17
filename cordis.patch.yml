@@ -1,63 +1,23 @@
 # dsh-agent-whales bundle patch.
 #
-# 两部分：
-#   1. 插件本体：一行宿主条目承载这个双面包。宿主 Loader 激活节点半边（lib/index.js），
-#      dsh-client-modules 再扫同一条目里的 `dsh.client` 声明来装配浏览器半边（lib/client.js）。
-#   2. 智能体团队默认开启：与官方组合包 @deepseek-ai/dsh-experimental-agent-team-profile
-#      的补丁逐字段等价（2026-10-17 需求：装好插件后，每次对话都默认带着团队能力）。
-#      先关掉会被团队工具取代的旧 subagent 工具，再插入团队服务、团队工具与 Web roster 面板。
+# 一行宿主条目承载这个双面包：宿主 Loader 激活节点半边（lib/index.js），
+# dsh-client-modules 再扫同一条目里的 `dsh.client` 声明来装配浏览器半边（lib/client.js）。
 #
-# ⚠️ 第 2 部分有前置条件，装之前必须知道：
-#
-#   · 这三个包只随「桌面版 runtime」分发：@deepseek-ai/dsh-desktop-runtime@0.2.1-rc.3 的
-#     app.asar 里带 24 个 dsh-experimental-* 包（含这三个）；而 npm 全局 CLI 版
-#     `dsh@0.1.5-rc.2` 的依赖树里 dsh-experimental-* 包数量是 0。
-#   · name 解析不到时该条目 import 失败 → dsh-app-boot 的 assertEntriesLoaded() 抛
-#     "plugin(s) failed to load" → DSH 启动失败（不是「功能不生效」的静默降级）。
-#     所以在纯 CLI profile（dsh web / headless）上，本 bundle 需要先按 README
-#     「关闭团队 / 回滚」一节处理。
-#   · 与官方 @deepseek-ai/dsh-experimental-agent-team-profile **互斥**：两边插入同一批 id
-#     （agent-team / tool-agent-team / ui-agent-team），cordis-plugin-loader 抛
-#     TypeError: duplicate loader entry id → 同样是启动失败。二选一。
-#
-# 本文件对宿主是「增量 + 4 行开关」：只插入 4 行、只改 4 行的 disabled 位，不动其它任何配置。
-#
-# 关闭团队（保留鲸鱼）的具体步骤见 README「关闭团队 / 回滚」；那条路径走
-# $DSH_HOME/cordis.patch.yml 用户层，不需要改本插件文件。
-
-- id: tool-subagent-control
-  disabled: true
-
-- id: tool-subagent-list-agents
-  disabled: true
-
-- id: tool-subagent
-  disabled: true
-
-- id: tool-subagent-fork
-  disabled: true
+# 2026-11-17 迁移（DSH v0.2.1-rc.2「Agent Teams 使用子代理和 Session id」）：
+#   · Agent Teams 已由官方 @deepseek-ai/dsh-base / dsh-web-app 直接挂载（agent-team / tool-agent-team /
+#     ui-agent-team 三行，包名去掉了 experimental 前缀），成员就是标准 subagent。
+#   · 旧补丁会用 @deepseek-ai/dsh-experimental-* 的旧包名和已移除的配置键（maxMembers / maxMessageBytes /
+#     disposalTimeoutMs / freshProvider / forkProvider）覆盖官方这三行 → 启动报
+#     "agent-team: maxMembers is no longer supported"；还关掉了 subagent 四件套，而团队现在正跑在它们上面。
+#   · 所以这里不再插入、也不再关掉任何团队 / subagent 行，只保留需求（2026-10-17「每次对话默认带着团队能力」）：
+#     对官方 agent-team 行做 id 覆盖，打开 defaultEnabled（新根会话默认开 Team 模式；用户仍可在会话菜单里关）。
+#     maxTasks 照抄官方 dsh-base 的值，避免覆盖时丢掉。
 
 - insert:
     - id: agent-whales
       name: dsh-agent-whales
 
-    # 团队服务：roster / 任务 DAG / 成员间直接通信
-    - id: agent-team
-      name: '@deepseek-ai/dsh-experimental-agent-team'
-      config:
-        maxMembers: 8
-        maxTasks: 256
-        maxMessageBytes: 65536
-        disposalTimeoutMs: 5000
-
-    # 团队工具：spawn_teammate / send_message / list_agents / wait_agent /
-    # interrupt_agent / team_task_*（取代上面被关掉的 subagent 四件套）
-    - id: tool-agent-team
-      name: '@deepseek-ai/dsh-experimental-tool-agent-team'
-      config:
-        freshProvider: spawn
-        forkProvider: fork
-
-    # Web 会话页头的 roster 面板与任务板
-    - id: ui-agent-team
-      name: '@deepseek-ai/dsh-experimental-client-ui-agent-team'
+- id: agent-team
+  config:
+    maxTasks: 256
+    defaultEnabled: true

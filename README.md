@@ -11,26 +11,18 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 - **浏览器半边**（`lib/client.js`）：角色图层、家族树、任务行、气泡与设置页。
 - **宿主半边**（`lib/index.js`）：注册一段「团队协作」系统提示段落、五个串门工具、一个随包协议 skill（playbook）与一个活动接口。
 
-> ## ⚠️ 装之前必须知道的三件事
+> ## ⚠️ 装之前必须知道的事
 >
-> 1. **它默认就开启「智能体团队」，并因此禁用 4 个官方 subagent 工具。**
->    默认 `cordis.patch.yml` 会 `disabled: true` 掉 `tool-subagent-control` /
->    `tool-subagent-list-agents` / `tool-subagent` / `tool-subagent-fork`，再插入团队服务
->    `agent-team`、团队工具 `tool-agent-team`、Web roster 面板 `ui-agent-team`
->    （与官方 `@deepseek-ai/dsh-experimental-agent-team-profile` 的补丁逐字段等价）。
->    **这是团队工具取代旧 subagent 工具，不是 bug**；不想要的话见
->    §[关闭团队 / 回滚](#关闭团队--回滚)。
-> 2. **它与官方 `@deepseek-ai/dsh-experimental-agent-team-profile` 互斥——必须二选一。**
->    两者同装会给 `agent-team` / `tool-agent-team` / `ui-agent-team` 各插入两次，
->    `cordis-plugin-loader` 抛 `TypeError: duplicate loader entry id`，**DSH 直接启动失败**
->    （不是「后一个补丁覆盖前一个」）。检查方法见 §[常见问题](#常见问题)。
-> 3. **它只在自带 experimental 包的宿主上可用。** 三个团队包只随桌面版 runtime 分发
->    （`@deepseek-ai/dsh-desktop-runtime@0.2.1-rc.3` 的 app.asar 内有 24 个
->    `dsh-experimental-*`）；npm 全局 CLI 版 `dsh@0.1.5-rc.2` 的依赖树里是 **0 个**。
->    解析不到 → `assertEntriesLoaded` 抛 `plugin(s) failed to load` → **启动失败**。
->    在 `dsh web` / CLI profile 上请先按 §[关闭团队 / 回滚](#关闭团队--回滚) 关掉团队段。
+> 1. **需要 DSH v0.2.1-rc.2 及以上（Agent Teams 已并入官方 `dsh-base` / `dsh-web-app`）。**
+>    本 bundle 的 `cordis.patch.yml` 只插入插件本体，再对官方 `agent-team` 行做一次 id 覆盖
+>    （`defaultEnabled: true`：新根会话默认开 Team 模式，会话菜单里随时可关）。**不再插入、也不再关掉任何
+>    官方团队 / subagent 行**——团队成员现在就是标准 subagent。
+> 2. **2026-11-17 之前的插件版本在新宿主上会让团队激活失败**，报
+>    `agent-team: maxMembers is no longer supported; teammates are subagents…`
+>    或 `Cannot find package '@deepseek-ai/dsh-experimental-agent-team'`。升级本插件即可，详见
+>    §[智能体团队](#智能体团队默认开启由官方-bundle-提供)。
 
-**运行环境**：需要随包提供 `web` 客户端插件的 DSH（桌面版 runtime 0.2.1-rc.3 实测通过）；
+**运行环境**：DSH v0.2.1-rc.2 及以上（Agent Teams 已并入官方 bundle；本机 `dsh-agent-team` 0.2.2-rc.3 实测通过）；
 版本号见 §[版本与兼容性](#版本与兼容性)。
 
 ## 效果
@@ -966,111 +958,66 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 > 没有 `scripts` 里的 `pack:dist` 之前，`dist/` 里的 `.tgz` 是手工 `npm pack` 出来的；
 > 现在 `npm pack` 会先跑 `prepack`：重新生成 `assets/manifest.json`，并守两道门——`lib/client.js` **不得再内联 base64 素材**、体积 **不得超过 200KB**。
 
-### 默认开启智能体团队（本 bundle 的一部分）
+### 智能体团队（默认开启，由官方 bundle 提供）
 
-`cordis.patch.yml` 里除了插入 `agent-whales`，还带上了官方组合包
-`@deepseek-ai/dsh-experimental-agent-team-profile` **逐字段等价**的一层：
+**2026-11-17 迁移（DSH v0.2.1-rc.2「Agent Teams 使用子代理和 Session id」）**：官方 `dsh-base` /
+`dsh-web-app` 已直接挂载 `agent-team`（`@deepseek-ai/dsh-agent-team`）、`tool-agent-team`、`ui-agent-team`
+三行，团队成员就是标准 subagent（`subagent` / `subagent_fork` 创建，`send_message({ agent_id })` 通信，
+`list_agents` 看整棵树），任务板是 `team_task_*`。`spawn_teammate` / Team 作用域的消息与中断工具、
+`maxMembers` / `maxMessageBytes` / `disposalTimeoutMs` / `freshProvider` / `forkProvider` 都已移除。
 
-- `disabled: true` 掉会被团队工具取代的旧 subagent 工具（`tool-subagent-control`、
-  `tool-subagent-list-agents`、`tool-subagent`、`tool-subagent-fork` 四行）；
-- 插入团队服务 `agent-team`、团队工具 `tool-agent-team`、Web roster 面板 `ui-agent-team`
-  （config 与官方层一致：`maxMembers: 8` / `maxTasks: 256` / `maxMessageBytes: 65536` /
-  `disposalTimeoutMs: 5000`、`freshProvider: spawn` / `forkProvider: fork`）。
+本插件旧版补丁（2026-10-17 起）按当时的官方 experimental profile 自己插团队三行、并关掉 subagent 四件套。
+在新宿主上它会**用旧包名和已移除的配置键覆盖官方行**，启动时报：
 
-也就是说：**装上这个插件，每个会话就默认带着智能体团队能力**（团队服务 + 团队工具 + 任务板面板），
-代价是本 profile 里不再有 `subagent` / `subagent_fork` / `list_agents` / `subagent_control`
-这四件工具——delegate 改走团队工具。已用真实 `composeEntries` 复算：默认层叠加
-`dsh-base` + `dsh-web-app` 后**恰好触碰 8 行**（4 行 disabled + 插件自己 + 3 行 insert），
-**零 warning**。
+```
+dsh: warning: 2 entries did not activate
+agent-team (@deepseek-ai/dsh-experimental-agent-team): TeamError: agent-team: maxMembers is no longer supported; …
+tool-agent-team (@deepseek-ai/dsh-experimental-tool-agent-team): pending (waiting for service: agentTeams)
+```
 
-**但这只是「能力可用」，不等于「已经在组队」。** 为了让会话真的用起来，宿主半边会注册
-`agent-whales/team-policy`（order 87）这一节系统提示，大意是：
-
-> 除纯寒暄、单一事实问答、**一次只读操作**之外，默认先 `spawn_teammate` 起 1–3 个职责单一的成员，
-> 用任务板拆活并写清验收标准与写入范围，Lead 只做整合、评审与最终答复；确实无法拆分时可以不建团队，
-> 但要在回复里说明原因。
-
-所以重启 App 之后，**新会话默认就是团队模式**。这是提示层面的约定，不是硬编码调度：模型仍可能判断
-某任务确实不可拆分而跳过，统计上不会 100% 每次都组队。
-
-**宿主侧的兜底逻辑**：`agent-whales/team-policy` 是按服务判定的——组装提示时如果 `agentTeams`
-服务存在，本段输出空字符串（让位给官方 `team:policy`，避免双份注入）；不存在时输出上面的兜底段落。
-注意这条兜底在「你手工关掉团队」时**仍会输出**，所以关掉团队后如果不想让模型去找
-`spawn_teammate`，最省事的做法是在插件页直接禁用整个 bundle（见下）。
-
-### 关闭团队 / 回滚
-
-有两条路径，**都不需要改本插件文件**。
-
-**A. 只关团队、保留鲸鱼**：把下面 7 行追加到 `$DSH_HOME/cordis.patch.yml`
-（家目录用户补丁层，叠在每个 profile 之上、优先级最高；`live` 热加载，通常不必重启）：
+（没有 experimental 包的 profile 上则是 `Cannot find package '@deepseek-ai/dsh-experimental-agent-team'`，3 行未激活。）
+团队能力因此整段失效。现在的补丁只剩两件事：
 
 ```yaml
-- id: agent-team
-  disabled: true
-- id: tool-agent-team
-  disabled: true
-- id: ui-agent-team
-  disabled: true
-- id: tool-subagent-control
-  disabled: false
-- id: tool-subagent-list-agents
-  disabled: false
-- id: tool-subagent
-  disabled: false
-- id: tool-subagent-fork
-  disabled: false
+- insert:
+    - id: agent-whales
+      name: dsh-agent-whales
+
+- id: agent-team          # 只覆盖配置，包名由官方 bundle 决定
+  config:
+    maxTasks: 256         # 照抄 dsh-base 的值
+    defaultEnabled: true  # 2026-10-17 需求「每次对话默认带着团队能力」
 ```
 
-> ✅ **这 7 行经过真实复算验证**（`_scratch/verify-t3.mjs`「关闭步骤复算」一节，用
-> `composeEntries` 叠加 `dsh-base` + `dsh-web-app` + 本 bundle + 上面这段）：三条团队行
-> `disabled === true`、四条 `tool-subagent*` 回到 `disabled === false`、鲸鱼保持启用、
-> 团队行仍然只有一份（不会又造出重复 id）、**零 warning**。原理是补丁按 `target[key] = value`
-> 逐键覆盖（`dsh-app-boot/lib/index.js:102-105`），后应用的层能翻回前一层的 `disabled`。
->
-> ⚠️ 已知副作用：`lib/index.js` 的提示段落会在团队服务缺失时输出兜底策略（要求用
-> `spawn_teammate`），而那时工具已被关掉。要彻底干净走路径 B，或等 lib 侧把兜底改成
-> 「无团队服务就不输出」（已作为跨范围项转派）。
+`defaultEnabled` 只影响**新的根会话**的初始状态；会话菜单里的「使用智能体团队」开关随时可以关，
+关了不会被插件再打开。不想默认开：在 `$DSH_HOME/cordis.patch.yml` 用户层写
+`- id: agent-team` / `config: { maxTasks: 256, defaultEnabled: false }` 即可。
 
-**B. 整个插件停用**（鲸鱼和团队一起关，绝不出现提示/工具不一致）：
+**系统提示**：宿主半边的 `agent-whales/team-policy` 段在官方 `agentTeams` 服务存在时让位（交空串，
+由官方 `team:policy` 负责），只在没有团队服务、但能看到 `subagent` 工具的旧宿主上兜底输出；
+兜底文本已改为当前工具名（`subagent` / `subagent_fork` / `send_message({ agent_id })`），不再提
+`spawn_teammate` / `interrupt_agent`。
 
-```yaml
-- id: agent-whales
-  disabled: true
-```
+**任务板路由**（`GET /api/tasks?leadSessionId=`）两代宿主都认：旧宿主走 `tryMembership` / `listMembers`；
+新宿主以 `subagents.rootOf(lead) === lead` 且 `agentTeams.isEnabled(lead)` 判定 Lead，成员由
+`subagents.listDescendants` 补出。项目任务表（`?projectId=`）不依赖团队服务，始终可用。
 
-或者更省事：在插件页直接禁用本 bundle。
+### 关闭 / 回滚
 
-### 两种会启动失败的组合（务必避开）
-
-| 组合 | 结果 |
-|---|---|
-| profile 里同时有官方 `@deepseek-ai/dsh-experimental-agent-team-profile` bundle | ❌ **DSH 起不来**：两边插入同一批 id（`agent-team` / `tool-agent-team` / `ui-agent-team`），`cordis-plugin-loader/lib/index.js:91` 抛 `TypeError: duplicate loader entry id`。已用真实补丁复现出 3 个重复 id |
-| 在没有 experimental 包的 DSH 上装（例如 npm 全局 CLI `dsh@0.1.5-rc.2` 的 profile） | ❌ **DSH 起不来**：三个 `name` 解析不到（该依赖树里 experimental 包数量为 0），`dsh-app-boot/lib/index.js:1434-1438` 的 `assertEntriesLoaded` 抛 `plugin(s) failed to load` |
-
-**装之前先自检**（缺哪个会直接告诉你；全 OK 才装）：
-
-```powershell
-node -e "for (const p of ['@deepseek-ai/dsh-experimental-agent-team','@deepseek-ai/dsh-experimental-tool-agent-team','@deepseek-ai/dsh-experimental-client-ui-agent-team']) { try { require.resolve(p); console.log('OK', p) } catch { console.log('MISSING', p) } }"
-```
+- **只关团队**：会话菜单关掉「使用智能体团队」；或按上面在用户层把 `defaultEnabled` 设回 `false`。
+  本插件不再碰任何官方行，所以不需要「把 subagent 工具翻回来」之类的善后。
+- **整个插件停用**：在插件页禁用本 bundle，或在 `$DSH_HOME/cordis.patch.yml` 写
+  `- id: agent-whales` / `disabled: true`。
 
 ### 常见问题
 
-**Q：我怎么知道自己 profile 里有没有装官方 agent-team-profile？**
-看 `<DSH_PROFILE_DIR>/package.json` 的 `dsh.profile.bundles`（桌面版 profile 目录是
-`$DSH_HOME/profiles/desktop`）。里面**同时出现** `dsh-agent-whales` 和
-`@deepseek-ai/dsh-experimental-agent-team-profile` 就是踩雷配置，必须删掉后者。
+**Q：升级后还看到 `maxMembers is no longer supported` / `dsh-experimental-agent-team`？**
+说明加载的还是旧补丁：确认 profile 里链接 / 安装的是本仓库新版本（`cordis.patch.yml` 里不应再出现
+`dsh-experimental-`），再重启 App。也检查 `$DSH_HOME/cordis.patch.yml` 用户层有没有自己写过旧的团队行。
 
-> 本仓库作者本机就是这种配置（`~/.dsh/profiles/desktop/package.json` 两个都列着）。
-> 之所以还没炸，是因为那条 bundle 从 profile 目录解析不到（`MODULE_NOT_FOUND`），
-> 也就是说它当前**并没有真正生效**——一旦补齐安装，就会命中 duplicate id。属于待修的踩雷配置。
-
-**Q：装完重启，DSH 起不来怎么办？**
-看启动报错里的关键词：
-- `duplicate loader entry id` → 官方 profile 同装，删掉它；
-- `plugin(s) failed to load` → 宿主没有 experimental 包，按 §关闭团队 / 回滚 A 关掉团队段，
-  或换桌面版。
-
+**Q：还能和官方 `dsh-experimental-agent-team-profile` 一起装吗？**
+那个组合包已被官方合并进 `dsh-base`，新宿主上不需要也不应该再装；本插件也不再插入团队行，
+所以不会再有 `duplicate loader entry id`。
 
 ## 分享给同事
 
@@ -1089,11 +1036,9 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 
 ⚠️ 装之前请让同事知道三件事：
 
-- 它会**给整个 profile 装上智能体团队**（团队服务 + 团队工具 + roster 面板），并因此
-  **禁用 4 个官方 subagent 工具**（团队工具取代它们，不是 bug）；
-- 它会注册一段系统提示，**让新会话默认先起 1–3 个 teammate**——这会增加 token 消耗；
-- **必须先确认对方没装官方 `agent-team-profile`**（同装会让 DSH 起不来），且宿主是自带
-  experimental 包的桌面版；否则按 §关闭团队 / 回滚 处理。
+- 它会把官方智能体团队设成**新会话默认开启**（`agent-team` 的 `defaultEnabled: true`；会话菜单可关），不改其它官方行；
+- 团队开着时模型会倾向于派 1–3 个 subagent 并行——这会增加 token 消耗；
+- 宿主需要 DSH v0.2.1-rc.2 及以上；更老的宿主请用 2026-11-17 之前的插件版本。
 
 素材署名见 `NOTICE.md`，转发时请一起带上。
 
@@ -1108,8 +1053,8 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 
 | 宿主 | 团队段 | 说明 |
 |---|---|---|
-| 桌面版（Electron，runtime `0.2.1-rc.3`） | ✅ 可用 | app.asar 自带 24 个 `dsh-experimental-*` 包，实测通过 |
-| npm 全局 CLI `dsh@0.1.5-rc.2` 的 profile（`dsh web` / headless） | ❌ 需先关闭 | 依赖树里 `dsh-experimental-*` 数量为 0，团队三条 insert 解析不到会拒绝启动 → 按 §关闭团队 / 回滚 A 处理 |
+| DSH v0.2.1-rc.2 及以上（桌面版 / `dsh web`，团队由 `dsh-base` / `dsh-web-app` 提供） | ✅ 可用 | 本插件只覆盖 `agent-team.defaultEnabled`；2026-11-17 在隔离 `dsh web` 实例上启动零 warning |
+| 更老的宿主（团队仍是 `dsh-experimental-*` 包） | ⚠️ 用旧版插件 | 新补丁不再插入团队行：本插件照常可用，但不会再替你装团队 |
 
 **为什么没有 `engines.dsh` / 宿主版本区间**：DSH 的插件清单契约（`@deepseek-ai/dsh-package-manifest`
 的 `DshManifest` 类型）只认 `bundle` / `profile` / `client` / `configTrees` / `sessionFormatMigration` /
@@ -1301,8 +1246,9 @@ node _scratch/preview.mjs
   （已完成），真实模型请求 payload 未抓包；真实浏览器里点开关、真实 403 触发也未跑。
 - 未验证 · HMR 时序：热重载时若新实例注册早于旧实例注销，可能短暂出现「新实例该工具未注册」，
   客户端下一次轮询会如实显示 `visitTools:false`，重新打开即可自愈；未在真机复现。
-- 未验证 · 在缺少 `@deepseek-ai/dsh-experimental-*` 的 DSH 上安装：按代码推断会拒绝启动
-  （`assertEntriesLoaded` 抛 `plugin(s) failed to load`），未在真机上复现。
+- 已修 · 2026-11-17：旧补丁在新宿主上让官方团队行激活失败（`maxMembers is no longer supported` /
+  `Cannot find package '@deepseek-ai/dsh-experimental-agent-team'`）。隔离实例此前每次启动都带着这条 warning，
+  只因为它是 warning 而不是启动失败，才一直没被注意到。
 - 已验证 · M6 工作台逻辑：`npm test` 全绿（其中 `test/workbench.test.mjs` 18 个用例专测工作台：
   路由 round-trip 与非法回落、CJK token 估算、简报预算按序填充/超限丢弃/`omitted`、
   任务行 `ready` 与「前置已删除 / 等待前置」、report 人机边界（worker 只能写 done/draft 或发起退回）、

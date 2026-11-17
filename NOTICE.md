@@ -43,15 +43,10 @@
   `assets/art.json` 里 `c-idle` / `c-work` 的 `source: Martty:liang-*.png`，以及随包分发的
   `assets/c-idle.webp` / `assets/c-work.webp`（**不再内联进 `lib/client.js`**：D1 起素材由宿主路由按皮肤提供）。
 
-## 随 bundle 插入的上游实验包（默认层）
+## 按名字引用的官方包（默认层）
 
-`cordis.patch.yml`（默认生效）会按名字引用三个 DeepSeek 官方包：
-
-- `@deepseek-ai/dsh-experimental-agent-team`
-- `@deepseek-ai/dsh-experimental-tool-agent-team`
-- `@deepseek-ai/dsh-experimental-client-ui-agent-team`
-
-它们版权归 DeepSeek，MIT License，**随 DSH 运行时分发，不随本包分发**；本仓库只是在自己的
-补丁里按名字引用，未复制其代码或素材。不想要这三行时按 README §关闭团队 / 回滚 在用户层关掉即可，
-不需要（也不应该）修改本仓库。
+`cordis.patch.yml`（默认生效）只对官方 `agent-team` 行做一次 id 覆盖（`defaultEnabled: true`），
+不插入、不按包名引用任何官方包；团队相关包（`@deepseek-ai/dsh-agent-team` 等）由 DSH 自己的
+`dsh-base` / `dsh-web-app` bundle 挂载，版权归 DeepSeek，MIT License，**随 DSH 运行时分发，不随本包分发**。
+（2026-11-17 之前的版本曾按名字插入 `@deepseek-ai/dsh-experimental-*` 三个包，已随宿主迁移移除。）
 

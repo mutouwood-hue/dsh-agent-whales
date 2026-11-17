@@ -679,7 +679,10 @@ test("宿主半边：注册团队协作策略，拿不到 systemPrompt 或注册
     // 真实 dsh-system-prompt 契约：text 可以是 string，也可以是 (context) => string 的惰性段落。
     const policyText = typeof team.text === "function" ? team.text({}) : team.text;
     assert.equal(typeof policyText, "string", "段落文本要么是 string，要么是返回 string 的函数");
-    assert.ok(policyText.includes("spawn_teammate"), "策略里要点名团队工具");
+    assert.ok(policyText.includes("`subagent`") && policyText.includes("subagent_fork"), "策略里要点名当前的成员派生工具（DSH v0.2.1-rc.2 起成员就是 subagent）");
+    assert.equal(policyText.includes("spawn_teammate"), false, "spawn_teammate 已被宿主移除，不能再让模型去调");
+    assert.equal(policyText.includes("interrupt_agent"), false, "官方 preset 默认不提供 interrupt_agent");
+    assert.ok(policyText.includes("agent_id"), "send_message 现在用 agent_id 指定收件人");
     assert.ok(policyText.includes("默认先起团队"), "默认行为是起团队");
 
     // ultra 段：默认关闭 → 空串（renderPrompt 会过滤空段，不占 token）。
