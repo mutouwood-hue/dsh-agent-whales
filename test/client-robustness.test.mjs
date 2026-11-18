@@ -444,6 +444,26 @@ test("ART：源码帧表/心情池里的 key 全部命中 ART（交叉验证，�
   for (const key of classicKeys) assert.ok(art[key], "源码引用了不存在的经典皮肤帧 " + key);
 });
 
+test("ART：待入库帧表 Q_PENDING_FRAMES——素材一旦入库就必须并入 Q_FRAMES 并从待入库表删掉", async () => {
+  const art = (await testApiWithArt(["q", "mature", "classic"])).ART();
+  const source = readFileSync(clientPath, "utf8");
+  const match = /var Q_PENDING_FRAMES = \{([^}]*)\}/.exec(source);
+  assert.ok(match, "源码里找不到待入库帧表 Q_PENDING_FRAMES");
+  const pending = Array.from(match[1].matchAll(/"([^"]+)"/g), (m) => m[1]);
+  for (const key of pending) {
+    // 反向护栏：素材已经在库里却还挂在「待入库」下，说明没人认领——frameOf 虽然仍能用，
+    // 但 Q_FRAMES 的「全部命中 ART」交叉验证覆盖不到它，拼错帧名就又会静默失效。
+    assert.equal(art[key], undefined, key + " 已入库，请把它并入 Q_FRAMES 并从 Q_PENDING_FRAMES 删除");
+  }
+  // 待入库表与 Q_FRAMES 不得重复登记同一个变体
+  const qFrames = /var Q_FRAMES = \{([^}]*)\}/.exec(source)[1];
+  for (const variant of ["read", "type", "run"]) {
+    const inPending = new RegExp("\\b" + variant + ": \"").test(match[1]);
+    const inQ = new RegExp("\\b" + variant + ": \"").test(qFrames);
+    assert.ok(!(inPending && inQ), "工具变体 " + variant + " 不得同时出现在 Q_FRAMES 和 Q_PENDING_FRAMES");
+  }
+});
+
 // ── 6. 「串门工具」开关：宿主真相 + POST 写回 + 失败回滚 + i18n ────────────
 
 function settingsPropsFor() {

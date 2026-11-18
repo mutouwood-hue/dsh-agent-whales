@@ -4061,3 +4061,143 @@ describe("新宿主团队 API：GET /tasks?leadSessionId", () => {
     assert.match(res.body.msg, /unavailable/);
   });
 });
+
+// ── 波次 D：画布 Agent 卡「唤醒」（PRD 增量 §4.6）────────────────────────────
+//
+// POST /agent-whales/api/projects/:id/resume {sessionId}
+// 约束：同源 token；只放本项目成员；幂等（已在线不重复 resume）；并发同 id 共用一次加载；
+// 失败回 200 + 50201 且不留脏状态（可重试）；不批量、不派任务。
+
+describe("波次 D · POST /projects/:id/resume（唤醒离线成员）", () => {
+  /** 可控的 agents：只有 session-a 在线；resume 把目标放进在线集合，并记下被调用的 id。 */
+  function resumable(impl) {
+    const live = new Set(["session-a"]);
+    const calls = [];
+    const agents = {
+      get: (id) => (live.has(id) ? { id, status: "idle", session: { id } } : undefined),
+      list: () => [],
+      resume: async (options) => {
+        calls.push(options.resumeSessionId);
+        if (impl) return impl(options, live);
+        live.add(options.resumeSessionId);
+        return { agent: { id: options.resumeSessionId } };
+      }
+    };
+    return { agents, live, calls };
+  }
+
+  /** 建项目并把离线的 session-old（只存在于持久化里）登记为成员。 */
+  async function withOfflineMember(fake) {
+    const h = await m6Harness({ agents: fake.agents });
+    const projectId = await createProject(h);
+    const added = await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+    assert.equal(added.body.code, 200, JSON.stringify(added.body));
+    return { h, projectId, url: `/agent-whales/api/projects/${projectId}/resume` };
+  }
+
+  test("离线成员：首次唤醒真 resume 并回 live:true；再点一次幂等，不重复 resume", async () => {
+    const fake = resumable();
+    const { h, url } = await withOfflineMember(fake);
+    const first = await h.call("POST", url, { sessionId: "session-old" });
+    assert.equal(first.status, 200);
+    assert.equal(first.body.code, 200, JSON.stringify(first.body));
+    assert.deepEqual(first.body.data, { sessionId: "session-old", live: true, resumed: true });
+    assert.deepEqual(fake.calls, ["session-old"]);
+
+    const second = await h.call("POST", url, { sessionId: "session-old" });
+    assert.deepEqual(second.body.data, { sessionId: "session-old", live: true, resumed: false }, "已在线直接返回，不重复拉起");
+    assert.equal(fake.calls.length, 1, "幂等：第二次不得再调 agents.resume");
+  });
+
+  test("拿不到 agent 不谎报：resume 返回但会话没上线 → live:false", async () => {
+    const fake = resumable(() => ({ agent: undefined }));
+    const { h, url } = await withOfflineMember(fake);
+    const res = await h.call("POST", url, { sessionId: "session-old" });
+    assert.equal(res.body.code, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body.data, { sessionId: "session-old", live: false, resumed: true });
+  });
+
+  test("范围闸：非本项目成员 → 40711，且绝不触发 resume", async () => {
+    const fake = resumable();
+    const { h, url } = await withOfflineMember(fake);
+    const outsider = await h.call("POST", url, { sessionId: "session-ghost" });
+    assert.equal(outsider.status, 200);
+    assert.equal(outsider.body.code, 40711, JSON.stringify(outsider.body));
+    assert.deepEqual(fake.calls, [], "范围闸必须在 resume 之前");
+  });
+
+  test("主对话也算成员（可唤醒）；项目不存在 → 40401；会话不存在 → 40401", async () => {
+    const fake = resumable();
+    const { h, url } = await withOfflineMember(fake);
+    const main = await h.call("POST", url, { sessionId: "session-a" });
+    assert.equal(main.body.code, 200, "主对话是成员");
+    assert.equal(main.body.data.resumed, false, "session-a 本来在线");
+
+    const noProject = await h.call("POST", "/agent-whales/api/projects/ghost-project/resume", { sessionId: "session-old" });
+    assert.equal(noProject.body.code, 40401);
+    assert.equal(fake.calls.length, 0);
+  });
+
+  test("鉴权与入参：缺 token 403、非 POST 405、缺 sessionId 400", async () => {
+    const fake = resumable();
+    const { h, url } = await withOfflineMember(fake);
+    const noToken = await h.raw("POST", url, {}, { sessionId: "session-old" });
+    assert.equal(noToken.status, 403, "缺同源 token 必须 403");
+    assert.equal(noToken.body.code, 40301);
+    const wrongToken = await h.raw("POST", url, { "x-whales-token": "deadbeef" }, { sessionId: "session-old" });
+    assert.equal(wrongToken.status, 403);
+    const get = await h.call("GET", url);
+    assert.equal(get.status, 405);
+    const empty = await h.call("POST", url, {});
+    assert.equal(empty.status, 400);
+    assert.deepEqual(fake.calls, [], "所有负例都不能走到 resume");
+  });
+
+  test("并发幂等：同一会话两次同时点只 resume 一次，两边都拿到结果", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const fake = resumable(async (options, live) => {
+      await gate;
+      live.add(options.resumeSessionId);
+      return { agent: { id: options.resumeSessionId } };
+    });
+    const { h, url } = await withOfflineMember(fake);
+    const a = h.call("POST", url, { sessionId: "session-old" });
+    const b = h.call("POST", url, { sessionId: "session-old" });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    release();
+    const [ra, rb] = await Promise.all([a, b]);
+    assert.equal(ra.body.code, 200, JSON.stringify(ra.body));
+    assert.equal(rb.body.code, 200, JSON.stringify(rb.body));
+    assert.equal(fake.calls.length, 1, "并发同 id 必须共用一次加载");
+  });
+
+  test("resume 抛错：200 + 50201 且带原因；不留脏状态，修好后可重试", async () => {
+    let fail = true;
+    const fake = resumable((options, live) => {
+      if (fail) throw new Error("resume boom: 日志损坏");
+      live.add(options.resumeSessionId);
+      return { agent: { id: options.resumeSessionId } };
+    });
+    const { h, url } = await withOfflineMember(fake);
+    const bad = await h.call("POST", url, { sessionId: "session-old" });
+    assert.equal(bad.status, 200, "业务失败走 200 + 业务码，不是 500");
+    assert.equal(bad.body.code, 50201, JSON.stringify(bad.body));
+    assert.match(bad.body.msg, /resume boom/, "原因必须如实带出，不静默");
+
+    fail = false;
+    const retry = await h.call("POST", url, { sessionId: "session-old" });
+    assert.equal(retry.body.code, 200, "失败后 RESUMING 必须已清，能重试: " + JSON.stringify(retry.body));
+    assert.equal(retry.body.data.live, true);
+    assert.equal(fake.calls.length, 2);
+  });
+
+  test("宿主没有 agents.resume → 50201 且说明原因（不崩）", async () => {
+    const h = await m6Harness({ agents: { get: () => undefined, list: () => [] } });
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+    const res = await h.call("POST", `/agent-whales/api/projects/${projectId}/resume`, { sessionId: "session-old" });
+    assert.equal(res.body.code, 50201);
+    assert.match(res.body.msg, /agents\.resume/);
+  });
+});

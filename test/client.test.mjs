@@ -648,7 +648,10 @@ test("渲染：设置页显示实时数量与全部控件", () => {
   const switches = findByClass(tree, "daw-switch");
   // 2026-10-30 新增「状态表情」「出错表情」两个开关（v0.23 状态信号接线）
   // 2026-11-16 新增「ultra 模式」（强制加载 deep-effort 执行契约）
-  assert.equal(switches.length, 14, "启用 / 粒子 / 对话气泡 / 俏皮话 / 状态表情 / 出错表情 / 没活也挂着 / 团队汇总 / 串门工具 / ultra 模式 / 显示任务 / 已收工子级 / 可拖拽 / 显示名字");
+  // 2026-11-17 新增「工具动画」（按工具类别读 / 改 / 命令切帧，PRD 状态表现力增强波次 A）
+  // 2026-11-17 新增「等待举旗」（审批 / 提问等你时挥手 + 「等你」气泡，波次 B）
+  // 2026-11-17 新增「上下文血条」（默认关，波次 C）
+  assert.equal(switches.length, 17, "启用 / 粒子 / 对话气泡 / 俏皮话 / 状态表情 / 出错表情 / 工具动画 / 等待举旗 / 上下文血条 / 没活也挂着 / 团队汇总 / 串门工具 / ultra 模式 / 显示任务 / 已收工子级 / 可拖拽 / 显示名字");
   const segments = findByClass(tree, "daw-seg");
   assert.equal(segments.length, 5, "计数方式 / 水平位置 / 形象风格 / 动画强度 / 尺寸预设五组分段控件");
 });
@@ -1150,6 +1153,331 @@ test("状态表情：失败 > 庆祝 > 思考 > 工作 > 空闲 的优先级与�
   assert.equal(faceVariant("celebrating"), "celebrate");
   assert.equal(faceVariant("working"), undefined);
   assert.equal(faceVariant("idle"), undefined);
+});
+
+// ── 工具动画（PRD「状态表现力增强」波次 A，2026-11-17）──────────────────────
+test("工具动画：工具名 → 读/改/命令 类别，未知与 MCP 工具一律不猜", () => {
+  const { toolCategory } = testApi();
+  for (const name of ["read", "grep", "glob", "web_fetch"]) assert.equal(toolCategory(name), "read", name);
+  for (const name of ["edit", "write", "patch", "apply_patch", "notebook_edit"]) assert.equal(toolCategory(name), "edit", name);
+  for (const name of ["bash", "pwsh", "shell"]) assert.equal(toolCategory(name), "run", name);
+  assert.equal(toolCategory("READ"), "read", "大小写不敏感");
+  assert.equal(toolCategory("web_search"), undefined, "上网查不是看书，不硬归类");
+  assert.equal(toolCategory("whales_visit_send"), undefined, "串门工具不归类");
+  assert.equal(toolCategory("mcp__pencil__execute"), undefined, "MCP 工具带服务前缀，不猜");
+  assert.equal(toolCategory(undefined), undefined);
+  assert.equal(toolCategory(null), undefined);
+  assert.equal(toolCategory(""), undefined);
+  // 原型链上的键不能被当成类别（constructor / toString / __proto__）
+  for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+    assert.equal(toolCategory(name), undefined, name + " 不是工具类别");
+  }
+});
+
+test("工具动画：faceOf 第四参按类别出 reading/editing/running，优先级在思考之下、干活之上", () => {
+  const { faceOf, faceVariant } = testApi();
+  const now = 1_000_000;
+  const opts = { stateFaces: true, errorFaces: true, toolFaces: true };
+  const running = { running: true };
+
+  assert.equal(faceOf(running, now, opts, "read"), "reading");
+  assert.equal(faceOf(running, now, opts, "edit"), "editing");
+  assert.equal(faceOf(running, now, opts, "pwsh"), "running");
+  assert.equal(faceOf(running, now, opts, "web_search"), "working", "不归类的工具维持原来的干活");
+  assert.equal(faceOf(running, now, opts, undefined), "working", "没有工具信息维持原来的干活");
+
+  // 优先级：失败 > 庆祝 > 思考 > 工具 > 干活
+  assert.equal(faceOf({ running: true, streaming: true }, now, opts, "read"), "thinking", "模型在输出时思考压过工具");
+  assert.equal(faceOf({ running: true, lastErrorAt: now - 100 }, now, opts, "edit"), "failed", "失败压过工具");
+  assert.equal(faceOf({ running: true, lastTurnEndAt: now - 100, lastRunMs: 9000 }, now, opts, "read"), "celebrating", "庆祝压过工具");
+
+  // 会话没在跑时，残留的工具名（快照 2 秒才刷一次）不能让角色继续「看书」
+  assert.equal(faceOf({ running: false }, now, opts, "read"), "idle", "不在跑就不做工具动作");
+  assert.equal(faceOf({}, now, opts, "read"), "idle");
+
+  // 开关：toolFaces 关 → 退回干活；缺省视为开（老设置里没有这个键）
+  assert.equal(faceOf(running, now, { stateFaces: true, toolFaces: false }, "read"), "working");
+  assert.equal(faceOf(running, now, { stateFaces: true }, "read"), "reading", "老设置没有 toolFaces 键，缺省按开");
+  // stateFaces 总闸关 → 工具动画也跟着没
+  assert.equal(faceOf(running, now, { stateFaces: false, toolFaces: true }, "read"), "working");
+
+  // 既有三参调用方式不受影响
+  assert.equal(faceOf(running, now, opts), "working");
+
+  assert.equal(faceVariant("reading"), "read");
+  assert.equal(faceVariant("editing"), "type");
+  assert.equal(faceVariant("running"), "run");
+});
+
+test("工具动画：frameOf 缺帧返回 undefined 而不是回退 base（回退会把角色冻成静态微笑）", async () => {
+  const { frameOf, ART } = await testApiWithArt(["q", "mature", "classic"]);
+  const art = ART();
+
+  // 真实 manifest 里还没有这三张图 → 必须是 undefined，不是 "q-smile"
+  for (const key of ["q-read", "q-type", "q-run"]) assert.equal(art[key], undefined, key + " 素材尚未入库（本测试的前提）");
+  assert.equal(frameOf("q", false, "read"), undefined);
+  assert.equal(frameOf("q", false, "type"), undefined);
+  assert.equal(frameOf("q", false, "run"), undefined);
+  // 对照：非工具变体缺帧仍按原逻辑回退 base，行为不变
+  assert.equal(frameOf("q", false, "no-such-variant"), "q-smile", "非工具变体缺帧仍回退 base");
+
+  // 素材一到，立刻生效，无需改代码
+  art["q-read"] = { w: 168, h: 192, uri: "x" };
+  art["q-type"] = { w: 168, h: 192, uri: "x" };
+  art["q-run"] = { w: 168, h: 192, uri: "x" };
+  try {
+    assert.equal(frameOf("q", false, "read"), "q-read");
+    assert.equal(frameOf("q", false, "type"), "q-type");
+    assert.equal(frameOf("q", false, "run"), "q-run");
+    assert.equal(frameOf("mix", false, "read"), "q-read", "混合模式的成员是 Q 版");
+    // 成熟版没有工具帧（头肩近景表现不了打字）：即使 Q 版有，Lead 的成熟版也不能借用
+    assert.equal(frameOf("mature", true, "read"), undefined, "成熟版不做工具帧");
+    assert.equal(frameOf("mix", true, "type"), undefined, "混合模式的 Lead 是成熟版，不做工具帧");
+    assert.equal(frameOf("classic", false, "read"), undefined, "经典皮肤走矢量/专用帧，不取 Q 版位图");
+  } finally {
+    delete art["q-read"];
+    delete art["q-type"];
+    delete art["q-run"];
+  }
+});
+
+test("工具动画：toolFaces 设置项——默认开，持久化归一化，老设置缺键按开", () => {
+  const { normalizeSettings, DEFAULTS } = testApi();
+  assert.equal(DEFAULTS.toolFaces, true, "默认开");
+  assert.equal(normalizeSettings({}).toolFaces, true, "老设置没有这个键 → 开");
+  assert.equal(normalizeSettings({ toolFaces: false }).toolFaces, false);
+  assert.equal(normalizeSettings({ toolFaces: true }).toolFaces, true);
+  assert.equal(normalizeSettings({ toolFaces: "no" }).toolFaces, true, "只有字面 false 才关，脏值按开");
+  assert.equal(normalizeSettings(null).toolFaces, true, "空输入不抛");
+});
+
+// ── 等待举旗（PRD「状态表现力增强」波次 B，2026-11-17）──────────────────────
+// 信号 = 宿主 uiSession.sessionStatus 行上的 pendingInteraction.kind（核实见 docs/wave0-signals.md），
+// 纯客户端读取，宿主半边零新增监听。复用 q-wave，不新做帧。
+test("等待举旗：只认官方侧栏认的三种 kind，未知 / 脏数据一律不举旗", () => {
+  const { isWaiting } = testApi();
+  for (const kind of ["approval", "question", "plan-review"]) assert.equal(isWaiting({ kind }), true, kind);
+  for (const bad of [undefined, null, {}, { kind: "future-kind" }, { kind: "" }, { kind: 1 }, "approval", 0, []]) {
+    assert.equal(isWaiting(bad), false, "不得举旗：" + JSON.stringify(bad));
+  }
+});
+
+test("等待举旗：pendingOf 从状态表按会话取 pendingInteraction，表缺失 / 形状不对不抛", () => {
+  const { pendingOf } = testApi();
+  const rows = new Map([["a", { running: true, pendingInteraction: { kind: "approval" } }], ["b", { running: true }], ["c", null]]);
+  assert.deepEqual(pendingOf(rows, "a"), { kind: "approval" });
+  assert.equal(pendingOf(rows, "b"), undefined, "没在等就是 undefined");
+  assert.equal(pendingOf(rows, "c"), undefined, "行是 null 不抛");
+  assert.equal(pendingOf(rows, "missing"), undefined);
+  assert.equal(pendingOf(undefined, "a"), undefined);
+  assert.equal(pendingOf({}, "a"), undefined, "不是 Map 不抛");
+  assert.equal(pendingOf(new Map(), "a"), undefined);
+});
+
+test("等待举旗：faceOf 第五参出 waiting，优先级仅次于失败，压过庆祝 / 思考 / 工具 / 干活，不要求 running", () => {
+  const { faceOf } = testApi();
+  const now = 1_000_000;
+  const opts = { stateFaces: true, errorFaces: true, toolFaces: true, waitFaces: true };
+  const wait = { kind: "approval" };
+
+  assert.equal(faceOf({ running: true }, now, opts, undefined, wait), "waiting");
+  // 提问时模型已停（running:false）也要举旗——等的是人，不是模型
+  assert.equal(faceOf({ running: false }, now, opts, undefined, { kind: "question" }), "waiting", "不在跑也举旗");
+  assert.equal(faceOf({}, now, opts, undefined, { kind: "plan-review" }), "waiting");
+  // 压过的：庆祝 / 思考 / 工具
+  assert.equal(faceOf({ running: true, streaming: true }, now, opts, "read", wait), "waiting", "压过思考与工具");
+  assert.equal(faceOf({ lastTurnEndAt: now - 100, lastRunMs: 9000 }, now, opts, undefined, wait), "waiting", "压过庆祝");
+  // 唯一压过它的：失败
+  assert.equal(faceOf({ running: true, lastErrorAt: now - 100 }, now, opts, undefined, wait), "failed", "失败仍最高");
+  // 没在等：行为与以前完全一致（不能影响既有优先级）
+  assert.equal(faceOf({ running: true }, now, opts, undefined, undefined), "working");
+  assert.equal(faceOf({ running: true }, now, opts, "read", { kind: "future-kind" }), "reading", "未知 kind 当没在等");
+  // 等待解除后回到原状态：pending 一消失，同一行数据又走回原优先级
+  assert.equal(faceOf({ running: true, streaming: true }, now, opts, undefined, undefined), "thinking");
+});
+
+test("等待举旗：开关——waitFaces 关 → 不举旗；缺键按开；stateFaces 总闸关 → 一起没", () => {
+  const { faceOf } = testApi();
+  const now = 1_000_000;
+  const wait = { kind: "approval" };
+  assert.equal(faceOf({ running: true }, now, { stateFaces: true, waitFaces: false }, undefined, wait), "working", "关了退回干活");
+  assert.equal(faceOf({}, now, { stateFaces: true, waitFaces: false }, undefined, wait), "idle");
+  assert.equal(faceOf({ running: true }, now, { stateFaces: true }, undefined, wait), "waiting", "老设置没有 waitFaces 键，缺省按开");
+  assert.equal(faceOf({ running: true }, now, { stateFaces: false, waitFaces: true }, undefined, wait), "working", "总闸关则不举旗");
+});
+
+test("等待举旗：waiting 复用入场挥手帧（Q 版 q-wave / 成熟版 m-wave），零新增素材", async () => {
+  const { faceVariant, frameOf, ART } = await testApiWithArt(["q", "mature", "classic"]);
+  assert.equal(faceVariant("waiting"), "entry");
+  assert.equal(frameOf("q", false, faceVariant("waiting")), "q-wave");
+  assert.equal(frameOf("mature", true, faceVariant("waiting")), "m-wave");
+  assert.ok(ART()["q-wave"], "q-wave 必须已加载，否则会静默退回基础帧、举旗就看不出来");
+  assert.equal(frameOf("classic", false, faceVariant("waiting")), undefined, "经典皮肤不取位图（Whale 里走 c-work）");
+});
+
+test("等待举旗：整层渲染——pendingInteraction 真的传到了鲸鱼（data-face、「等你」气泡、q-wave），解除后恢复", async () => {
+  const loaded = loadPluginWithArt();
+  await loadArt(loaded, ["q"]);
+  const { WhaleLayer, settings } = loaded.plugin.__test;
+  settings.set({ skin: "q" });
+  const rows = (pendingByLead) => new Map([
+    [LEAD, Object.assign({ running: true }, pendingByLead ? { pendingInteraction: pendingByLead } : {})],
+    [MATE_A, { running: true }],
+    [MATE_B, { running: false }]
+  ]);
+  const layer = (statusRows) => render(WhaleLayer({
+    useSessions: (selector) => selector(listState()),
+    useSessionStatus: (selector) => selector(statusRows),
+    leadIdOf: (id) => id,
+    t: (key) => key
+  }));
+  const waitingCells = (tree) => findByClass(tree, "daw-whale").filter((node) => node.props["data-face"] === "waiting");
+
+  const waiting = layer(rows({ kind: "approval" }));
+  const cells = waitingCells(waiting);
+  assert.equal(cells.length, 1, "只有在等人的那一只举旗，队友不受牵连");
+  assert.equal(cells[0].props["data-agent"], findByClass(waiting, "daw-whale").find((n) => n.props["data-lead"] === "1").props["data-agent"], "举旗的是 Lead");
+  // 气泡固定说「等你」（测试里 t 是 key 透传）
+  const bubbles = findByClass(waiting, "daw-bubble").map((node) => node.props.children);
+  assert.ok(bubbles.includes("waiting"), "气泡必须是「等你」（压过任务 / 工具 / 俏皮话）：" + JSON.stringify(bubbles));
+  // 强调色的选择器是 `.daw-unit[data-waiting="1"]>.daw-bubble`：unit 上必须真有这个属性，且气泡必须是 unit 的直接子元素，
+  // 否则 CSS 永远匹配不到（真浏览器截图抓到过一次：气泡是 .daw-whale 的兄弟，写成后代选择器就失效）。
+  const waitingUnits = findByClass(waiting, "daw-unit").filter((node) => node.props["data-waiting"] === "1");
+  assert.equal(waitingUnits.length, 1, "只有等待中的那只 unit 带 data-waiting");
+  const directChildren = [].concat(waitingUnits[0].props.children).filter((child) => child && child.props);
+  assert.ok(directChildren.some((child) => child.props.className === "daw-bubble"), "气泡是 .daw-unit 的直接子元素");
+  assert.equal(findByClass(layer(rows(undefined)), "daw-unit").filter((node) => node.props["data-waiting"] === "1").length, 0, "没在等就没有这个属性");
+  // 帧：复用 q-wave，不是 q-smile
+  const srcs = findByClass(waiting, "daw-sprite").map((node) => node.props.src);
+  assert.ok(srcs.some((src) => /\/q-wave\.webp$/.test(src)), "举旗用 q-wave：" + srcs.join(","));
+
+  // 解除（用户处理完）：同一份数据没有 pendingInteraction → 回到原状态
+  const resolved = layer(rows(undefined));
+  assert.equal(waitingCells(resolved).length, 0, "解除后不再举旗");
+  assert.ok(!findByClass(resolved, "daw-bubble").some((node) => node.props.children === "waiting"), "「等你」气泡随之消失");
+
+  // 未知 kind 不举旗
+  assert.equal(waitingCells(layer(rows({ kind: "future-kind" }))).length, 0);
+
+  // 开关：waitFaces 关 → 即使在等也不举旗；气泡开关关 → 举旗但不画气泡
+  settings.set({ waitFaces: false });
+  assert.equal(waitingCells(layer(rows({ kind: "approval" }))).length, 0, "关了「等待举旗」就不举");
+  settings.set({ waitFaces: true, bubbles: false });
+  const noBubble = layer(rows({ kind: "question" }));
+  assert.equal(waitingCells(noBubble).length, 1, "气泡关了仍举旗");
+  assert.equal(findByClass(noBubble, "daw-bubble").length, 0, "但用户关了对话气泡就不画");
+  settings.set({ bubbles: true });
+});
+
+// ── 上下文血条（PRD「状态表现力增强」波次 C，2026-11-17）──────────────────────
+// 数据 = projectionsBySession[id].values.contextPressure（dsh-token-meter），口径逐字对齐官方 contextOccupancy。
+const pressureOf = (values) => ({ [LEAD]: { values: { contextPressure: values } } });
+
+test("上下文血条：口径对齐官方——projectedTokens 优先、否则 pressureTokens；占用封顶 100；返回的是「剩余」", () => {
+  const { contextLeft } = testApi();
+  assert.equal(contextLeft(pressureOf({ pressureTokens: 0, contextWindow: 1000 }), LEAD), 100, "刚开始是满的");
+  assert.equal(contextLeft(pressureOf({ pressureTokens: 500, contextWindow: 1000 }), LEAD), 50, "半满");
+  assert.equal(contextLeft(pressureOf({ pressureTokens: 1000, contextWindow: 1000 }), LEAD), 0, "用尽");
+  assert.equal(contextLeft(pressureOf({ pressureTokens: 5000, contextWindow: 1000 }), LEAD), 0, "超窗钳位到 0，不出负数");
+  assert.equal(contextLeft(pressureOf({ pressureTokens: 100, projectedTokens: 700, contextWindow: 1000 }), LEAD), 30, "projectedTokens 优先（压缩后立刻反映）");
+  assert.equal(contextLeft(pressureOf({ projectedTokens: 0, pressureTokens: 900, contextWindow: 1000 }), LEAD), 100, "projectedTokens 为 0 也是有效值，不能被 || 吞掉");
+  assert.equal(contextLeft(pressureOf({ pressureTokens: 333, contextWindow: 1000 }), LEAD), 67, "与官方一样先四舍五入占用百分比再取剩余");
+});
+
+test("上下文血条：缺分子或分母一律不画（undefined），绝不显示 0% 也不拿估计值凑", () => {
+  const { contextLeft } = testApi();
+  for (const bad of [
+    pressureOf({ contextWindow: 1000 }),                       // provider 还没上报用量
+    pressureOf({ pressureTokens: 100 }),                       // 路由没声明窗口
+    pressureOf({}),
+    pressureOf({ pressureTokens: 100, contextWindow: 0 }),     // 窗口为 0 不得除零
+    pressureOf({ pressureTokens: -5, contextWindow: 1000 }),
+    pressureOf({ pressureTokens: "100", contextWindow: 1000 }),
+    pressureOf({ pressureTokens: NaN, contextWindow: 1000 }),
+    pressureOf({ pressureTokens: Infinity, contextWindow: Infinity }),
+    pressureOf(null),
+    { [LEAD]: { values: {} } },
+    { [LEAD]: {} },
+    {},
+    undefined,
+    null
+  ]) assert.equal(contextLeft(bad, LEAD), undefined, "不得画：" + JSON.stringify(bad));
+  assert.equal(contextLeft(pressureOf({ pressureTokens: 1, contextWindow: 10 }), "other-session"), undefined, "别的会话没数据就不画");
+});
+
+test("上下文血条：contextBar 设置项——默认【关】（PRD 决策），只有字面 true 才开，持久化归一化", () => {
+  const { normalizeSettings, DEFAULTS } = testApi();
+  assert.equal(DEFAULTS.contextBar, false, "默认关");
+  assert.equal(normalizeSettings({}).contextBar, false, "老设置没有这个键 → 仍然关，升级不得自动打开");
+  assert.equal(normalizeSettings({ contextBar: true }).contextBar, true);
+  assert.equal(normalizeSettings({ contextBar: "yes" }).contextBar, false, "脏值按关");
+  assert.equal(normalizeSettings(null).contextBar, false, "空输入不抛");
+});
+
+test("上下文血条：整层渲染——开关开 + 有数据才画；关着 / 缺数据都不画；颜色分档且带文字标签", async () => {
+  const loaded = loadPluginWithArt();
+  await loadArt(loaded, ["q"]);
+  const { WhaleLayer, settings } = loaded.plugin.__test;
+  settings.set({ skin: "q" });
+  const layer = (projections) => render(WhaleLayer({
+    useSessions: (selector) => selector(Object.assign(listState(), projections === undefined ? {} : { projectionsBySession: projections })),
+    useSessionStatus: (selector) => selector(statusMap({ [LEAD]: true })),
+    leadIdOf: (id) => id,
+    t: (key) => key
+  }));
+  const withTeam = (extra) => Object.assign({}, listState().projectionsBySession, extra);
+  const data = withTeam({ [MATE_A]: { values: { contextPressure: { pressureTokens: 900, contextWindow: 1000 } } } });
+  data[LEAD] = { values: Object.assign({}, data[LEAD].values, { contextPressure: { pressureTokens: 250, contextWindow: 1000 } }) };
+
+  // 默认关：有数据也不画
+  settings.set({ contextBar: false });
+  assert.equal(findByClass(layer(data), "daw-ctx").length, 0, "默认关：一条都不画");
+
+  // 开：Lead 剩 75% → ok；队友剩 10% → low；没数据的不画
+  settings.set({ contextBar: true });
+  const on = layer(data);
+  const bars = findByClass(on, "daw-ctx");
+  assert.equal(bars.length, 2, "有数据的两只画条，MATE_B 没数据不画");
+  const byLevel = bars.map((bar) => bar.props["data-level"]).sort();
+  assert.deepEqual(byLevel, ["low", "ok"]);
+  for (const bar of bars) {
+    assert.equal(bar.props.role, "img");
+    assert.match(bar.props["aria-label"], /^contextTitle \d+%$/, "颜色之外必须有文字标签，不靠色传信息");
+  }
+  const widths = bars.map((bar) => bar.props.children.props.style.width).sort();
+  assert.deepEqual(widths, ["10%", "75%"], "条宽 = 剩余百分比");
+
+  // 开着但缺数据（provider 还没上报）：不画，不显示 0%
+  assert.equal(findByClass(layer({}), "daw-ctx").length, 0, "没有任何投影数据时不画");
+  settings.set({ contextBar: false });
+});
+
+test("上下文血条：分档边界（≤35 琥珀、≤15 红）与文案齐全", () => {
+  const source = readFileSync(join(pluginDir, "lib", "client.js"), "utf8");
+  assert.match(source, /props\.contextLeft <= 15 \? "low" : props\.contextLeft <= 35 \? "mid" : "ok"/);
+  for (const key of ["contextBar", "contextBarHint", "contextTitle"]) {
+    assert.equal((source.match(new RegExp('"' + key + '": "[^"]+"', "g")) || []).length, 2, key + " 中英各一份");
+  }
+});
+
+test("等待举旗：waitFaces 设置项——默认开，持久化归一化，老设置缺键按开", () => {
+  const { normalizeSettings, DEFAULTS } = testApi();
+  assert.equal(DEFAULTS.waitFaces, true, "默认开");
+  assert.equal(normalizeSettings({}).waitFaces, true, "老设置没有这个键 → 开");
+  assert.equal(normalizeSettings({ waitFaces: false }).waitFaces, false);
+  assert.equal(normalizeSettings({ waitFaces: "no" }).waitFaces, true, "只有字面 false 才关，脏值按开");
+  assert.equal(normalizeSettings(null).waitFaces, true, "空输入不抛");
+});
+
+test("等待举旗：文案齐全，CSS 常驻循环摆动且 motion=off 时停掉", () => {
+  const { plugin } = loadPlugin();
+  const source = readFileSync(join(pluginDir, "lib", "client.js"), "utf8");
+  assert.match(source, /\.daw-whale\[data-face=waiting\] \.daw-sprite\{animation:daw-beckon [\d.]+s ease-in-out infinite\}/, "循环摆动，区别于一次性入场挥手");
+  assert.match(source, /\.daw-layer\[data-motion=off\] \.daw-whale\[data-face=waiting\] \.daw-sprite\{animation:none\}/, "动画强度=关时必须停");
+  for (const key of ["waitFaces", "waitFacesHint", "waiting"]) {
+    assert.match(source, new RegExp('"' + key + '": "[^"]+"'), key + " 至少要有文案");
+  }
+  assert.ok(plugin.__test.isWaiting, "isWaiting 要导出供离线断言");
 });
 
 test("状态表情：Q / 成熟 / 经典的思考·出错·庆祝帧都已接线", async () => {

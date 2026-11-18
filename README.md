@@ -168,6 +168,9 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | 俏皮话 | 开 | — | 没正事可说时冒一句短句（`quips`），关掉只留正经气泡 |
 | 状态表情 | 开 | — | 思考时托腮、收工轻哭、团队全完成比心（`stateFaces`）；关掉只走心情轮换 |
 | 出错表情 | 开 | — | 工具或模型失败时画出错脸（`errorFaces`），8 秒后自动恢复；关掉不影响任何行为 |
+| 工具动画 | 开 | — | 按在用的工具类别切帧（读 / 改 / 命令，`toolFaces`）；**Q 版三帧素材尚未入库，目前不显示**，见下节 |
+| 等待举旗 | 开 | — | 审批 / 提问在等你时角色挥手 + 「等你」气泡（`waitFaces`）；关掉不影响审批本身 |
+| 上下文血条 | **关** | — | 角色脚下显示这个会话上下文还剩多少（`contextBar`）；默认关是需求负责人的决定 |
 | 团队汇总条 | 开 | — | 队形左侧「大伙在干什么」的汇总条（`teamBar`） |
 | 空闲挂着 | 开 | — | 没人在干活时把最后一批角色灰显挂着（`alwaysShow`）；关掉即整层消失、不占位 |
 | 显示任务 | 开 | — | 角色脚下的任务行 |
@@ -204,6 +207,29 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 优先级 `失败 > 庆祝 > 团队完成 > 思考 > 干活 > 空闲`；「思考」只在模型真的在输出时出现（避免工具间隙一直托腮）。
 `agent/request-error` 是 **waterfall**，插件监听后必须 `return next()` 放行，否则会吞掉宿主的重试策略。
 两个开关可分别关掉（状态表情 / 出错表情）。设计细节与取舍见 [`docs/state-signals.md`](docs/state-signals.md)。
+
+## 状态表现力增强（2026-11-17，借鉴 Pixel Agents）
+
+> 来源：Notion PRD 增量「鲸鱼娘状态表现力增强」。外部参照 [Pixel Agents](https://github.com/pixel-agents-hq/pixel-agents)（MIT）只借鉴**表现手法**——
+> 它的数据源是 Claude Code hooks，与 DSH 会话不匹配，不接入它的办公室。信号来源的源码核实见 [`docs/wave0-signals.md`](docs/wave0-signals.md)。
+
+| 能力 | 触发 / 数据 | 表现 | 状态 |
+|---|---|---|---|
+| 工具动画 | 宿主 `tools/execute` 已采集的当前工具名 → 读 / 改 / 命令三类（`toolCategory`，只认明确的几类，MCP 与未知工具不猜） | Q 版换 `q-read` / `q-type` / `q-run`；经典「改」用 `c-work`；成熟版不做（头肩近景表现不了打字） | **代码与测试就绪，素材未入库 → 目前不显示**（缺帧时一律退回心情轮换，不会冻成静态微笑） |
+| 等待举旗 | 客户端 `uiSession.sessionStatus` 行的 `pendingInteraction.kind` ∈ `approval` / `question` / `plan-review`（官方侧栏的徽标读的是同一字段） | 复用 `q-wave`，整只**常驻循环**摆手 + 琥珀色「等你」气泡；优先级仅次于失败；不要求会话在跑 | 已上线 |
+| 上下文血条 | `projectionsBySession[id].values.contextPressure`（`dsh-token-meter`），口径逐字对齐官方对话页的占用圈 | 脚下一条条，绿 / 琥珀（≤35%）/ 红（≤15%），带 `aria-label`；缺分子或分母（provider 还没上报、路由没声明窗口）一律**不画**，不显示 0% | 已上线，默认关 |
+| 离线成员「唤醒」 | 画布 Agent 卡，仅宿主 `/sessions` 说 `live:false` 的成员显示 | `POST /projects/:id/resume {sessionId}`（同源 token）→ 宿主 `agents.resume` | 已上线 |
+
+**优先级**：`失败 > 等待输入 > 收工庆祝 > 团队全完成 > 思考 > 工具动画 > 干活 > 空闲`。
+
+**唤醒的边界**：只放本项目已登记的成员（含主对话），否则 `40711`；幂等（已在线不重复 resume，并发同 id 共用一次加载）；失败回 `200 + 50201` 并带原因，不留脏状态可重试；**只上线，不批量、不派任务**。
+与串门工具 `whales_visit_resume` 共用同一个 `resumeSessionById`，所以「串门工具被关掉」时画布按钮照样可用。
+
+**已知限制（如实）**
+- 活动快照由客户端 2 秒轮询，短于一个周期的工具调用看不到动画；PRD 里原写的「最小驻留 600ms」因此是死代码，已删。
+- 「等你」信号来自浏览器里的 answerer，没有浏览器连着时审批会 `unavailable` 失败关闭，也就没有「等你」可显示。
+- 血条只有已载入投影的会话才有数据（Lead 与团队成员有；纯子 agent 会话可能没有）。
+- 画布 Agent 卡上的上下文小条**没做**：画布页没有订阅 `projectionsBySession` 的通路，且 `client.js` 离 560KB 门禁只剩约 3KB。
 
 ## 串门（自建，不依赖外部插件）
 

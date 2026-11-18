@@ -31,6 +31,8 @@ import "./mcp-concurrency-contract.test.mjs";
 import "./canvas-first.test.mjs";
 // 波次 3：新画布（React Flow 按需 chunk）与两种线。
 import "./flow-canvas.test.mjs";
+// 状态表现力增强·波次 D：画布 Agent 卡「唤醒」（浏览器半边；宿主半边在 index.test.mjs）。
+import "./wake-agent.test.mjs";
 // 波次 6：原型 chunk 行为（真 React 18；tools/flow-chunk 没装依赖时自动跳过并说明）。
 import "./proto-chunk.test.mjs";
 // 真 HTTP E2E：宿主半边跑在真 http server 上，真 socket 走完整闭环 + 重启持久化。
