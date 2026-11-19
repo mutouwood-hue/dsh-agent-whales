@@ -55,3 +55,4 @@ import "./requirements-ui.test.mjs";
 import "./e2e-protocol.test.mjs";
 import "./e2e-runs-http.test.mjs";
 import "./e2e-reflow-http.test.mjs";
+import "./e2e-autorun-http.test.mjs";

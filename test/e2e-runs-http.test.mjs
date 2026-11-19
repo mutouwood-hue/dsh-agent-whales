@@ -67,6 +67,8 @@ async function setup() {
   await app.call("POST", `/projects/${projectId}/members`, { sessionId: "session-b" }, token);
   const req = (await app.call("POST", `/projects/${projectId}/requirements`, { title: "表单导入", acceptance: ["上传并识别表头", "未匹配字段给建议"] }, token)).body.data.requirement;
   const b = `/projects/${projectId}`;
+  // 本文件测的是运行的协议与存储：显式手动触发，任务完工不会自动建运行（自动触发另有专门的测试）。
+  assert.equal((await app.call("PUT", `${b}/e2e-config`, { trigger: "manual" }, token)).body.code, 200);
   return { dir, app, token, projectId, req, b, runs: `${b}/requirements/${req.reqId}/e2e` };
 }
 

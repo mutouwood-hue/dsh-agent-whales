@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   E2E_LIMITS, isSafeShotName, shotMime, shotByteLimit, sanitizeShotName, uniqueShotName,
-  shotContentMatches, cleanAnnotationInput, addAnnotation, removeAnnotation, acceptResult, recomputeFinishedStatus, planReflow, buildFeedbackText, markReflowed, E2E_ANNOTATION_LIMITS, cleanRunInput, newRunRecord, cleanResultInput, applyResult, appendShots, finishRun, unfinishedCases, runSummary, normalizeRun, isRunOpen
+  normalizeE2eConfig, cleanE2eConfigPatch, shouldAutoRun, buildRunBrief, E2E_DEFAULT_CONFIG, shotContentMatches, cleanAnnotationInput, addAnnotation, removeAnnotation, acceptResult, recomputeFinishedStatus, planReflow, buildFeedbackText, markReflowed, E2E_ANNOTATION_LIMITS, cleanRunInput, newRunRecord, cleanResultInput, applyResult, appendShots, finishRun, unfinishedCases, runSummary, normalizeRun, isRunOpen
 } from "../lib/e2e.js";
 import { runOutcome } from "../lib/requirements.js";
 
@@ -283,4 +283,58 @@ test("markReflowed：标记用例与批注已回流、记一条回流记录；�
   assert.deepEqual(normalizeRun(out).reflows, out.reflows);
   assert.equal(runSummary(out).reflowed, 1);
   assert.equal(runSummary(acceptResult(finishedRun([["failed"]]), "c1", { now: NOW }).run).accepted, 1);
+});
+// ── P5b：E2E 配置与自动触发 ────────────────────────────────────────────────────
+
+test("normalizeE2eConfig：缺省 / 坏数据回默认（自动触发 + 手动驱动），字段被收敛", () => {
+  assert.deepEqual(normalizeE2eConfig(undefined), E2E_DEFAULT_CONFIG);
+  assert.deepEqual(normalizeE2eConfig({ trigger: "weird", driver: "selenium", executorSessionId: 5, baseUrl: null }), E2E_DEFAULT_CONFIG);
+  assert.deepEqual(normalizeE2eConfig({ trigger: "manual", driver: "tabbit-cli", executorSessionId: " s1 ", baseUrl: " http://x " }), { trigger: "manual", driver: "tabbit-cli", executorSessionId: "s1", baseUrl: "http://x" });
+});
+
+test("cleanE2eConfigPatch：只改给了的字段；校验触发 / 驱动 / 执行器成员 / 被测地址；非手动驱动要有执行器", () => {
+  const member = (id) => id === "session-exec";
+  assert.deepEqual(cleanE2eConfigPatch({ trigger: "manual" }, undefined, member).value, Object.assign({}, E2E_DEFAULT_CONFIG, { trigger: "manual" }));
+  const full = cleanE2eConfigPatch({ driver: "tabbit-cli", executorSessionId: "session-exec", baseUrl: "http://127.0.0.1:3250" }, undefined, member).value;
+  assert.deepEqual(full, { trigger: "auto", driver: "tabbit-cli", executorSessionId: "session-exec", baseUrl: "http://127.0.0.1:3250" });
+  assert.equal(cleanE2eConfigPatch({ baseUrl: "https://a.b/c" }, full, member).value.driver, "tabbit-cli", "只改地址不动驱动");
+  assert.equal(cleanE2eConfigPatch({ baseUrl: "" }, full, member).value.baseUrl, "", "可清空地址");
+  assert.match(cleanE2eConfigPatch({ trigger: "sometimes" }, undefined, member).error, /trigger must be/);
+  assert.match(cleanE2eConfigPatch({ driver: "selenium" }, undefined, member).error, /driver must be/);
+  assert.match(cleanE2eConfigPatch({ executorSessionId: "stranger" }, undefined, member).error, /project member/);
+  assert.match(cleanE2eConfigPatch({ executorSessionId: 5 }, undefined, member).error, /string/);
+  for (const bad of ["ftp://x", "javascript:alert(1)", "not a url", "http://" + "a".repeat(200)]) assert.match(cleanE2eConfigPatch({ baseUrl: bad }, undefined, member).error, /baseUrl/, bad);
+  assert.match(cleanE2eConfigPatch({ driver: "computer-use" }, undefined, member).error, /needs an executorSessionId/, "只切驱动、没有执行器：拒绝，避免出现没人跑的运行");
+  assert.equal(cleanE2eConfigPatch({ driver: "computer-use", executorSessionId: "session-exec" }, undefined, member).value.driver, "computer-use");
+  assert.match(cleanE2eConfigPatch(null, undefined, member).error, /object/);
+});
+
+test("shouldAutoRun：任务全完工 + 设计已确认 + 没跑过 → 跑；各种不该跑的情形都给明确原因", () => {
+  const view = (over) => Object.assign({ virtual: false, rerunPending: false, evidence: { taskTotal: 2, taskDone: 2, dirtyPrototypeCount: 0, latestRun: null } }, over || {});
+  const auto = { trigger: "auto" };
+  assert.deepEqual(shouldAutoRun(view(), auto, false), { run: true, reason: "first-run" });
+  assert.deepEqual(shouldAutoRun(view({ rerunPending: true, evidence: { taskTotal: 2, taskDone: 2, dirtyPrototypeCount: 0, latestRun: { outcome: "failed" } } }), auto, false), { run: true, reason: "rerun" }, "回流返工完 → 重跑，即使对当前版本已有（失败的）运行");
+  assert.equal(shouldAutoRun(view(), { trigger: "manual" }, false).reason, "trigger-manual");
+  assert.equal(shouldAutoRun(view(), undefined, false).run, true, "没配置 = 默认自动");
+  assert.equal(shouldAutoRun(view(), auto, true).reason, "run-open");
+  assert.equal(shouldAutoRun(view({ evidence: { taskTotal: 0, taskDone: 0, dirtyPrototypeCount: 0, latestRun: null } }), auto, false).reason, "tasks-not-done", "没有任务不跑");
+  assert.equal(shouldAutoRun(view({ evidence: { taskTotal: 2, taskDone: 1, dirtyPrototypeCount: 0, latestRun: null } }), auto, false).reason, "tasks-not-done");
+  assert.equal(shouldAutoRun(view({ evidence: { taskTotal: 2, taskDone: 2, dirtyPrototypeCount: 1, latestRun: null } }), auto, false).reason, "design-unconfirmed", "设计没定不跑，哪怕要重跑");
+  assert.equal(shouldAutoRun(view({ rerunPending: true, evidence: { taskTotal: 2, taskDone: 2, dirtyPrototypeCount: 1, latestRun: null } }), auto, false).reason, "design-unconfirmed");
+  assert.equal(shouldAutoRun(view({ evidence: { taskTotal: 2, taskDone: 2, dirtyPrototypeCount: 0, latestRun: { outcome: "passed" } } }), auto, false).reason, "already-run", "已经跑过且没回流：不重复跑");
+  assert.equal(shouldAutoRun(view({ evidence: { taskTotal: 2, taskDone: 2, dirtyPrototypeCount: 0, latestRun: { outcome: "error" } } }), auto, false).reason, "already-run", "出错的不自动重跑，避免循环");
+  assert.equal(shouldAutoRun(view({ virtual: true }), auto, false).reason, "no-requirement");
+  assert.equal(shouldAutoRun(null, auto, false).reason, "no-requirement");
+});
+
+test("buildRunBrief：带运行 / 需求 / 设计版本 / 被测地址 / 每条用例 / 上报方式", () => {
+  const run = Object.assign(mkRun(), { driver: "tabbit-cli" });
+  const text = buildRunBrief(run, { title: "表单导入" }, { baseUrl: "http://127.0.0.1:3250" });
+  assert.match(text, /运行 run-1 · 需求「表单导入」 · 设计版本 v1 · 驱动 tabbit-cli/);
+  assert.match(text, /被测地址：http:\/\/127\.0\.0\.1:3250/);
+  assert.match(text, /c1\s+A/);
+  assert.match(text, /c2\s+B/);
+  assert.match(text, /whales_e2e_report/);
+  assert.match(text, /finish: true/);
+  assert.doesNotMatch(buildRunBrief(run, null, undefined), /被测地址/, "没配地址就不写");
 });

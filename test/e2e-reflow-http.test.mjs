@@ -68,6 +68,8 @@ async function setup() {
   const projectId = (await app.call("POST", "/projects", { name: "回流项目", mainSessionId: "session-a" }, token)).body.data.project.projectId;
   await app.call("POST", `/projects/${projectId}/members`, { sessionId: "session-b" }, token);
   const b = `/projects/${projectId}`;
+  // 本文件测的是回流，不是自动触发：显式手动触发，避免任务一完工就被自动建出运行（自动触发另有专门的测试）。
+  assert.equal((await app.call("PUT", `${b}/e2e-config`, { trigger: "manual" }, token)).body.code, 200);
   const req = (await app.call("POST", `${b}/requirements`, { title: "表单导入", acceptance: ["上传并识别表头", "未匹配字段给建议"] }, token)).body.data.requirement;
   const canvas = await app.call("GET", `/canvas?projectId=${projectId}`);
   await app.call("POST", "/canvas/elements", { projectId, expectedRevision: canvas.body.data.rev, upsert: [{ id: "proto:main", kind: "prototype", data: { requirementId: req.reqId, title: "导入页", puck: { content: [{ type: "Heading", props: { text: "x" } }] } } }] }, token);
