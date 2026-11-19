@@ -537,7 +537,15 @@ Enter 发送、Shift+Enter 换行、输入法组合中不发，「在对话中�
   `GET|POST /projects/:id/requirements`、`GET|PATCH /projects/:id/requirements/:reqId`。
   PATCH 必须带 `expectedRevision`（过期 `40902`，不覆盖）；标题 / 目标 / 验收点过长直接拒绝而不是悄悄截断；
   `composerSessionId` 必须是项目成员（`40703`），缺省 = 项目主对话。
-- **未做**（后续期次）：任务 / 原型帧 / 提案写入时带 `requirementId`（P1）、确认设计版本（P2）、界面（P3）、E2E（P4–P6）。
+- **P1（同日）：`requirementId` 贯穿写入点。**
+  - `POST /tasks` 与提案确认建出的任务都能带 `requirementId`；指向不存在 / 别的项目的需求直接拒绝（`40401`），不悄悄落到「未归类」。
+  - `whales_propose_tasks` / `whales_flow_draw` / `whales_prototype_draw` 新增可选参数 `requirementId`。缺省时按顺序解析：
+    显式 → 以本会话（及其祖先）为 Composer 的**唯一**需求 → 项目里只有一个需求就是它 → 项目里**一个需求都没有就用项目名 / 目标建出第一个**
+    （「首个需求随项目建出」）→ 有多个又判断不了则**不乱猜**：内容落在「未归类」，结果里的 `requirementNote` 提示 agent 带上 `requirementId`。
+  - 已有归属的流程图 / 原型帧重画时遇到歧义，沿用原归属，不被甩回「未归类」。流程图的归属写在它的分组框上，按分组框算一张。
+  - 提案视图带出 `requirementId`；确认后建出的任务继承它。
+  - 文件节点识别：`univer_(new|execute|import|unit|worktree)` 记为「改过」（官方 `dsh-univer-office` 插件的写类工具），`univer_inspect` 等仍是「读过」。
+- **未做**（后续期次）：确认设计版本（P2）、界面（P3）、E2E（P4–P6）。
 - 测试：`test/requirements.test.mjs`（33 例：六个阶段、「设计优先」、旧版本运行不充数、「可接受」算通过、未归类并入）+
   `test/requirements-http.test.mjs`（真 HTTP：建 / 列 / 取 / 改、CAS、越权、重启持久化）；
   五种变异（拿掉设计优先级 / 旧版本充数 / 可接受不算通过 / 不并入未归类 / 不判返工上限）都会让测试变红。

@@ -4662,3 +4662,163 @@ describe("第二期 X3：自动派发遇审批", () => {
 		assert.equal((await auditOf(ctx)).length, before + 1);
 	});
 });
+
+// ── 需求主线 P1：requirementId 贯穿任务 / 提案 / 原型帧 / 流程图，univer_* 记为写类 ─────────────────
+describe("需求主线 P1：requirementId 贯穿", () => {
+  const user = (seq, text) => ({ type: "user/message", seq, data: { content: [{ type: "text", text }], source: { kind: "user" } } });
+  const assistant = (seq, text) => ({ type: "assistant/message", seq, data: { message: { content: [{ type: "text", text }] } } });
+  const asA = { agent: { id: "session-a" } };
+  const base = "/agent-whales/api";
+  const puck = { content: [{ type: "Heading", props: { text: "导入" } }] };
+  const miniFlow = (flowId) => ({
+    flowId,
+    title: "导入流程",
+    nodes: [
+      { key: "s", shape: "start", text: "上传文件", sourceMessageIds: ["m1"] },
+      { key: "m", shape: "step", text: "给映射建议", sourceMessageIds: ["m2"] }
+    ],
+    edges: [{ from: "s", to: "m" }]
+  });
+  async function setup() {
+    const h = await m6Harness();
+    host.setEventsStorePathForTests(join(h.dir, "events.json"));
+    const projectId = await createProject(h);
+    h.sessionLogs.set("session-a", [user(1, "导入要先校验表头"), assistant(2, "好，表头不对就给映射建议")]);
+    return { h, projectId };
+  }
+  const reqs = async (h, projectId) => (await h.call("GET", `${base}/projects/${projectId}/requirements`)).body.data.requirements;
+  const newReq = async (h, projectId, body) => (await h.call("POST", `${base}/projects/${projectId}/requirements`, body)).body.data.requirement;
+
+  test("POST /tasks 带 requirementId：落库、并入该需求；不存在 / 别的项目的需求被拒；不带则留在「未归类」", async () => {
+    const { h, projectId } = await setup();
+    const r1 = await newReq(h, projectId, { title: "表单导入" });
+    const task = await h.call("POST", `${base}/tasks`, { projectId, subject: "T1", requirementId: r1.reqId });
+    assert.equal(task.body.code, 200, JSON.stringify(task.body));
+    assert.equal(task.body.data.task.requirementId, r1.reqId);
+    const orphan = await h.call("POST", `${base}/tasks`, { projectId, subject: "老式任务" });
+    assert.equal(orphan.body.data.task.requirementId, undefined, "没带就不写字段");
+    const rows = await reqs(h, projectId);
+    assert.deepEqual(rows.find((row) => row.reqId === r1.reqId).taskIds, [task.body.data.task.taskId]);
+    assert.equal(rows[rows.length - 1].reqId, "unassigned");
+    assert.equal(rows[rows.length - 1].counts.tasks, 1);
+
+    assert.equal((await h.call("POST", `${base}/tasks`, { projectId, subject: "x", requirementId: "req-不存在" })).body.code, 40401);
+    const other = await h.call("POST", `${base}/projects`, { name: "别的项目", mainSessionId: "session-b" });
+    const otherReq = await newReq(h, other.body.data.project.projectId, { title: "别人的需求" });
+    const cross = await h.call("POST", `${base}/tasks`, { projectId, subject: "x", requirementId: otherReq.reqId });
+    assert.equal(cross.body.code, 40401, "别的项目的需求不能认领：" + JSON.stringify(cross.body));
+  });
+
+  test("首次画图：项目里还没有需求就建第一个（项目名 + 目标），流程图 / 原型都归在它名下", async () => {
+    const { h, projectId } = await setup();
+    assert.deepEqual(await reqs(h, projectId), []);
+    const drawn = await h.tools.whales_flow_draw.execute(miniFlow("main"), asA);
+    assert.equal(drawn.drawn, true, JSON.stringify(drawn));
+    assert.ok(drawn.requirementId, "结果要告诉 agent 归到了哪个需求");
+    assert.match(drawn.requirementNote, /第一个需求/);
+    let rows = await reqs(h, projectId);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].reqId, drawn.requirementId);
+    assert.equal(rows[0].title, "M6 项目");
+    assert.equal(rows[0].composerSessionId, "session-a");
+    assert.deepEqual(rows[0].flowIds, ["flow:main"], "一张流程图按分组框算一张");
+    assert.equal(rows[0].stage, "clarify", "只有流程图、没有原型帧还是澄清");
+
+    const proto = await h.tools.whales_prototype_draw.execute({ title: "导入弹窗", puck, sourceMessageIds: ["m1"] }, asA);
+    assert.equal(proto.drawn, true, JSON.stringify(proto));
+    assert.equal(proto.requirementId, drawn.requirementId);
+    assert.equal(proto.requirementNote, undefined, "第二次不再建需求");
+    rows = await reqs(h, projectId);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0].prototypeIds, ["proto:main"]);
+    assert.equal(rows[0].stage, "design", "有原型帧但没确认过 → 设计阶段");
+    assert.equal(rows[0].attention, "confirm-design");
+    assert.equal(rows.some((row) => row.virtual), false, "画出来的东西都有归属，不会冒出「未归类」");
+  });
+
+  test("多个需求：显式 requirementId 优先；按 Composer 匹配；有歧义时不乱猜、沿用原归属；显式写错直接拒绝", async () => {
+    const { h, projectId } = await setup();
+    const r1 = await newReq(h, projectId, { title: "需求一" });
+    await h.call("POST", `${base}/projects/${projectId}/members`, { sessionId: "session-b" });
+    const r2 = await newReq(h, projectId, { title: "需求二", composerSessionId: "session-b" });
+
+    // 没带 requirementId：session-a 只是 r1 的 Composer → 归 r1
+    const byComposer = await h.tools.whales_prototype_draw.execute({ prototypeId: "main", title: "页一", puck, sourceMessageIds: ["m1"] }, asA);
+    assert.equal(byComposer.requirementId, r1.reqId);
+    // 显式指定 r2
+    const explicit = await h.tools.whales_prototype_draw.execute({ prototypeId: "p2", title: "页二", puck, sourceMessageIds: ["m1"], requirementId: r2.reqId }, asA);
+    assert.equal(explicit.requirementId, r2.reqId);
+    // 显式写错：拒绝，不悄悄落到别处
+    await assert.rejects(h.tools.whales_prototype_draw.execute({ prototypeId: "p9", title: "x", puck, sourceMessageIds: ["m1"], requirementId: "req-nope" }, asA), /40401/);
+    let rows = await reqs(h, projectId);
+    assert.deepEqual(rows.find((row) => row.reqId === r1.reqId).prototypeIds, ["proto:main"]);
+    assert.deepEqual(rows.find((row) => row.reqId === r2.reqId).prototypeIds, ["proto:p2"]);
+
+    // 再给 session-a 一个需求 → 它名下有两个，没法判断
+    await newReq(h, projectId, { title: "需求三", composerSessionId: "session-a" });
+    const ambiguous = await h.tools.whales_prototype_draw.execute({ prototypeId: "p3", title: "页三", puck, sourceMessageIds: ["m1"] }, asA);
+    assert.equal(ambiguous.drawn, true);
+    assert.equal(ambiguous.requirementId, undefined, "有歧义不乱猜");
+    assert.match(ambiguous.requirementNote, /请带上 requirementId/);
+    rows = await reqs(h, projectId);
+    assert.deepEqual(rows.find((row) => row.virtual).prototypeIds, ["proto:p3"], "落在「未归类」，没丢");
+    // 已有归属的原型重画时遇到歧义：沿用原归属，不被甩回「未归类」
+    const redraw = await h.tools.whales_prototype_draw.execute({ prototypeId: "main", title: "页一改", puck, sourceMessageIds: ["m1"] }, asA);
+    assert.equal(redraw.drawn, true, JSON.stringify(redraw));
+    rows = await reqs(h, projectId);
+    assert.deepEqual(rows.find((row) => row.reqId === r1.reqId).prototypeIds, ["proto:main"]);
+  });
+
+  test("提案：带 requirementId（缺省按 Composer / 首个需求），确认后建出的任务继承；写错直接拒绝", async () => {
+    const { h, projectId } = await setup();
+    await assert.rejects(h.tools.whales_propose_tasks.execute({ projectId, requirementId: "req-nope", items: [{ key: "T1", title: "x" }] }, asA), /40401/);
+
+    const proposal = await h.tools.whales_propose_tasks.execute({ projectId, items: [{ key: "T1", title: "导入接口" }, { key: "T2", title: "导入弹窗", blockedByKeys: ["T1"] }] }, asA);
+    assert.ok(proposal.requirementId, "项目里没有需求时自动建第一个并归到它");
+    assert.match(proposal.requirementNote, /第一个需求/);
+    const view = await h.call("GET", `${base}/proposals?leadSessionId=session-a`);
+    assert.equal(view.body.data.proposal.requirementId, proposal.requirementId, "提案视图带出归属");
+
+    const confirmed = await h.call("POST", `${base}/proposals/${proposal.proposalId}/confirm`, { leadSessionId: "session-a", version: proposal.version, requestId: "p1-confirm" });
+    assert.equal(confirmed.body.code, 200, JSON.stringify(confirmed.body));
+    assert.equal(confirmed.body.data.created.length, 2);
+    const tasks = (await h.call("GET", `${base}/tasks?projectId=${projectId}`)).body.data.tasks;
+    assert.equal(tasks.length, 2);
+    for (const task of tasks) assert.equal(task.requirementId, proposal.requirementId, "确认后建出的任务继承提案的需求");
+    const rows = await reqs(h, projectId);
+    assert.equal(rows.length, 1, "任务都有归属，不出现「未归类」");
+    assert.equal(rows[0].counts.tasks, 2);
+    assert.equal(rows[0].stage, "develop", "没有原型帧、有任务 → 开发");
+  });
+
+  test("提案确认时需求已被改到别处不存在：任务建不出来并如实报失败，不悄悄落到未归类", async () => {
+    const { h, projectId } = await setup();
+    const proposal = await h.tools.whales_propose_tasks.execute({ projectId, items: [{ key: "T1", title: "x" }] }, asA);
+    // 直接抹掉 projects.json 里的需求表，模拟需求在确认前被清掉
+    const file = join(h.dir, "projects.json");
+    const store = JSON.parse(readFileSync(file, "utf8"));
+    store.requirements = {};
+    writeFileSync(file, JSON.stringify(store), "utf8");
+    const confirmed = await h.call("POST", `${base}/proposals/${proposal.proposalId}/confirm`, { leadSessionId: "session-a", version: proposal.version, requestId: "p2-confirm" });
+    assert.equal(confirmed.body.code, 200, JSON.stringify(confirmed.body));
+    assert.equal(confirmed.body.data.created.length, 0);
+    assert.equal(confirmed.body.data.failed[0].status, "failed");
+    assert.match(confirmed.body.data.failed[0].message, /requirement not found/);
+  });
+
+  test("univer_* 工具记为写类：agent 用 univer_execute 改了 .univer 文件，节点标「改过」而不是「读过」", () => {
+    const call = (seq, name, args) => ({ type: "tool/call", seq, time: 1000 + seq, data: { name, arguments: JSON.stringify(args) } });
+    const refs = host.referencesFromEvents([
+      call(1, "univer_new", { file: "D:/work/验收用例.univer" }),
+      call(2, "univer_execute", { file: "D:/work/验收用例.univer", worktreeId: "w1", unitId: "u1", code: "return 1" }),
+      call(3, "univer_inspect", { file: "D:/work/需求文档.univer" }),
+      call(4, "univer_screenshot", { file: "D:/work/需求文档.univer" })
+    ]);
+    const cases = refs.files["d:/work/验收用例.univer"];
+    assert.equal(cases.write, 2, "new + execute 都是写");
+    assert.equal(cases.read, 0);
+    const doc = refs.files["d:/work/需求文档.univer"];
+    assert.equal(doc.write, 0);
+    assert.equal(doc.read, 2, "inspect / screenshot 只是读");
+  });
+});

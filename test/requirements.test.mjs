@@ -261,7 +261,7 @@ test("buildRequirementViews：任务与原型帧按 requirementId 归组", () =>
     projectId: "p1",
     requirements: [req({ reqId: "r1", title: "A" }), req({ reqId: "r2", title: "B" })],
     tasks: [task("t1", { requirementId: "r1" }), task("t2", { requirementId: "r2" }), task("t3", { requirementId: "r2" })],
-    elements: [{ id: "e1", kind: "prototype", requirementId: "r1", updatedAt: T1 }, { id: "e2", kind: "flow", data: { requirementId: "r2" }, updatedAt: T1 }],
+    elements: [{ id: "e1", kind: "prototype", requirementId: "r1", updatedAt: T1 }, { id: "e2", kind: "group", data: { kind: "flow", requirementId: "r2" }, updatedAt: T1 }, { id: "e2:node", kind: "flow", data: { flowId: "main" }, updatedAt: T1 }],
     runs: []
   });
   assert.equal(views.length, 2, "没有孤儿数据就不出现「未归类」");
@@ -278,7 +278,7 @@ test("buildRequirementViews：老数据（没有 requirementId）并入虚拟「
     projectId: "p1",
     requirements: [req({ reqId: "r1", title: "A" })],
     tasks: [task("old1"), task("old2", { requirementId: "r-已被删的需求" }), task("t1", { requirementId: "r1" })],
-    elements: [{ id: "oldproto", kind: "prototype", updatedAt: T0 }, { id: "note1", kind: "note" }],
+    elements: [{ id: "oldproto", kind: "prototype", updatedAt: T0 }, { id: "note1", kind: "note" }, { id: "flow:old", kind: "group", data: { kind: "flow" }, updatedAt: T0 }, { id: "flow:old:s", kind: "flow", data: { flowId: "old" }, updatedAt: T0 }],
     runs: []
   });
   assert.equal(views.length, 2);
@@ -288,6 +288,7 @@ test("buildRequirementViews：老数据（没有 requirementId）并入虚拟「
   assert.equal(last.title, "未归类");
   assert.deepEqual(last.taskIds.sort(), ["old1", "old2"]);
   assert.deepEqual(last.prototypeIds, ["oldproto"], "便签等非原型 / 流程图元素不进需求");
+  assert.deepEqual(last.flowIds, ["flow:old"], "一张流程图按分组框算一张，不按节点数");
   assert.equal(last.stage, "develop", "未归类只按任务判断，不要求设计版本");
 });
 
