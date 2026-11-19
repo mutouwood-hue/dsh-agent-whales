@@ -159,3 +159,37 @@ test("需求相关文案：中英键集合一致且都非空；CSS 里有对应�
   const css = Array.isArray(t.WB_CSS) ? t.WB_CSS.join("\n") : String(t.WB_CSS);
   for (const cls of [".daw-wb-reqs", ".daw-wb-req{", ".daw-wb-req-title", ".daw-wb-req-attn", ".daw-wb-req-next"]) assert.ok(css.includes(cls), "CSS 缺 " + cls);
 });
+
+// ── 需求待办进「需要我处理」页 ────────────────────────────────────────────────
+
+test("待办页：需求待办排第一，attention 翻成人话（不露内部 key），统计把它算进「待我处理」", async () => {
+  const { mount, shim } = createMount();
+  const inbox = { source: "project", projectId: null, groups: [
+    { key: "requirements", label: "需求待办", items: [
+      { kind: "requirement", reqId: "r1", projectId: "p1", subject: "表单导入", attention: "e2e-mismatch", reason: "1 项不符，在截图上批注后回流返工", stage: "mismatch", at: 1000 },
+      { kind: "requirement", reqId: "r2", projectId: "p1", subject: "批量审批", attention: "confirm-design", reason: "确认原型，再推进开发", stage: "design", at: 900 }
+    ] },
+    { key: "proposals", label: "提案待确认", items: [{ kind: "proposal", proposalId: "prop-1", subject: "导入接口", projectId: "p1", at: 800 }] },
+    { key: "worker", label: "worker 求人", items: [] }, { key: "handed_back", label: "超 scope 退回", items: [] }, { key: "system", label: "系统提醒", items: [] }
+  ] };
+  const { plugin } = loadPlugin({ react: shim, fetch: (url) => (String(url).includes("/inbox") ? { code: 200, msg: "success", data: inbox } : { code: 200, msg: "success", data: {} }) });
+  installDocumentStub();
+  const t = plugin.__test;
+  assert.equal(t.wbInboxView(inbox).total, 3, "统计包含需求待办");
+  await t.wbCache.read("/inbox").catch(() => {});
+  const mounted = mount(t.WbInboxPage, { t: (key, vars) => (t.WB_TEXT.zh[key] ? String(t.WB_TEXT.zh[key]).replace(/\{(\w+)\}/g, (m, k) => (vars && vars[k] !== undefined ? vars[k] : m)) : key) });
+  await new Promise((resolve) => setImmediate(resolve));
+  const texts = textsOf(mounted.tree).join("|");
+  assert.ok(texts.indexOf("需求待办") >= 0 && texts.indexOf("需求待办") < texts.indexOf("提案待确认"), "需求待办排在提案待确认之前");
+  assert.match(texts, /表单导入 · 验收不符/);
+  assert.match(texts, /批量审批 · 待确认设计/);
+  assert.match(texts, /1 项不符，在截图上批注后回流返工/, "下一步说明作为副标题");
+  assert.match(texts, /去处理（打开画布）/);
+  assert.doesNotMatch(texts, /e2e-mismatch|confirm-design|rework-limit/, "内部 key 不能露出来");
+  assert.match(texts, /需要我处理（3）/);
+});
+
+test("待办文案：inbox.action.requirement 中英都有", () => {
+  const t = api();
+  assert.ok(t.WB_TEXT.zh["inbox.action.requirement"] && t.WB_TEXT.en["inbox.action.requirement"]);
+});

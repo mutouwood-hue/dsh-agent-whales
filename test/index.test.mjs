@@ -2181,7 +2181,8 @@ describe("M6 GET /agent-whales/api/inbox（需要我处理）", () => {
     assert.equal(inbox.body.code, 200, JSON.stringify(inbox.body));
     const groups = {};
     for (const group of inbox.body.data.groups) groups[group.key] = group;
-    assert.deepEqual(inbox.body.data.groups.map((group) => group.key), ["proposals", "worker", "handed_back", "system"], "四组必须固定且顺序稳定");
+    assert.deepEqual(inbox.body.data.groups.map((group) => group.key), ["requirements", "proposals", "worker", "handed_back", "system"], "五组必须固定且顺序稳定（需求待办在最前）");
+    assert.deepEqual(groups.requirements.items, [], "没有需求待办时该组为空但保留");
     assert.equal(groups.proposals.label, "提案待确认");
     assert.equal(groups.proposals.items.length, 1, "已确认提案不得再进待办");
     assert.equal(groups.proposals.items[0].kind, "proposal");
@@ -4820,5 +4821,82 @@ describe("需求主线 P1：requirementId 贯穿", () => {
     const doc = refs.files["d:/work/需求文档.univer"];
     assert.equal(doc.write, 0);
     assert.equal(doc.read, 2, "inspect / screenshot 只是读");
+  });
+});
+describe("需求主线 P3：需求待办进「需要我处理」", () => {
+  const base = "/agent-whales/api";
+  async function setup() {
+    const h = await m6Harness();
+    host.setEventsStorePathForTests(join(h.dir, "events.json"));
+    const projectId = await createProject(h);
+    return { h, projectId };
+  }
+  const newReq = async (h, projectId, body) => (await h.call("POST", `${base}/projects/${projectId}/requirements`, body)).body.data.requirement;
+  const putProto = async (h, projectId, reqId, id) => {
+    const canvas = await h.call("GET", `${base}/canvas?projectId=${projectId}`);
+    const res = await h.call("POST", `${base}/canvas/elements`, { projectId, expectedRevision: canvas.body.data.rev, upsert: [{ id, kind: "prototype", data: { requirementId: reqId, title: "页", puck: { content: [{ type: "Heading", props: { text: "x" } }] } } }] });
+    assert.equal(res.body.code, 200, JSON.stringify(res.body));
+  };
+  const group = async (h, query) => (await h.call("GET", `${base}/inbox${query || ""}`)).body.data.groups.find((row) => row.key === "requirements");
+
+  test("待确认设计：有原型帧没确认 → 进待办；确认后移出；虚拟「未归类」不进；字段齐全", async () => {
+    const { h, projectId } = await setup();
+    const r1 = await newReq(h, projectId, { title: "表单导入" });
+    await newReq(h, projectId, { title: "只聊了没画" });
+    await h.call("POST", `${base}/tasks`, { projectId, subject: "老任务" });
+    await putProto(h, projectId, r1.reqId, "proto:main");
+    const todo = await group(h);
+    assert.equal(todo.label, "需求待办");
+    assert.equal(todo.items.length, 1, "澄清阶段的需求和未归类都不算待办");
+    const item = todo.items[0];
+    assert.equal(item.kind, "requirement");
+    assert.equal(item.reqId, r1.reqId);
+    assert.equal(item.projectId, projectId);
+    assert.equal(item.subject, "表单导入");
+    assert.equal(item.attention, "confirm-design");
+    assert.match(item.reason, /确认原型/);
+    assert.equal(item.stage, "design");
+
+    const confirmed = await h.call("POST", `${base}/projects/${projectId}/requirements/${r1.reqId}/confirm-design`, { expectedRevision: r1.revision });
+    assert.equal(confirmed.body.code, 200, JSON.stringify(confirmed.body));
+    assert.deepEqual((await group(h)).items, [], "确认后待办消失");
+  });
+
+  test("项目过滤：只看某个项目的需求待办；别的项目的不混入", async () => {
+    const { h, projectId } = await setup();
+    const other = await h.call("POST", `${base}/projects`, { name: "别的项目", mainSessionId: "session-b" });
+    const otherId = other.body.data.project.projectId;
+    const mine = await newReq(h, projectId, { title: "我的" });
+    const theirs = await newReq(h, otherId, { title: "别人的" });
+    await putProto(h, projectId, mine.reqId, "proto:a");
+    await putProto(h, otherId, theirs.reqId, "proto:b");
+    assert.deepEqual((await group(h, `?projectId=${projectId}`)).items.map((i) => i.subject), ["我的"]);
+    assert.deepEqual((await group(h, `?projectId=${otherId}`)).items.map((i) => i.subject), ["别人的"]);
+    assert.equal((await group(h)).items.length, 2, "不带 projectId 是全部");
+  });
+
+  test("验收不符 / 返工超限：E2E 最近一次失败 → 待办；达到返工上限变成 rework-limit", async () => {
+    const { h, projectId } = await setup();
+    const r = await newReq(h, projectId, { title: "对账" });
+    await putProto(h, projectId, r.reqId, "proto:main");
+    const confirm = await h.call("POST", `${base}/projects/${projectId}/requirements/${r.reqId}/confirm-design`, { expectedRevision: r.revision });
+    assert.equal(confirm.body.code, 200);
+    const task = await h.call("POST", `${base}/tasks`, { projectId, subject: "T1", requirementId: r.reqId });
+    const taskId = task.body.data.task.taskId;
+    await h.call("PUT", `${base}/tasks/${taskId}/report`, { projectId, expectedRevision: 1, report: { status: "done", summary: "ok" } });
+    // 没有 E2E 运行 → 验收阶段，没有待办（还没人该处理）
+    assert.deepEqual((await group(h)).items, []);
+    // 造一次失败的运行（运行表本期只读：直接写 store，P4 才有写路由）
+    const file = join(h.dir, "projects.json");
+    const store = JSON.parse(readFileSync(file, "utf8"));
+    store.e2eRuns = { "run-1": { runId: "run-1", projectId, requirementId: r.reqId, designVersion: 1, status: "failed", startedAt: Date.now(), results: [{ status: "failed" }] } };
+    writeFileSync(file, JSON.stringify(store), "utf8");
+    const mismatch = (await group(h)).items;
+    assert.equal(mismatch.length, 1);
+    assert.equal(mismatch[0].attention, "e2e-mismatch");
+    assert.equal(mismatch[0].stage, "mismatch");
+    store.requirements[r.reqId].reworkCount = 3;
+    writeFileSync(file, JSON.stringify(store), "utf8");
+    assert.equal((await group(h)).items[0].attention, "rework-limit");
   });
 });
