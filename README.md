@@ -545,7 +545,13 @@ Enter 发送、Shift+Enter 换行、输入法组合中不发，「在对话中�
   - 已有归属的流程图 / 原型帧重画时遇到歧义，沿用原归属，不被甩回「未归类」。流程图的归属写在它的分组框上，按分组框算一张。
   - 提案视图带出 `requirementId`；确认后建出的任务继承它。
   - 文件节点识别：`univer_(new|execute|import|unit|worktree)` 记为「改过」（官方 `dsh-univer-office` 插件的写类工具），`univer_inspect` 等仍是「读过」。
-- **未做**（后续期次）：确认设计版本（P2）、界面（P3）、E2E（P4–P6）。
+- **P2（同日）：确认设计版本。** `POST /projects/:id/requirements/:reqId/confirm-design`（带 `expectedRevision`，**只有人能确认**：
+  同源 token，agent 没有对应工具）把该需求名下的原型帧 + 流程图的**内容**（标题 / 宽度 / Puck 数据 / 节点与连线文字，不含坐标和时间）固化成新版本，
+  版本号 +1、写 `designConfirmedAt`。此后：该需求的原型帧再被改动（`updatedAt` 晚于确认时刻）→ 阶段回到「设计」，要确认新版本；
+  之后建出的任务带 `designVersion`（E2E 将来对着这个版本验）。没有原型帧不能确认；确认后没改动不必重确认（都是 `40000`）。
+  `GET .../requirements/:reqId/design/:v` 读某个版本的快照（对比用）；只保留最近 5 个版本的快照内容，更早的只留元数据（时间 / 哈希 / 计数）。
+  需求视图多一个 `designVersions` 摘要。
+- **未做**（后续期次）：界面（P3）、E2E（P4–P6）。
 - 测试：`test/requirements.test.mjs`（33 例：六个阶段、「设计优先」、旧版本运行不充数、「可接受」算通过、未归类并入）+
   `test/requirements-http.test.mjs`（真 HTTP：建 / 列 / 取 / 改、CAS、越权、重启持久化）；
   五种变异（拿掉设计优先级 / 旧版本充数 / 可接受不算通过 / 不并入未归类 / 不判返工上限）都会让测试变红。

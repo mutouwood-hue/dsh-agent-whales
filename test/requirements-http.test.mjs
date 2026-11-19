@@ -178,3 +178,101 @@ test("需求路由：建 / 列 / 取 / 改 + CAS + 越权 + 未归类并入 + �
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("确认设计版本：只有人能确认；固化快照、版本递增；确认后改原型回到设计；任务继承版本号；重启还在", async () => {
+  const dir = freshStore();
+  const closers = [];
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    const first = await boot();
+    closers.push(first.close);
+    const token = (await first.call("GET", "/activity")).body.controlToken;
+    const projectId = (await first.call("POST", "/projects", { name: "设计项目", mainSessionId: "session-a" }, token)).body.data.project.projectId;
+    const base = `/projects/${projectId}/requirements`;
+    const r = (await first.call("POST", base, { title: "表单导入" }, token)).body.data.requirement;
+    const confirm = (reqId, body, tk) => first.call("POST", `${base}/${reqId}/confirm-design`, body, tk === undefined ? token : tk);
+    const putProto = async (id, text) => {
+      const canvas = await first.call("GET", `/canvas?projectId=${projectId}`);
+      const res = await first.call("POST", "/canvas/elements", {
+        projectId, expectedRevision: canvas.body.data.rev,
+        upsert: [{ id, kind: "prototype", data: { requirementId: r.reqId, title: "导入页", width: "desktop", puck: { content: [{ type: "Heading", props: { text } }] } } }]
+      }, token);
+      assert.equal(res.body.code, 200, JSON.stringify(res.body));
+    };
+
+    // 没有原型帧：没东西可确认
+    const none = await confirm(r.reqId, { expectedRevision: 1 });
+    assert.equal(none.body.code, 40000);
+    assert.match(none.body.msg, /没有原型帧/);
+
+    await putProto("proto:main", "第一版");
+    // 越权 / 参数
+    assert.equal((await confirm(r.reqId, { expectedRevision: 1 }, null)).body.code, 40301, "没有 token 不能确认");
+    assert.equal((await confirm(r.reqId, {})).status, 400, "必须带 expectedRevision");
+    assert.equal((await confirm("unassigned", { expectedRevision: 1 })).body.code, 40000, "未归类没有设计可确认");
+    assert.equal((await confirm("req-不存在", { expectedRevision: 1 })).body.code, 40401);
+    assert.equal((await first.call("GET", `${base}/${r.reqId}/confirm-design`)).status, 405);
+
+    // 确认 v1
+    const v1 = await confirm(r.reqId, { expectedRevision: 1, note: "产品看过了" });
+    assert.equal(v1.body.code, 200, JSON.stringify(v1.body));
+    const view1 = v1.body.data.requirement;
+    assert.equal(view1.designVersion, 1);
+    assert.equal(view1.revision, 2);
+    assert.equal(view1.stage, "develop", "确认后设计阶段结束、还没任务 → 开发");
+    assert.equal(view1.attention, null);
+    assert.equal(view1.designVersions.length, 1);
+    assert.deepEqual(view1.designVersions[0], { v: 1, at: view1.designVersions[0].at, by: "user", hash: view1.designVersions[0].hash, prototypeCount: 1, flowCount: 0, note: "产品看过了", hasSnapshot: true });
+
+    // 过期 revision 不覆盖；没有改动不必重确认
+    const stale = await confirm(r.reqId, { expectedRevision: 1 });
+    assert.equal(stale.body.code, 40902);
+    assert.equal(stale.body.data.latestRevision, 2);
+    const noChange = await confirm(r.reqId, { expectedRevision: 2 });
+    assert.equal(noChange.body.code, 40000);
+    assert.match(noChange.body.msg, /v1 以来原型没有改动/);
+
+    // 确认后建的任务带版本号；确认前（没有版本）建的不带
+    const t1 = await first.call("POST", "/tasks", { projectId, subject: "T1 导入接口", requirementId: r.reqId }, token);
+    assert.equal(t1.body.data.task.designVersion, 1);
+
+    // 确认后原型被改 → 回到设计，要求确认新版本
+    await sleep(15);
+    await putProto("proto:main", "第二版");
+    const dirty = (await first.call("GET", `${base}/${r.reqId}`)).body.data.requirement;
+    assert.equal(dirty.stage, "design");
+    assert.equal(dirty.attention, "confirm-design");
+    assert.match(dirty.next, /v1/);
+    const v2 = await confirm(r.reqId, { expectedRevision: 2 });
+    assert.equal(v2.body.code, 200, JSON.stringify(v2.body));
+    assert.equal(v2.body.data.requirement.designVersion, 2);
+    assert.equal(v2.body.data.requirement.stage, "develop");
+    const t2 = await first.call("POST", "/tasks", { projectId, subject: "T2 导入弹窗", requirementId: r.reqId }, token);
+    assert.equal(t2.body.data.task.designVersion, 2);
+    assert.equal((await first.call("GET", `/tasks?projectId=${projectId}`)).body.data.tasks.find((t) => t.taskId === t1.body.data.task.taskId).designVersion, 1, "旧任务仍记着它是按 v1 建的");
+
+    // 读版本快照：v1 是第一版内容，v2 是第二版；不存在的版本 40401
+    const snap1 = await first.call("GET", `${base}/${r.reqId}/design/1`);
+    assert.equal(snap1.body.code, 200, JSON.stringify(snap1.body));
+    assert.equal(snap1.body.data.snapshot.prototypes["proto:main"].puck.content[0].props.text, "第一版");
+    assert.equal(snap1.body.data.version.v, 1);
+    const snap2 = await first.call("GET", `${base}/${r.reqId}/design/2`);
+    assert.equal(snap2.body.data.snapshot.prototypes["proto:main"].puck.content[0].props.text, "第二版");
+    assert.notEqual(snap1.body.data.version.hash, snap2.body.data.version.hash, "内容不同哈希不同");
+    assert.equal((await first.call("GET", `${base}/${r.reqId}/design/9`)).body.code, 40401);
+    assert.equal((await first.call("GET", `${base}/${r.reqId}/design/abc`)).body.code, 40401);
+    assert.equal((await first.call("POST", `${base}/${r.reqId}/design/1`, {}, token)).status, 405);
+
+    // 重启后：版本、快照、任务版本号都还在
+    const second = await boot();
+    closers.push(second.close);
+    const after = (await second.call("GET", `${base}/${r.reqId}`)).body.data.requirement;
+    assert.equal(after.designVersion, 2);
+    assert.equal(after.designVersions.length, 2);
+    assert.equal(after.stage, "develop");
+    assert.equal((await second.call("GET", `${base}/${r.reqId}/design/1`)).body.data.snapshot.prototypes["proto:main"].puck.content[0].props.text, "第一版");
+  } finally {
+    for (const close of closers) { try { await close(); } catch (error) { /* 已关 */ } }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

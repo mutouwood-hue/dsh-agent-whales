@@ -332,3 +332,98 @@ test("requirementView：updatedAt 取记录、任务、原型帧里最新的一�
   const view = requirementView(record, { prototypes: [proto("p", T2)], flows: [], tasks: [task("t", { updatedAt: T1 })], runs: [] });
   assert.equal(view.updatedAt, T2);
 });
+
+// ── P2：确认设计版本 ───────────────────────────────────────────────────────────
+
+import {
+  designSnapshotHash, prototypesOfRequirement, buildDesignSnapshot, dirtyPrototypeIds,
+  checkDesignConfirmable, applyDesignConfirmation, designVersionSummary, DESIGN_KEEP_SNAPSHOTS
+} from "../lib/requirements.js";
+
+const protoEl = (id, reqId, extra) => Object.assign({ id, kind: "prototype", x: 10, y: 20, updatedAt: new Date(T0).toISOString(), data: { requirementId: reqId, title: "导入页", width: "desktop", puck: { content: [{ type: "Heading", props: { text: id } }] } } }, extra || {});
+const flowGroup = (flowId, reqId) => ({ id: "flow:" + flowId, kind: "group", data: { kind: "flow", flowId, title: "导入流程", requirementId: reqId } });
+const flowNode = (flowId, key, text, shape) => ({ id: "flow:" + flowId + ":" + key, kind: "flow", parentId: "flow:" + flowId, x: 1, y: 2, data: { flowId, key, shape: shape || "step", text } });
+const flowEdge = (flowId, from, to, label) => ({ id: "flow:" + flowId + ":e:" + from + ">" + to, kind: "edge", data: { flowId, fromKey: from, toKey: to, label: label || "" } });
+
+test("buildDesignSnapshot：只取本需求的原型帧与流程图内容，不带坐标 / 时间；节点连线排序稳定", () => {
+  const elements = [
+    protoEl("proto:a", "r1"), protoEl("proto:other", "r2"), protoEl("proto:orphan", ""),
+    flowGroup("main", "r1"), flowNode("main", "b", "第二步"), flowNode("main", "a", "第一步", "start"), flowEdge("main", "a", "b", "是"),
+    flowGroup("x", "r2"), flowNode("x", "z", "别人的"),
+    { id: "note1", kind: "note", data: {} }
+  ];
+  const snap = buildDesignSnapshot(elements, "r1");
+  assert.deepEqual(Object.keys(snap.prototypes), ["proto:a"]);
+  assert.deepEqual(Object.keys(snap.prototypes["proto:a"]).sort(), ["puck", "title", "width"], "不带 x / y / updatedAt / 来源");
+  assert.deepEqual(Object.keys(snap.flows), ["flow:main"]);
+  assert.deepEqual(snap.flows["flow:main"].nodes.map((n) => n.key), ["a", "b"], "节点按 key 排序，和画布上的创建顺序无关");
+  assert.deepEqual(snap.flows["flow:main"].edges, [{ from: "a", to: "b", label: "是" }]);
+  assert.deepEqual(buildDesignSnapshot(null, "r1"), { prototypes: {}, flows: {} });
+});
+
+test("designSnapshotHash：内容相同哈希相同（键序、位置无关），内容变了哈希就变", () => {
+  const a = buildDesignSnapshot([protoEl("proto:a", "r1")], "r1");
+  const moved = buildDesignSnapshot([protoEl("proto:a", "r1", { x: 999, y: 888, updatedAt: new Date(T2).toISOString() })], "r1");
+  assert.equal(designSnapshotHash(a), designSnapshotHash(moved), "挪个位置不算新设计");
+  assert.equal(designSnapshotHash({ b: 1, a: { d: 2, c: 3 } }), designSnapshotHash({ a: { c: 3, d: 2 }, b: 1 }), "键序无关");
+  const edited = protoEl("proto:a", "r1");
+  edited.data.puck = { content: [{ type: "Heading", props: { text: "改了" } }] };
+  assert.notEqual(designSnapshotHash(a), designSnapshotHash(buildDesignSnapshot([edited], "r1")));
+  assert.match(designSnapshotHash(a), /^[0-9a-f]{16}$/);
+});
+
+test("checkDesignConfirmable：没有原型不能确认；首次可确认；确认后没改动不必重确认；改动后可再确认", () => {
+  const protos = [{ id: "p", updatedAt: T0 }];
+  assert.match(checkDesignConfirmable(req(), []), /没有原型帧/);
+  assert.equal(checkDesignConfirmable(req(), protos), undefined);
+  const confirmed = req({ designVersion: 1, designConfirmedAt: T1 });
+  assert.match(checkDesignConfirmable(confirmed, protos), /v1 以来原型没有改动/);
+  assert.equal(checkDesignConfirmable(confirmed, [{ id: "p", updatedAt: T2 }]), undefined);
+  assert.deepEqual(dirtyPrototypeIds(confirmed, [{ id: "old", updatedAt: T0 }, { id: "new", updatedAt: T2 }]), ["new"]);
+  assert.deepEqual(dirtyPrototypeIds(req(), [{ id: "p", updatedAt: T0 }]), ["p"], "从没确认过：全部算待确认");
+  assert.deepEqual(dirtyPrototypeIds(req(), [null]), [undefined], "坏数据不炸");
+});
+
+test("applyDesignConfirmation：版本 +1、revision +1、写快照与元数据；不改入参；备注截断", () => {
+  const before = req();
+  const snap = buildDesignSnapshot([protoEl("proto:a", "r1")], "r1");
+  const frozen = JSON.stringify(before);
+  const after = applyDesignConfirmation(before, snap, { now: T1, note: "  " + "备".repeat(300) });
+  assert.equal(JSON.stringify(before), frozen, "纯函数：入参不变");
+  assert.equal(after.designVersion, 1);
+  assert.equal(after.designConfirmedAt, T1);
+  assert.equal(after.revision, before.revision + 1);
+  assert.equal(after.designVersions.length, 1);
+  assert.equal(after.designVersions[0].by, "user");
+  assert.equal(after.designVersions[0].prototypeCount, 1);
+  assert.equal(after.designVersions[0].note.length, 200);
+  assert.deepEqual(after.designVersions[0].snapshot, snap);
+  const second = applyDesignConfirmation(after, snap, { now: T2, by: "alice" });
+  assert.equal(second.designVersion, 2);
+  assert.equal(second.designVersions[1].by, "alice");
+});
+
+test("applyDesignConfirmation：只保留最近几个版本的快照内容，更早的只留元数据", () => {
+  let record = req();
+  const snap = buildDesignSnapshot([protoEl("proto:a", "r1")], "r1");
+  for (let i = 1; i <= DESIGN_KEEP_SNAPSHOTS + 2; i += 1) record = applyDesignConfirmation(record, snap, { now: T0 + i });
+  const summary = designVersionSummary(record);
+  assert.equal(summary.length, DESIGN_KEEP_SNAPSHOTS + 2);
+  assert.deepEqual(summary.filter((row) => !row.hasSnapshot).map((row) => row.v), [1, 2], "最早两个版本的快照被丢，元数据留着");
+  assert.equal(summary[summary.length - 1].hasSnapshot, true);
+  assert.equal("snapshot" in summary[0], false, "摘要不带快照内容");
+  assert.equal(record.designVersions[0].snapshot, null);
+  assert.ok(record.designVersions[0].hash, "哈希还在，能判断版本之间有没有区别");
+});
+
+test("确认设计与阶段联动：确认后设计阶段结束；确认后原型再被改动，阶段回到设计并提示确认新版本", () => {
+  const snap = buildDesignSnapshot([protoEl("proto:a", "r1")], "r1");
+  const confirmed = applyDesignConfirmation(req(), snap, { now: T1 });
+  const quiet = deriveStage({ requirement: confirmed, prototypes: [proto("proto:a", T0)], tasks: [task("t")], runs: [] });
+  assert.equal(quiet.stage, "develop");
+  const edited = deriveStage({ requirement: confirmed, prototypes: [proto("proto:a", T2)], tasks: [doneTask("t")], runs: [] });
+  assert.equal(edited.stage, "design");
+  assert.match(edited.next, /v1/);
+  const reconfirmed = applyDesignConfirmation(confirmed, snap, { now: T2 + 1000 });
+  assert.equal(deriveStage({ requirement: reconfirmed, prototypes: [proto("proto:a", T2)], tasks: [doneTask("t")], runs: [] }).stage, "accept", "重新确认后回到验收");
+});
