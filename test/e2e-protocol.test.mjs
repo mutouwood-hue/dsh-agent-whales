@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   E2E_LIMITS, isSafeShotName, shotMime, shotByteLimit, sanitizeShotName, uniqueShotName,
-  shotContentMatches, cleanRunInput, newRunRecord, cleanResultInput, applyResult, appendShots, finishRun, unfinishedCases, runSummary, normalizeRun, isRunOpen
+  shotContentMatches, cleanAnnotationInput, addAnnotation, removeAnnotation, acceptResult, recomputeFinishedStatus, planReflow, buildFeedbackText, markReflowed, E2E_ANNOTATION_LIMITS, cleanRunInput, newRunRecord, cleanResultInput, applyResult, appendShots, finishRun, unfinishedCases, runSummary, normalizeRun, isRunOpen
 } from "../lib/e2e.js";
 import { runOutcome } from "../lib/requirements.js";
 
@@ -176,4 +176,111 @@ test("shotContentMatches：文件头魔数必须和扩展名相符；改个扩�
   assert.equal(shotContentMatches("a.png", Buffer.from([0x89, 0x50])), false, "太短");
   assert.equal(shotContentMatches("a.exe", png), false);
   assert.equal(shotContentMatches("a.png", "not a buffer"), false);
+});
+// ── P5a：批注 / 可接受 / 回流 ─────────────────────────────────────────────────
+
+function finishedRun(statuses, extra) {
+  let run = mkRun(statuses.map((_, i) => ({ caseId: "c" + (i + 1), title: "用例" + (i + 1) })));
+  statuses.forEach((spec, i) => {
+    const [status, shots, diagnosis, note] = Array.isArray(spec) ? spec : [spec];
+    run = applyResult(run, "c" + (i + 1), { status, note: note || "", ...(diagnosis ? { diagnosis } : {}) }, { now: NOW, addShots: shots || [] }).run;
+  });
+  return Object.assign(finishRun(run, { now: NOW + 5 }).run, extra || {});
+}
+
+test("cleanAnnotationInput：只能批注失败 / 出错的用例；预期必填；截图必须是这条用例的；框要在 0..1 内且有面积", () => {
+  const run = finishedRun([["passed"], ["failed", ["s.png", "v.webm"]], ["error"]]);
+  const ok = cleanAnnotationInput({ caseId: "c2", shot: "s.png", rect: { x: 0.1, y: 0.2, w: 0.3, h: 0.4 }, expected: " 应显示建议 " }, run);
+  assert.deepEqual(ok.value, { caseId: "c2", expected: "应显示建议", shot: "s.png", rect: { x: 0.1, y: 0.2, w: 0.3, h: 0.4 } });
+  assert.equal(cleanAnnotationInput({ caseId: "c3", expected: "x" }, run).value.caseId, "c3", "出错的用例也能写文字批注（不带框）");
+  assert.match(cleanAnnotationInput({ caseId: "c1", expected: "x" }, run).error, /only a failed or errored/);
+  assert.match(cleanAnnotationInput({ caseId: "c9", expected: "x" }, run).error, /case not found/);
+  assert.match(cleanAnnotationInput({ caseId: "c2", expected: "  " }, run).error, /expected is required/);
+  assert.match(cleanAnnotationInput({ caseId: "c2", expected: "x".repeat(E2E_ANNOTATION_LIMITS.expected + 1) }, run).error, /exceeds/);
+  assert.match(cleanAnnotationInput({ caseId: "c2", expected: "x", shot: "other.png" }, run).error, /not attached/);
+  assert.match(cleanAnnotationInput({ caseId: "c2", expected: "x", shot: "v.webm" }, run).error, /video cannot be annotated/);
+  assert.match(cleanAnnotationInput({ caseId: "c2", expected: "x", rect: { x: 0, y: 0, w: 1, h: 1 } }, run).error, /needs the screenshot/);
+  for (const rect of [{ x: -0.1, y: 0, w: 0.5, h: 0.5 }, { x: 0, y: 0, w: 0, h: 0.5 }, { x: 0.6, y: 0, w: 0.5, h: 0.5 }, { x: 0, y: 0.9, w: 0.2, h: 0.2 }, { x: "a", y: 0, w: 1, h: 1 }, { x: NaN, y: 0, w: 1, h: 1 }, "box"]) {
+    assert.match(cleanAnnotationInput({ caseId: "c2", shot: "s.png", expected: "x", rect }, run).error, /rect/, JSON.stringify(rect));
+  }
+  assert.match(cleanAnnotationInput(null, run).error, /object/);
+});
+
+test("addAnnotation / removeAnnotation：追加、条数上限；已回流的不能删；不改入参", () => {
+  const run = finishedRun([["failed", ["s.png"]]]);
+  const frozen = JSON.stringify(run);
+  const added = addAnnotation(run, { caseId: "c1", expected: "x", shot: "s.png" }, { now: NOW + 10, annId: "a1" });
+  assert.equal(JSON.stringify(run), frozen);
+  assert.deepEqual([added.annotation.annId, added.annotation.by, added.annotation.handled, added.annotation.at], ["a1", "user", false, NOW + 10]);
+  assert.equal(removeAnnotation(added.run, "a1").run.annotations.length, 0);
+  assert.match(removeAnnotation(added.run, "nope").error, /not found/);
+  const handled = Object.assign({}, added.run, { annotations: [Object.assign({}, added.annotation, { handled: true })] });
+  assert.match(removeAnnotation(handled, "a1").error, /already sent back/);
+  const full = Object.assign({}, run, { annotations: Array.from({ length: E2E_ANNOTATION_LIMITS.perRun }, (_, i) => ({ annId: "a" + i })) });
+  assert.match(addAnnotation(full, { caseId: "c1", expected: "x" }, { now: NOW, annId: "z" }).error, /too many/);
+});
+
+test("acceptResult：只能人在运行结束后把失败 / 出错标成可接受；全部可接受后整轮折算为通过", () => {
+  const run = finishedRun([["passed"], ["failed"], ["error"]]);
+  assert.equal(run.status, "error");
+  const one = acceptResult(run, "c2", { now: NOW + 9 }).run;
+  assert.equal(one.results[1].status, "accepted");
+  assert.equal(one.results[1].acceptedBy, "user");
+  assert.equal(one.status, "error", "还有出错的，整轮不通过");
+  const all = acceptResult(one, "c3", { now: NOW + 10 }).run;
+  assert.equal(all.status, "passed", "全部通过 / 可接受 → 整轮通过");
+  assert.equal(runOutcome(all), "passed");
+  const onlyFailed = acceptResult(finishedRun([["passed"], ["failed"]]), "c2", { now: NOW }).run;
+  assert.equal(onlyFailed.status, "passed");
+  assert.match(acceptResult(run, "c1", { now: NOW }).error, /only a failed or errored/);
+  assert.match(acceptResult(run, "c9", { now: NOW }).error, /case not found/);
+  assert.match(acceptResult(mkRun(), "c1", { now: NOW }).error, /finish the run/);
+  assert.equal(recomputeFinishedStatus(mkRun()).status, "queued", "运行中的不动");
+});
+
+test("planReflow：按诊断分流（缺省 code）；环境问题不回流；显式 targets 覆盖；已回流的不再回；坏输入拒绝", () => {
+  const run = finishedRun([
+    ["failed", [], { kind: "design", reason: "d" }], ["failed", [], { kind: "requirement", reason: "r" }], ["failed", [], { kind: "env", reason: "e" }], ["failed"], ["passed"]
+  ]);
+  assert.deepEqual(planReflow(run).items, [{ caseId: "c1", to: "design" }, { caseId: "c2", to: "requirement" }, { caseId: "c4", to: "code" }], "env 不回流、通过的不回流、没诊断按 code");
+  assert.deepEqual(planReflow(run, [{ caseId: "c3", to: "code" }, { caseId: "c1", to: "code" }]).items.map((i) => [i.caseId, i.to]), [["c1", "code"], ["c2", "requirement"], ["c3", "code"], ["c4", "code"]], "显式 targets 覆盖诊断，env 也能被人改落点");
+  assert.match(planReflow(run, [{ caseId: "c5", to: "code" }]).error, /not a failed case/);
+  assert.match(planReflow(run, [{ caseId: "c1", to: "moon" }]).error, /each target needs/);
+  assert.match(planReflow(run, "x").error, /array/);
+  assert.match(planReflow(mkRun()).error, /finish the run/);
+  assert.match(planReflow(finishedRun([["passed"]])).error, /no failed case/);
+  assert.match(planReflow(finishedRun([["failed", [], { kind: "env", reason: "e" }]])).error, /environment problems/);
+  const sent = markReflowed(run, [{ caseId: "c1", to: "design" }], { now: NOW + 20, taskIds: [] });
+  assert.equal(planReflow(sent).items.some((i) => i.caseId === "c1"), false, "已回流的不再出现");
+});
+
+test("buildFeedbackText：带需求名 / 设计版本 / 运行 / 实际与预期 / 框位置 / 证据文件；只写事实", () => {
+  let run = finishedRun([["failed", ["step3.png"], { kind: "code", reason: "映射建议没出现" }, "找不到建议下拉"]]);
+  run = addAnnotation(run, { caseId: "c1", shot: "step3.png", rect: { x: 0.1, y: 0.25, w: 0.5, h: 0.1 }, expected: "显示建议下拉" }, { now: NOW, annId: "a1" }).run;
+  run = addAnnotation(run, { caseId: "c1", expected: "按钮和开关同一行" }, { now: NOW, annId: "a2" }).run;
+  const text = buildFeedbackText(run, [{ caseId: "c1", to: "code" }], { title: "表单导入" });
+  assert.match(text, /需求「表单导入」/);
+  assert.match(text, /设计版本 v1/);
+  assert.match(text, /运行 run-1/);
+  assert.match(text, /用例「用例1」：不符；实际：找不到建议下拉/);
+  assert.match(text, /初判（AI，code）：映射建议没出现/);
+  assert.match(text, /1\. 预期：显示建议下拉（step3\.png 上 x10% y25% 宽50% 高10%）/);
+  assert.match(text, /2\. 预期：按钮和开关同一行/);
+  assert.match(text, /证据文件：step3\.png/);
+  assert.doesNotMatch(text, /请你|必须|立刻/, "不带指令式措辞");
+  assert.match(buildFeedbackText(Object.assign({}, run, { designVersion: 0 }), [{ caseId: "c1", to: "code" }], null), /设计版本 （未确认）/);
+});
+
+test("markReflowed：标记用例与批注已回流、记一条回流记录；不改入参；normalizeRun 保留回流记录", () => {
+  let run = finishedRun([["failed"], ["failed"]]);
+  run = addAnnotation(run, { caseId: "c1", expected: "x" }, { now: NOW, annId: "a1" }).run;
+  const frozen = JSON.stringify(run);
+  const out = markReflowed(run, [{ caseId: "c1", to: "code" }], { now: NOW + 30, taskIds: ["t1"] });
+  assert.equal(JSON.stringify(run), frozen);
+  assert.deepEqual([out.results[0].reflowed, out.results[0].reflowedTo, out.results[1].reflowed], [true, "code", undefined]);
+  assert.equal(out.annotations[0].handled, true);
+  assert.deepEqual(out.reflows, [{ at: NOW + 30, items: [{ caseId: "c1", to: "code" }], taskIds: ["t1"] }]);
+  assert.deepEqual(normalizeRun(out).reflows, out.reflows);
+  assert.equal(runSummary(out).reflowed, 1);
+  assert.equal(runSummary(acceptResult(finishedRun([["failed"]]), "c1", { now: NOW }).run).accepted, 1);
 });
