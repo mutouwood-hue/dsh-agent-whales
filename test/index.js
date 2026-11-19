@@ -38,3 +38,12 @@ import "./proto-chunk.test.mjs";
 // 真 HTTP E2E：宿主半边跑在真 http server 上，真 socket 走完整闭环 + 重启持久化。
 // 既有用例都是「假 fetch + 直接调 handler」，从没验过真实 TCP 上的一次请求/响应。
 import "./e2e-http.test.mjs";
+// 第二期 X1–X3：自动派任务的策略层（档位 / 闸门 / 审计的纯函数）。
+import "./auto-dispatch.test.mjs";
+// 第二期 X3：「执行」页自动派发面板（档位 / 放宽确认 / 速率 / 撤销窗口）。
+import "./auto-panel.test.mjs";
+import "./office.test.mjs";
+// show_view 卡片 + 侧聊（2026-11-18）：宿主逻辑 / 视图 chunk（真 React）/ 真 HTTP 端到端。
+import "./view-host.test.mjs";
+import "./view-chunk.test.mjs";
+import "./view-e2e.test.mjs";

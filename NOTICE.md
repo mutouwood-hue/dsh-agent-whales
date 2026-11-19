@@ -28,9 +28,33 @@
 再分发或二次修改时请保留以上署名，并说明图片为 AI 生成。
 上游声明「不设定标准人设、欢迎变体」，因此素材与母图存在风格差异属预期。
 
+## 办公室角色（鲸鱼娘坐姿帧）
+
+- 角色：与上面「角色素材」同一个鲸鱼娘形象（参考 C12 站立正面图），办公室里的坐姿、打字、举手、睡觉等 9 组动作
+- 来源：**由 Notion AI 图像工具生成**（模型名称未提供），需求与逐帧要求见 Notion「dsh-agent-whales 第二期 PRD」第二节
+- 这些图片均为 **AI 生成**；再分发或二次修改时请保留这一说明
+- 加工：`tools/build-office.py` 抠白底、去白边、按同一个裁切框缩放，并把成对的循环帧拼成横条（`assets/office/o-sit-*.webp`）；**没有改动形象本身**
+- 成员之间的区分由页面用色相旋转完成，不是另外出图
+- 源图（1024×1024 PNG，每张约 1MB）不进仓库，保存在 Notion 该页
+- 此前的 MetroCity（jik-a-4，CC0）原型素材已被替换，不再随包分发
+
 ## 图标
 
 `icon.svg` 为本插件自绘，随插件一同分发。
+
+## show_view 视图卡片（拷自 deep-view / DS Bot）
+
+- 来源：**deep-view 0.1.2**（<https://github.com/Fei2411/deep-view>，Apache License 2.0），其视图组件与共享核心又移植自 **DS Bot**（<https://github.com/Fei2411/DS-Bot>，同为 Apache-2.0）
+- 拷入范围：
+  - `lib/view/`（视图校验、公式引擎、回答协议、工具 schema）——**宿主与浏览器两半共用同一份**
+  - `tools/flow-chunk/view/react/`（图表、表格、输入、选项 / 确认 / 表单、沙箱 HTML 的渲染层），构建后进入 `lib/client.view.js`
+- 拷入日期：2026-11-18。**此后在本仓库内独立迭代**，与上游不再同步；每个被拷文件头部保留了出处与「已拷入、之后在此维护」的说明
+- 本仓库做过的改动（相对上游）：
+  - `tools/flow-chunk/view/react/ui.js`：`useSyncExternalStore` 补第三个参数（服务端快照），否则 `react-dom/server` 渲染选项卡会抛错
+  - 宿主侧（`lib/view-host.js`）是**重写**的，不是拷贝：卡片落盘 / 作答 / 作废、工具参数展开成完整 JSON Schema、判根改用 `subagents.rootOf`（上游的 `agents.roots()` 是旧宿主 API，在本宿主上不存在）
+  - 视图节点的外壳与样式（`tools/flow-chunk/view/entry.jsx`）是本仓库自写，跟随画布主题
+- 许可证全文随包分发：`lib/view/LICENSE-deep-view`（Apache-2.0；再分发需保留该许可证与本节署名）
+- 侧聊（`lib/view-host.js` 的 `createSideService` 与 `SideNode`）的**思路**参考 DS Bot 的 `/side`（对话快照 + 不调工具 + 不写回原对话），代码为自写，未拷贝其实现
 
 ## 经典皮肤（像素小人）
 

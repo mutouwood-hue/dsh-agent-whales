@@ -965,7 +965,7 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
     effect: (run) => { run(); return () => {}; }
   });
 
-  assert.deepEqual(Object.keys(registered).sort(), ["whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_canvas_layout", "whales_canvas_link", "whales_canvas_list", "whales_canvas_unlink", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send", "whales_visit_trace"]);
+  assert.deepEqual(Object.keys(registered).sort(), ["show_view", "whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_canvas_layout", "whales_canvas_link", "whales_canvas_list", "whales_canvas_unlink", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send", "whales_visit_trace"]);
   assert.equal(typeof registered.whales_visit_send.output.render, "function", "工具必须带 output.render");
   // 网关按 OpenAI function calling 校验：parameters 必须是 { type: "object", properties } 的 JSON Schema。
   // 传「属性表」或空对象会让整轮请求 400（真实事故：whales_visit_list 变成 type: null）。
@@ -1213,8 +1213,10 @@ test("工具动画：frameOf 缺帧返回 undefined 而不是回退 base（回�
   const { frameOf, ART } = await testApiWithArt(["q", "mature", "classic"]);
   const art = ART();
 
-  // 真实 manifest 里还没有这三张图 → 必须是 undefined，不是 "q-smile"
-  for (const key of ["q-read", "q-type", "q-run"]) assert.equal(art[key], undefined, key + " 素材尚未入库（本测试的前提）");
+  // 本文件用的是写死的假素材表（见上面的 ART_KEYS），里面故意不含这三张——为的是单独验证「缺帧返回 undefined」这条契约。
+  // 真实素材库里这三张已于 2026-11-18 入库，真实库的行为由 client-robustness.test.mjs 里
+  // 「入库后的工具帧」那条用例负责（它读 assets/art.json，不是假表）。
+  for (const key of ["q-read", "q-type", "q-run"]) assert.equal(art[key], undefined, key + " 不在本文件的假素材表里（本测试的前提）");
   assert.equal(frameOf("q", false, "read"), undefined);
   assert.equal(frameOf("q", false, "type"), undefined);
   assert.equal(frameOf("q", false, "run"), undefined);
@@ -1779,13 +1781,10 @@ test("素材加载：重试耗尽后，activity 通了（宿主路由已就绪�
   assert.equal(artLoader.notifyHostAlive(), false, "hostAlive 信号只消费一次");
 });
 
-test("体积：client.js 不再内联 base64 素材，且控制在 420KB 以内", () => {
-  // 上限 200KB → 420KB（M6 工作台）→ 560KB（M6 画布波次，2026-11-14）：dsh.client 只认一个 ./client
-  // 导出，装饰层与十屏工作台共用同一个单文件 bundle；素材依旧出包、不内联。
+test("体积：client.js 不再内联 base64 素材（体积不设上限）", () => {
+  // 体积上限已取消（需求负责人，2026-11-18）。素材依旧出包、不内联，所以只守这一条。
   const source = readFileSync(join(pluginDir, "lib", "client.js"), "utf8");
   assert.equal(source.includes("data:image/webp;base64"), false, "bundle 里不得再出现内联 WebP");
-  const bytes = Buffer.byteLength(source, "utf8");
-  assert.ok(bytes < 560 * 1024, "client.js 必须 ≤560KB，实际 " + Math.round(bytes / 1024) + "KB");
   assert.ok(source.includes("var ART = {};"), "ART 必须保留空表占位，等运行时填充");
 });
 

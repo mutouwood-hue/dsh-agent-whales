@@ -678,6 +678,39 @@ test("宿主工具：output.render 只产出 text block，且不吐 undefined", 
   }
 });
 
+// 真机 2026-11-18：flow / brief / propose 直接把 render(value) → string 交给宿主，
+// 宿主调 render(args, value) 拿到字符串当 content，post-execute 链上 content.some 炸掉。
+test("宿主工具：所有注册的工具 render(args, value) 都返回 text block 数组，且模型能看到结构化结果", () => {
+  const registered = captureTools();
+  const samples = {
+    whales_flow_read: { projectId: null, flows: [], messages: [{ ref: "m108", role: "user", text: "绘制一个页面原型" }] },
+    whales_flow_draw: { drawn: false, reason: "暂不足以生成流程图", dropped: [{ key: "a", reason: "no evidence" }] },
+    whales_prototype_draw: { drawn: true, title: "表单导入弹窗", components: 3, projectNote: "已为本对话建项目" },
+    whales_brief_read: { brief: { version: 2, goal: "导入导出" } },
+    whales_brief_write: { brief: { version: 3 } },
+    whales_propose_tasks: { proposalId: "prop-1", version: 1, count: 2 }
+  };
+  for (const [name, value] of Object.entries(samples)) {
+    const tool = registered[name];
+    if (tool === undefined) continue; // 按设置可能没注册；注册了就必须守契约
+    const args = { limit: 30, title: "不该被当成 value" };
+    const blocks = tool.output.render(args, value);
+    assert.ok(Array.isArray(blocks) && blocks.length > 0, name + " 必须返回 content block 数组");
+    assert.equal(blocks[0].type, "text", name);
+    assert.ok(blocks[0].text.indexOf(JSON.stringify(value)) >= 0, name + " 的结构化结果要进模型可见的 content：" + blocks[0].text);
+    assertLossless(blocks, name + ".output.render");
+  }
+  const flowRead = registered.whales_flow_read;
+  assert.ok(flowRead, "whales_flow_read 必须注册");
+  assert.ok(flowRead.output.render({}, samples.whales_flow_read)[0].text.indexOf("m108") >= 0, "消息编号必须让模型看得到");
+  // 兜底：任何工具的 render 都不能返回字符串
+  for (const [name, tool] of Object.entries(registered)) {
+    let blocks;
+    try { blocks = tool.output.render({}, {}); } catch (error) { continue; } // 空 value 不合形状可以抛，但不能回字符串
+    assert.ok(Array.isArray(blocks), name + " 的 render 返回了 " + typeof blocks);
+  }
+});
+
 test("宿主工具：whales_visit_send 真的等到回话时，reply.text 是字符串且 lossless", async () => {
   let reads = 0;
   const baseline = [
@@ -1469,6 +1502,54 @@ test("素材路由：OPTIONS 204，非 GET/HEAD/OPTIONS 405 + allow", () => {
   }
 });
 
+// X4 办公室素材：/agent-whales/api/office/，与 /art/ 分开，只放行 o-sit-<姿势>（鲸鱼娘坐姿横条，AI 生成）
+const OFFICE_BASE = "/agent-whales/api/office/";
+
+test("办公室素材：清单键与 assets/office/manifest.json 一致，每张 200 + image/webp + 字节数对得上", () => {
+  const route = mountRoute();
+  const fileManifest = JSON.parse(readFileSync(new URL("../assets/office/manifest.json", import.meta.url), "utf8"));
+  const manifest = callRoute(route, { method: "GET", url: OFFICE_BASE + "manifest" });
+  assert.equal(manifest.status, 200);
+  const body = JSON.parse(manifest.body);
+  assert.deepEqual(Object.keys(body.keys).sort(), Object.keys(fileManifest.keys).sort());
+  assert.equal(Object.keys(body.keys).length, 16, "9 个坐姿 + 1 条侧面行走 + 椅子 / 桌子两层 + 盆栽 / 书架 + 地砖 / 墙");
+  assert.equal("layout" in body, false, "layout 只是构建记录，宿主清单协议里没有它，不能漏给浏览器");
+  for (const [key, entry] of Object.entries(body.keys)) {
+    assert.match(key, /^o-(sit-(idle|type|wait|sleep|read|run|think|done|oops)|station-(back|front)|walk-side|plant|shelf|floor|wall)$/);
+    const result = callRoute(route, { method: "GET", url: OFFICE_BASE + key + ".webp" });
+    assert.equal(result.status, 200, key);
+    assert.equal(result.headers["content-type"], "image/webp", key);
+    assert.equal(result.body.length, entry.bytes, key + " 字节数必须等于清单");
+    assert.equal(result.body.subarray(8, 12).toString("latin1"), "WEBP", key);
+  }
+});
+
+test("办公室素材：非 o- 前缀的 key、路径穿越、形状不对一律 404；/art/ 的 q- 键不能从办公室路径取", () => {
+  const route = mountRoute();
+  for (const tail of ["q-smile.webp", "nope.webp", "o-sit-idle", "o-sit-idle.webp/extra", "..%2Fsecret.webp", "%2e%2e%2fmanifest.json", "..%5Csecret.webp", ""]) {
+    const result = callRoute(route, { method: "GET", url: OFFICE_BASE + tail });
+    assert.equal(result.status, 404, tail + " 必须 404，实际 " + result.status);
+  }
+  const artKeyStillThere = callRoute(route, { method: "GET", url: "/agent-whales/api/art/q-smile.webp" });
+  assert.equal(artKeyStillThere.status, 200, "既有 /art/ 路由不得被办公室路由影响");
+});
+
+test("办公室素材：client.js 请求的前缀必须等于宿主路由前缀（两边各写一遍的 URL 曾经对不上）", () => {
+  const client = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  assert.equal(host.OFFICE_PROFILE.prefix, OFFICE_BASE);
+  assert.ok(client.includes('WB_OFFICE_URL = "' + host.OFFICE_PROFILE.prefix + '"'), "client.js 的 WB_OFFICE_URL 必须等于 OFFICE_PROFILE.prefix");
+});
+
+test("办公室素材：HEAD 同头无体，POST 405", () => {
+  const route = mountRoute();
+  const get = callRoute(route, { method: "GET", url: OFFICE_BASE + "o-sit-idle.webp" });
+  const head = callRoute(route, { method: "HEAD", url: OFFICE_BASE + "o-sit-idle.webp" });
+  assert.equal(head.status, 200);
+  assert.equal(head.body, undefined);
+  assert.equal(head.headers["etag"], get.headers["etag"]);
+  assert.equal(callRoute(route, { method: "POST", url: OFFICE_BASE + "o-sit-idle.webp" }).status, 405);
+});
+
 test("素材路由：素材目录不存在（asar/缺文件）时 manifest 仍 200 空表、图片 404、不抛", () => {
   const missingRoot = new URL("../assets/__definitely_missing__/", import.meta.url);
   let store;
@@ -1695,7 +1776,7 @@ test("宿主 apply：服务重载（作用域释放 + 重新注入）不重复�
   host.apply(injectHost.ctx);
   flushInjected(injectHost);
   const toolCount = Object.keys(injectHost.state.tools).length;
-  assert.equal(toolCount, 16, "5 个串门工具 + 提案工具 + 2 个简报工具 + 2 个流程图工具 + 原型工具 + 5 个画布工具");
+  assert.equal(toolCount, 17, "5 个串门工具 + 提案工具 + 2 个简报工具 + 2 个流程图工具 + 原型工具 + 5 个画布工具 + show_view");
   assert.equal(injectHost.state.routes.length, 1);
 
   disposeInjected(injectHost);
@@ -3443,6 +3524,32 @@ describe("画布优先 GET /agent-whales/api/sessions/:id/messages", () => {
     const list = await h.call("GET", "/agent-whales/api/sessions");
     assert.equal(list.body.data.source, "host");
   });
+
+  // 真机反馈 2026-11-18：主对话用 ask_user_question 提问，画布 Composer 上看不到问题
+  test("还没答的 ask_user_question 随回复一起下发；答完 / 迟到回复后消失；超时 pending 仍算没答", async () => {
+    const h = await m6Harness();
+    const ask = (seq, callId, questions) => ({ type: "tool/call", seq, data: { name: "ask_user_question", callId, arguments: JSON.stringify({ questions }) } });
+    const result = (seq, callId, text) => ({ type: "tool/result", seq, data: { message: { toolCallId: callId, content: [{ type: "text", text }] } } });
+    const questions = [{ id: "page", header: "确认", question: "画哪个页面？", options: [{ label: "表单导入弹窗", description: "推荐" }, { label: "列表页" }, { label: "" }], multi_select: true }, { id: "bad" }];
+    h.sessionLogs.set("session-b", [userEvent(1, "绘制一个页面原型"), assistantEvent(2, "需要你确认一下"), ask(3, "call-1", questions)]);
+    const open = await h.call("GET", "/agent-whales/api/sessions/session-b/messages");
+    assert.equal(open.body.code, 200, JSON.stringify(open.body));
+    assert.deepEqual(open.body.data.question, {
+      callId: "call-1",
+      questions: [{ id: "page", header: "确认", question: "画哪个页面？", options: [{ label: "表单导入弹窗", description: "推荐" }, { label: "列表页" }], multiSelect: true }]
+    }, "坏选项 / 没有 question 的项要丢掉");
+    assert.equal(open.body.data.total, 2, "提问不算消息行");
+
+    h.sessionLogs.set("session-b", [ask(3, "call-1", questions), result(4, "call-1", "{\"answers\":[]}")]);
+    const answered = await h.call("GET", "/agent-whales/api/sessions/session-b/messages");
+    assert.equal(answered.body.data.question, undefined, "答完就不再显示");
+
+    const timedOut = [ask(3, "call-2", questions), result(4, "call-2", "No answer batch arrived before the timeout. This is pending, not a skipped answer.")];
+    h.sessionLogs.set("session-b", timedOut);
+    assert.equal((await h.call("GET", "/agent-whales/api/sessions/session-b/messages")).body.data.question.callId, "call-2", "计时超时后问题仍可回答");
+    h.sessionLogs.set("session-b", timedOut.concat([{ type: "user/message", seq: 5, data: { content: [{ type: "text", text: "answer_to_pending_question call-2 …" }] } }]));
+    assert.equal((await h.call("GET", "/agent-whales/api/sessions/session-b/messages")).body.data.question, undefined, "迟到回复引用了 callId 就算答了");
+  });
 });
 
 // ── v2.2 波次 2：子会话自动入项目 + §51.4 组建方案 ─────────────────────────────
@@ -4172,6 +4279,71 @@ describe("波次 D · POST /projects/:id/resume（唤醒离线成员）", () => 
     assert.equal(fake.calls.length, 1, "并发同 id 必须共用一次加载");
   });
 
+  // 2026-11-18 第二期真机验证：唤醒后的成员没有 pwsh / read / edit（preset 没挂），会话里没记过模型时还报 no provider/model。
+  // 根因：直接调 agents.resume({resumeSessionId}) 没带宿主自己恢复会话时带的 setup（preset）与 agentOptions（模型）。
+  // 宿主有 sessionController.resolveAgent（UI 点开会话走的就是它），优先走它。
+  test("唤醒优先走宿主 sessionController.resolveAgent（带 preset 与模型），不碰裸 agents.resume", async () => {
+    const live = new Set(["session-a"]);
+    const resolved = [];
+    const agents = {
+      get: (id) => (live.has(id) ? { id, status: "idle", session: { id } } : undefined),
+      list: () => [],
+      resume: async () => { throw new Error("裸 agents.resume 不应被调用：它不带 preset 和模型"); }
+    };
+    const sessionController = {
+      resolveAgent: async (sessionId) => { resolved.push(sessionId); live.add(sessionId); return { agent: { id: sessionId } }; }
+    };
+    const h = await m6Harness({ agents, sessionController });
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+    const url = `/agent-whales/api/projects/${projectId}/resume`;
+    const first = await h.call("POST", url, { sessionId: "session-old" });
+    assert.equal(first.body.code, 200, JSON.stringify(first.body));
+    assert.deepEqual(first.body.data, { sessionId: "session-old", live: true, resumed: true });
+    assert.deepEqual(resolved, ["session-old"]);
+    const again = await h.call("POST", url, { sessionId: "session-old" });
+    assert.equal(again.body.data.resumed, false, "已在线幂等");
+    assert.deepEqual(resolved, ["session-old"], "在线时不再恢复");
+  });
+
+  test("sessionController.resolveAgent 返回 {error}（如会话属于子代理）→ 50201 并带原因，不当成功", async () => {
+    const agents = { get: () => undefined, list: () => [], resume: async () => { throw new Error("不应走到这里"); } };
+    const sessionController = { resolveAgent: async () => ({ error: Object.assign(new Error("会话归属某个子代理，不能当普通会话恢复"), { code: "SUBAGENT_OWNED" }) }) };
+    const h = await m6Harness({ agents, sessionController });
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+    const bad = await h.call("POST", `/agent-whales/api/projects/${projectId}/resume`, { sessionId: "session-old" });
+    assert.equal(bad.body.code, 50201, JSON.stringify(bad.body));
+    assert.match(bad.body.msg, /子代理/);
+  });
+
+  test("sessionController.resolveAgent 并发同 id 只恢复一次；宿主没有该服务时退回裸 agents.resume（老宿主 / 假宿主行为不变）", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const live = new Set(["session-a"]);
+    let resolves = 0;
+    const agents = { get: (id) => (live.has(id) ? { id, status: "idle", session: { id } } : undefined), list: () => [], resume: async () => { throw new Error("不应走到这里"); } };
+    const sessionController = { resolveAgent: async (id) => { resolves += 1; await gate; live.add(id); return { agent: { id } }; } };
+    const h = await m6Harness({ agents, sessionController });
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+    const url = `/agent-whales/api/projects/${projectId}/resume`;
+    const a = h.call("POST", url, { sessionId: "session-old" });
+    const b = h.call("POST", url, { sessionId: "session-old" });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    release();
+    const [ra, rb] = await Promise.all([a, b]);
+    assert.equal(ra.body.code, 200, JSON.stringify(ra.body));
+    assert.equal(rb.body.code, 200, JSON.stringify(rb.body));
+    assert.equal(resolves, 1, "并发同 id 共用一次恢复");
+    // 没有 sessionController：既有的 resumable 假宿主走裸 agents.resume，结果与之前一致
+    const fake = resumable();
+    const legacy = await withOfflineMember(fake);
+    const r = await legacy.h.call("POST", legacy.url, { sessionId: "session-old" });
+    assert.deepEqual(r.body.data, { sessionId: "session-old", live: true, resumed: true });
+    assert.deepEqual(fake.calls, ["session-old"]);
+  });
+
   test("resume 抛错：200 + 50201 且带原因；不留脏状态，修好后可重试", async () => {
     let fail = true;
     const fake = resumable((options, live) => {
@@ -4200,4 +4372,293 @@ describe("波次 D · POST /projects/:id/resume（唤醒离线成员）", () => 
     assert.equal(res.body.code, 50201);
     assert.match(res.body.msg, /agents\.resume/);
   });
+});
+
+describe("第二期 X1 · GET/PUT /projects/:id/auto（自动派任务配置）", () => {
+  const autoUrl = (projectId) => `/agent-whales/api/projects/${projectId}/auto`;
+
+  test("默认：L2 + 遇审批停在「等你」+ 3/5/10；旧项目没有 auto 字段也得到默认，projectView 同步暴露", async () => {
+    const h = await m6Harness({});
+    const projectId = await createProject(h);
+    const got = await h.call("GET", autoUrl(projectId));
+    assert.equal(got.body.code, 200, JSON.stringify(got.body));
+    assert.deepEqual(got.body.data.auto, { tier: "L2", undoWindowMs: 5000, approval: "wait", perMemberPerMinute: 3, projectConcurrent: 5, maxChainDepth: 10 });
+    assert.deepEqual(got.body.data.audit, []);
+    assert.deepEqual(got.body.data.pending, []);
+    const view = await h.call("GET", `/agent-whales/api/projects/${projectId}`);
+    assert.equal(view.body.data.project.auto.tier, "L2");
+    assert.deepEqual(view.body.data.project.autoAudit, []);
+  });
+
+  test("放宽闸门必须项目主动确认：L3 / 全部同意没带 confirm 被 400 拒绝且配置不变；带 confirm 才生效并写审计", async () => {
+    const h = await m6Harness({});
+    const projectId = await createProject(h);
+    const noConfirm = await h.call("PUT", autoUrl(projectId), { tier: "L3" });
+    assert.equal(noConfirm.body.code, 40000, JSON.stringify(noConfirm.body));
+    assert.match(noConfirm.body.msg, /confirm/);
+    const noConfirmApprove = await h.call("PUT", autoUrl(projectId), { approval: "approve-all" });
+    assert.equal(noConfirmApprove.body.code, 40000, JSON.stringify(noConfirmApprove.body));
+    assert.equal((await h.call("GET", autoUrl(projectId))).body.data.auto.tier, "L2", "被拒的请求不能改配置");
+
+    const l3 = await h.call("PUT", autoUrl(projectId), { tier: "L3", approval: "approve-all", confirm: true });
+    assert.equal(l3.body.code, 200, JSON.stringify(l3.body));
+    assert.equal(l3.body.data.auto.tier, "L3");
+    assert.equal(l3.body.data.auto.approval, "approve-all");
+    assert.equal(l3.body.data.audit.length, 1);
+    assert.equal(l3.body.data.audit[0].kind, "config");
+    assert.match(l3.body.data.audit[0].reason, /tier/);
+    assert.match(l3.body.data.audit[0].reason, /approval/);
+  });
+
+  test("收紧不需要确认；未变化的 PUT 不写审计；速率与深度可调（放宽也不要 confirm），越界被拒", async () => {
+    const h = await m6Harness({});
+    const projectId = await createProject(h);
+    await h.call("PUT", autoUrl(projectId), { tier: "L3", confirm: true });
+    const down = await h.call("PUT", autoUrl(projectId), { tier: "L1" });
+    assert.equal(down.body.code, 200, JSON.stringify(down.body));
+    assert.equal(down.body.data.auto.tier, "L1");
+    const auditCount = down.body.data.audit.length;
+    const same = await h.call("PUT", autoUrl(projectId), { tier: "L1" });
+    assert.equal(same.body.data.audit.length, auditCount, "没变化不写审计");
+    const tuned = await h.call("PUT", autoUrl(projectId), { perMemberPerMinute: 6, maxChainDepth: 20 });
+    assert.equal(tuned.body.code, 200, JSON.stringify(tuned.body));
+    assert.equal(tuned.body.data.auto.perMemberPerMinute, 6);
+    assert.equal(tuned.body.data.auto.maxChainDepth, 20);
+    const bad = await h.call("PUT", autoUrl(projectId), { perMemberPerMinute: 0 });
+    assert.equal(bad.body.code, 40000, JSON.stringify(bad.body));
+    const badTier = await h.call("PUT", autoUrl(projectId), { tier: "L9" });
+    assert.equal(badTier.body.code, 40000, JSON.stringify(badTier.body));
+  });
+
+  test("鉴权与边界：无 token 403、方法 405、项目不存在 40401、body 非对象 400", async () => {
+    const h = await m6Harness({});
+    const projectId = await createProject(h);
+    const noToken = await h.raw("PUT", autoUrl(projectId), {}, { tier: "L1" });
+    assert.equal(noToken.status, 403);
+    const post = await h.call("POST", autoUrl(projectId), {});
+    assert.equal(post.status, 405);
+    const ghost = await h.call("PUT", autoUrl("proj-ghost"), { tier: "L1" });
+    assert.equal(ghost.body.code, 40401, JSON.stringify(ghost.body));
+    const arr = await h.call("PUT", autoUrl(projectId), [1, 2]);
+    assert.equal(arr.status, 400);
+  });
+});
+
+describe("第二期 X2：唤醒后自动派任务", () => {
+  /** session-old 起初离线；agents.resume 把它拉上线，之后 get() 返回带 followup 的 agent。 */
+  function wakeHarness() {
+    const online = new Set(["session-a"]);
+    const sent = [];
+    const resumes = [];
+    const agents = {
+      get: (id) => (online.has(id) ? { id, status: "idle", session: { id }, followup: (message) => { sent.push({ id, message }); } } : undefined),
+      list: () => [],
+      resume: async ({ resumeSessionId }) => { resumes.push(resumeSessionId); online.add(resumeSessionId); return { agent: {} }; }
+    };
+    return { agents, sent, resumes };
+  }
+
+  async function setup(config) {
+    const w = wakeHarness();
+    const h = await m6Harness({ agents: w.agents });
+    const projectId = await createProject(h);
+    await h.token();
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+    if (config !== undefined) {
+      const put = await h.call("PUT", `/agent-whales/api/projects/${projectId}/auto`, config);
+      assert.equal(put.body.code, 200, JSON.stringify(put.body));
+    }
+    // 成员离线时指派：派发必然失败，原因 owner-not-running。
+    const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "离线时派的活" });
+    const taskId = created.body.data.task.taskId;
+    const assigned = await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign-and-dispatch", owner: "session-old", expectedRevision: 1, requestId: "x2-assign" });
+    assert.equal(assigned.body.code, 200, JSON.stringify(assigned.body));
+    assert.equal((assigned.body.data.dispatch || {}).reason, "owner-not-running", JSON.stringify(assigned.body));
+    return { h, w, projectId, taskId };
+  }
+
+  const wake = (ctx) => ctx.h.call("POST", `/agent-whales/api/projects/${ctx.projectId}/resume`, { sessionId: "session-old" });
+  const auditOf = async (ctx) => (await ctx.h.call("GET", `/agent-whales/api/projects/${ctx.projectId}/auto`)).body.data.audit;
+
+  test("L3：唤醒后立即派发，并写审计", async () => {
+    const ctx = await setup({ tier: "L3", confirm: true });
+    const out = await wake(ctx);
+    assert.equal(out.body.code, 200, JSON.stringify(out.body));
+    assert.equal(out.body.data.auto.mode, "immediate");
+    assert.equal(out.body.data.auto.dispatched[0].status, "sent", JSON.stringify(out.body.data.auto));
+    assert.equal(ctx.w.sent.length, 1, "followup 必须真的发出一条");
+    const audit = (await auditOf(ctx)).filter((row) => row.kind === "dispatch");
+    assert.equal(audit[audit.length - 1].outcome, "sent");
+    assert.equal(audit[audit.length - 1].tier, "L3");
+  });
+
+  test("L1：只唤醒不派，响应里标明 manual", async () => {
+    const ctx = await setup({ tier: "L1" });
+    const out = await wake(ctx);
+    assert.equal(out.body.data.auto.mode, "manual");
+    assert.equal(out.body.data.auto.skipped[0].reason, "manual");
+    assert.equal(ctx.w.sent.length, 0, "L1 绝不能自动派");
+  });
+
+  test("L2：先挂起，窗口内撤销后到点也不发", async () => {
+    const ctx = await setup({ tier: "L2" });
+    const out = await wake(ctx);
+    assert.equal(out.body.data.auto.mode, "delayed");
+    assert.equal(out.body.data.auto.scheduled.length, 1);
+    assert.equal(ctx.w.sent.length, 0, "窗口内不能已经发出");
+    const state = await ctx.h.call("GET", `/agent-whales/api/projects/${ctx.projectId}/auto`);
+    assert.equal(state.body.data.pending.length, 1, "挂起中的条目要在界面可见");
+    const undo = await ctx.h.call("POST", `/agent-whales/api/projects/${ctx.projectId}/auto-undo`, { taskId: ctx.taskId });
+    assert.equal(undo.body.code, 200, JSON.stringify(undo.body));
+    const again = await ctx.h.call("POST", `/agent-whales/api/projects/${ctx.projectId}/auto-undo`, { taskId: ctx.taskId });
+    assert.notEqual(again.body.code, 200, "同一条不能撤销两次");
+    const audit = (await auditOf(ctx)).filter((row) => row.kind === "dispatch");
+    assert.deepEqual(audit.map((row) => row.outcome), ["scheduled", "undone"]);
+    assert.equal(ctx.w.sent.length, 0);
+  });
+
+  test("速率闸：每成员每分钟超限的那条被拦并写审计", async () => {
+    const ctx = await setup({ tier: "L3", perMemberPerMinute: 1, confirm: true });
+    const second = await ctx.h.call("POST", "/agent-whales/api/tasks", { projectId: ctx.projectId, subject: "第二件" });
+    const id2 = second.body.data.task.taskId;
+    await ctx.h.call("POST", `/agent-whales/api/tasks/${id2}/commands`, { projectId: ctx.projectId, action: "assign-and-dispatch", owner: "session-old", expectedRevision: 1, requestId: "x2-assign-2" });
+    const out = await wake(ctx);
+    const auto = out.body.data.auto;
+    assert.equal(auto.dispatched.length, 1);
+    assert.equal(auto.skipped.length, 1);
+    assert.equal(auto.skipped[0].reason, "rate");
+    assert.equal(ctx.w.sent.length, 1);
+    const audit = await auditOf(ctx);
+    assert.ok(audit.some((row) => row.outcome === "blocked" && row.reason === "rate"));
+  });
+
+  test("没有离线待派的任务时，唤醒响应保持第一期形状（无 auto 字段）", async () => {
+    const w = wakeHarness();
+    const h = await m6Harness({ agents: w.agents });
+    const projectId = await createProject(h);
+    await h.token();
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+    const out = await h.call("POST", `/agent-whales/api/projects/${projectId}/resume`, { sessionId: "session-old" });
+    assert.equal(out.body.code, 200, JSON.stringify(out.body));
+    assert.deepEqual(Object.keys(out.body.data).sort(), ["live", "resumed", "sessionId"]);
+  });
+});
+
+describe("第二期 X3：自动派发遇审批", () => {
+	function wakeHarness() {
+		const online = new Set(["session-a"]);
+		const agents = {
+			get: (id) => (online.has(id) ? { id, status: "idle", session: { id }, followup: () => {} } : undefined),
+			list: () => [],
+			resume: async ({ resumeSessionId }) => { online.add(resumeSessionId); return { agent: {} }; }
+		};
+		return { agents };
+	}
+
+	/** 离线成员 session-old 名下有一条任务；按 config 配好项目，再唤醒（L3 即时派发，任务带 auto 标记）。 */
+	async function setup(config, { wakeIt = true } = {}) {
+		const w = wakeHarness();
+		const h = await m6Harness({ agents: w.agents });
+		const projectId = await createProject(h);
+		await h.token();
+		await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "session-old" });
+		const put = await h.call("PUT", `/agent-whales/api/projects/${projectId}/auto`, config);
+		assert.equal(put.body.code, 200, JSON.stringify(put.body));
+		const created = await h.call("POST", "/agent-whales/api/tasks", { projectId, subject: "要审批的活" });
+		const taskId = created.body.data.task.taskId;
+		await h.call("POST", `/agent-whales/api/tasks/${taskId}/commands`, { projectId, action: "assign-and-dispatch", owner: "session-old", expectedRevision: 1, requestId: "x3-assign" });
+		if (wakeIt) {
+			const out = await h.call("POST", `/agent-whales/api/projects/${projectId}/resume`, { sessionId: "session-old" });
+			assert.equal(out.body.code, 200, JSON.stringify(out.body));
+			assert.equal((out.body.data.auto.dispatched[0] || {}).status, "sent", JSON.stringify(out.body.data.auto));
+		}
+		return { h, projectId, taskId };
+	}
+
+	/** 成员开始新一轮：宿主发 agent/status running，插件记下本轮开始时间（「全部同意」靠它认这一轮）。 */
+	const startRun = (ctx, sessionId) => ctx.h.listeners["agent/status"]({ agent: { id: sessionId }, status: "running" });
+	const endRun = (ctx, sessionId) => ctx.h.listeners["agent/status"]({ agent: { id: sessionId }, status: "idle" });
+	/** 默认：自动派发刚送出，followup 一到空闲成员就开跑——所以先开一轮再问。 */
+	const ask = (ctx, sessionId, toolName = "bash", { running = true } = {}) => {
+		if (running) startRun(ctx, sessionId);
+		let delegated = 0;
+		const result = ctx.h.listeners["approval/request"]({ agent: { id: sessionId }, toolName }, () => { delegated += 1; return Promise.resolve("unavailable"); });
+		return Promise.resolve(result).then((outcome) => ({ outcome, delegated }));
+	};
+	const auditOf = async (ctx) => (await ctx.h.call("GET", `/agent-whales/api/projects/${ctx.projectId}/auto`)).body.data.audit;
+
+	test("approve-all：自动派发出去的任务遇审批 → allowed-once，且先写审计（带工具名）", async () => {
+		const ctx = await setup({ tier: "L3", approval: "approve-all", confirm: true });
+		const { outcome, delegated } = await ask(ctx, "session-old", "bash");
+		assert.equal(outcome, "allowed-once");
+		assert.equal(delegated, 0, "命中授权就不再交给后面的回答者");
+		const rows = (await auditOf(ctx)).filter((row) => row.kind === "approval");
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0].outcome, "approved");
+		assert.equal(rows[0].reason, "tool:bash");
+		assert.equal(rows[0].sessionId, "session-old");
+	});
+
+	test("默认配置（停在等你）：同样的请求不批，交给下一个回答者，不写审批审计", async () => {
+		const ctx = await setup({ tier: "L3", confirm: true });
+		const { outcome, delegated } = await ask(ctx, "session-old");
+		assert.equal(outcome, "unavailable");
+		assert.equal(delegated, 1);
+		assert.equal((await auditOf(ctx)).filter((row) => row.kind === "approval").length, 0);
+	});
+
+	test("授权不外溢：非成员会话、没有自动派发任务的成员都不批", async () => {
+		const ctx = await setup({ tier: "L3", approval: "approve-all", confirm: true });
+		for (const id of ["session-stranger", "session-b"]) {
+			const { outcome, delegated } = await ask(ctx, id);
+			assert.equal(outcome, "unavailable", id);
+			assert.equal(delegated, 1, id);
+		}
+	});
+
+	test("用户手动派的任务不在授权内（没唤醒、没有 auto 标记）", async () => {
+		const ctx = await setup({ tier: "L3", approval: "approve-all", confirm: true }, { wakeIt: false });
+		const { outcome, delegated } = await ask(ctx, "session-old");
+		assert.equal(outcome, "unavailable");
+		assert.equal(delegated, 1);
+	});
+
+	// 2026-11-18 真机验证发现的洞：成员做完任务没人标完成，任务一直「在办」，之后这个会话里发生的任何事都被放行。
+	test("不是自动派发那条消息引出的轮次不批：没在跑、或本轮开始得比送出晚太多（如人之后手动发的话）", async () => {
+		const ctx = await setup({ tier: "L3", approval: "approve-all", confirm: true });
+		// 没有在跑的轮次（宿主没发过 running / 已收工）：拿不到本轮开始时间 → 不批
+		endRun(ctx, "session-old");
+		const idle = await ask(ctx, "session-old", "bash", { running: false });
+		assert.equal(idle.outcome, "unavailable", "没在跑不批");
+		assert.equal(idle.delegated, 1);
+		// 把任务的送出时刻改成 10 分钟前：此刻开的这一轮不可能是那条消息引出的
+		const storeFile = join(ctx.h.dir, "projects.json");
+		const store = JSON.parse(readFileSync(storeFile, "utf8"));
+		const task = store.tasks[ctx.taskId];
+		assert.equal(task.dispatch.auto, true, "前提：任务带自动派发标记");
+		assert.equal(typeof task.dispatch.at, "number", "前提：自动派发记下了送出时刻");
+		task.dispatch.at -= 10 * 60 * 1000;
+		writeFileSync(storeFile, JSON.stringify(store));
+		const late = await ask(ctx, "session-old", "bash");
+		assert.equal(late.outcome, "unavailable", "本轮比送出晚 10 分钟，不是那条消息引出的");
+		assert.equal(late.delegated, 1);
+		assert.equal((await auditOf(ctx)).filter((row) => row.kind === "approval").length, 0, "没批就不写审批审计");
+	});
+
+	test("坏事件不抛错、不误批：没有 agent / 空对象 / null", async () => {
+		const ctx = await setup({ tier: "L3", approval: "approve-all", confirm: true });
+		for (const bad of [{}, { agent: {} }, { agent: { id: 7 } }, null, undefined]) {
+			let delegated = 0;
+			const outcome = await ctx.h.listeners["approval/request"](bad, () => { delegated += 1; return Promise.resolve("unavailable"); });
+			assert.equal(outcome, "unavailable");
+			assert.equal(delegated, 1);
+		}
+	});
+
+	test("不改写项目其它状态：自动批准只多一条审计", async () => {
+		const ctx = await setup({ tier: "L3", approval: "approve-all", confirm: true });
+		const before = (await auditOf(ctx)).length;
+		await ask(ctx, "session-old");
+		assert.equal((await auditOf(ctx)).length, before + 1);
+	});
 });

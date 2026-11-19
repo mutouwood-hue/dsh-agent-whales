@@ -1,0 +1,117 @@
+{
+ "keys": {
+  "o-floor": {
+   "bytes": 3470,
+   "frames": 1,
+   "h": 256,
+   "w": 256
+  },
+  "o-plant": {
+   "bytes": 12672,
+   "frames": 1,
+   "h": 192,
+   "w": 172
+  },
+  "o-shelf": {
+   "bytes": 17724,
+   "frames": 1,
+   "h": 300,
+   "w": 235
+  },
+  "o-sit-done": {
+   "bytes": 27078,
+   "frames": 1,
+   "h": 336,
+   "w": 249
+  },
+  "o-sit-idle": {
+   "bytes": 25448,
+   "frames": 1,
+   "h": 336,
+   "w": 249
+  },
+  "o-sit-oops": {
+   "bytes": 27090,
+   "frames": 1,
+   "h": 336,
+   "w": 249
+  },
+  "o-sit-read": {
+   "bytes": 25148,
+   "frames": 1,
+   "h": 336,
+   "w": 249
+  },
+  "o-sit-run": {
+   "bytes": 50122,
+   "frames": 2,
+   "h": 336,
+   "w": 498
+  },
+  "o-sit-sleep": {
+   "bytes": 23710,
+   "frames": 1,
+   "h": 336,
+   "w": 249
+  },
+  "o-sit-think": {
+   "bytes": 25944,
+   "frames": 1,
+   "h": 336,
+   "w": 249
+  },
+  "o-sit-type": {
+   "bytes": 49774,
+   "frames": 2,
+   "h": 336,
+   "w": 498
+  },
+  "o-sit-wait": {
+   "bytes": 49768,
+   "frames": 2,
+   "h": 336,
+   "w": 498
+  },
+  "o-station-back": {
+   "bytes": 17794,
+   "frames": 1,
+   "h": 462,
+   "w": 364
+  },
+  "o-station-front": {
+   "bytes": 9574,
+   "frames": 1,
+   "h": 462,
+   "w": 364
+  },
+  "o-walk-side": {
+   "bytes": 45596,
+   "frames": 2,
+   "h": 347,
+   "w": 386
+  },
+  "o-wall": {
+   "bytes": 9770,
+   "frames": 1,
+   "h": 512,
+   "w": 512
+  }
+ },
+ "layout": {
+  "frame": {
+   "h": 336,
+   "w": 249
+  },
+  "station": {
+   "girlX": 57,
+   "girlY": 98,
+   "h": 462,
+   "w": 364
+  },
+  "walker": {
+   "h": 347,
+   "w": 193
+  }
+ },
+ "version": 1
+}

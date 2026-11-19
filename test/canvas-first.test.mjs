@@ -189,6 +189,111 @@ test("Composer 卡：用户点「发送」才提交；空草稿 / 发送中按�
   });
 });
 
+// ── 画布 Composer：主对话在问你（真机反馈 2026-11-18）────────────────────────
+
+test("提问归一 + 回答批次：口径对齐官方提问卡", () => {
+  const { wbQuestionItems, wbQuestionAnswer } = api();
+  const items = wbQuestionItems([
+    { id: "a", question: "单选？", options: [{ label: "甲" }, { label: "" }, null] },
+    { question: "多选？", multi_select: true, options: [{ label: "x", description: "说明" }, { label: "y" }] },
+    { id: "bad" }
+  ]);
+  assert.deepEqual(items.map((i) => [i.id, i.multi, i.options.map((o) => o.label)]), [["a", false, ["甲"]], ["q1", true, ["x", "y"]]]);
+  assert.equal(wbQuestionAnswer(items, []).missing, 0);
+  assert.equal(wbQuestionAnswer(items, [{ selected: ["甲"], custom: "" }]).missing, 1);
+  assert.deepEqual(wbQuestionAnswer(items, [{ selected: ["甲"], custom: " 自己写 " }, { selected: ["x"], custom: "补充" }]).answer, {
+    answers: [{ id: "a", selected: [], custom: "自己写" }, { id: "q1", selected: ["x"], custom: "补充" }]
+  }, "单选自己写时只带 custom；多选 selected 与 custom 并存");
+});
+
+function fakeQuestion(overrides) {
+  const listeners = new Set();
+  const answered = [];
+  let snap = { state: "open", channel: "waterfall", closed: false };
+  const pending = {
+    kind: "question",
+    key: "question:s1:call-1",
+    sessionId: "s1",
+    callId: "call-1",
+    questions: [{ id: "page", question: "画哪个页面？", options: [{ label: "表单导入弹窗" }, { label: "列表页" }] }],
+    engaged: 0,
+    subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+    snapshot: () => snap,
+    engage() { pending.engaged += 1; },
+    answer(batch) { answered.push(batch); return Promise.resolve(); },
+    dismiss() { return Promise.resolve(); },
+    set(next) { snap = { ...snap, ...next }; listeners.forEach((fn) => fn()); },
+    answered,
+    ...overrides
+  };
+  return pending;
+}
+
+test("Composer 卡：主对话在等你回答时，问题和选项显示在画布上，点选后提交走宿主同一个回答通道", async () => {
+  const { shim, mount } = createMount({ effects: true });
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const t = loaded.plugin.__test;
+  const pending = fakeQuestion();
+  const status = new Map([["s1", { running: true, pendingInteraction: pending }]]);
+  await withFetch(() => ok({ rows: [{ role: "user", text: "绘制一个页面原型" }, { role: "assistant", text: "需要你确认一下" }] }), async () => {
+    const view = mount(t.WbSessionComposer, { t: KEY, sessionId: "s1", inputActions: fakeActions().actions, useSession: (sel) => sel({ running: true }), useInput: (sel) => sel({ phase: "plain" }), wbUseSessionStatus: (sel) => sel(status) });
+    await view.settle();
+    view.rerender();
+    const text = texts(view.tree);
+    assert.ok(text.indexOf("画哪个页面？") >= 0, "问题必须显示在画布卡上：" + text);
+    assert.ok(text.indexOf("[chat.question.status]") >= 0, "状态说「等你回答」而不是「正在处理」");
+    const card = []; collect(view.tree, card, (n) => n.props["data-question-mode"] !== undefined);
+    assert.equal(card[0].props["data-question-mode"], "live");
+    buttonByText(view.tree, "chat.question.submit").props.onClick();
+    view.rerender();
+    assert.equal(pending.answered.length, 0, "没选不能交");
+    assert.ok(texts(view.tree).indexOf("[chat.question.incomplete]") >= 0);
+    const option = byTag(view.tree, "button").find((b) => b.props["data-option"] === "列表页");
+    option.props.onClick();
+    view.rerender();
+    assert.equal(pending.engaged, 1, "一动手就停掉倒计时");
+    assert.equal(byTag(view.tree, "button").find((b) => b.props["data-option"] === "列表页").props["data-selected"], "true");
+    buttonByText(view.tree, "chat.question.submit").props.onClick();
+    await view.settle();
+    assert.deepEqual(pending.answered, [{ answers: [{ id: "page", selected: ["列表页"] }] }]);
+  });
+});
+
+test("Composer 卡：宿主卡片还没有回答通道 / 只有日志兜底时只读并指路；审批在等时明说", async () => {
+  const { shim, mount } = createMount({ effects: true });
+  const loaded = loadPlugin({ react: shim });
+  installDocumentStub();
+  const t = loaded.plugin.__test;
+  const pending = fakeQuestion();
+  pending.set({ channel: "none" });
+  const base = { t: KEY, sessionId: "s1", inputActions: fakeActions().actions, useSession: (sel) => sel({ running: true }), useInput: (sel) => sel({ phase: "plain" }) };
+  await withFetch(() => ok({ rows: [] }), async () => {
+    const view = mount(t.WbSessionComposer, { ...base, useSessionStatus: (sel) => sel(new Map([["s1", { pendingInteraction: pending }]])) });
+    await view.settle();
+    view.rerender();
+    assert.ok(texts(view.tree).indexOf("[chat.question.readonly]") >= 0);
+    assert.equal(buttonByText(view.tree, "chat.question.submit"), undefined);
+  });
+  const logged = createMount({ effects: true });
+  const loaded2 = loadPlugin({ react: logged.shim });
+  await withFetch(() => ok({ rows: [], question: { callId: "call-9", questions: [{ id: "q", question: "日志里的问题？", options: [{ label: "好" }] }] } }), async () => {
+    const view = logged.mount(loaded2.plugin.__test.WbSessionComposer, base);
+    await view.settle();
+    view.rerender();
+    const text = texts(view.tree);
+    assert.ok(text.indexOf("日志里的问题？") >= 0, "拿不到宿主卡片时从日志兜底显示：" + text);
+    assert.ok(text.indexOf("[chat.question.readonly]") >= 0);
+  });
+  const approval = createMount({ effects: true });
+  const loaded3 = loadPlugin({ react: approval.shim });
+  await withFetch(() => ok({ rows: [] }), async () => {
+    const view = approval.mount(loaded3.plugin.__test.WbSessionComposer, { ...base, wbUseSessionStatus: (sel) => sel(new Map([["s1", { pendingInteraction: { kind: "approval" } }]])) });
+    await view.settle();
+    assert.ok(texts(view.tree).indexOf("[chat.approval]") >= 0);
+  });
+});
+
 // ── 「从画布开始」页 ─────────────────────────────────────────────────────
 
 test("从画布开始：建会话 → 建项目（名取首句、目标=原话）→ 暂存首条 → 进项目画布", async () => {

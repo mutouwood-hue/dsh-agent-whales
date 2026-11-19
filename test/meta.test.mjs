@@ -488,15 +488,15 @@ test("assets/art.json：sprites 每项都带内联 WebP 与正尺寸", () => {
 
 // ── 3b. client.js：D1 之后不得再内联素材 ────────────────────────────────
 
-test("lib/client.js：不得再内联 base64 素材，且体积必须 ≤ 上限", () => {
+test("lib/client.js：不得再内联 base64 素材（体积不设上限）", () => {
   // 产品决策（PRD §34.1 D1，2026-10-30 用户拍板）：client.js 只含代码与矢量兜底，
   // 精灵图由宿主路由 /agent-whales/api/art/* 按当前皮肤按需提供。
   // 这条用例是回归守门：谁再把 base64 内联回来，或者体积重新膨胀，这里立刻红。
   // 注意只查 base64 与体积：client.js 允许保留空的 ART 占位（T-client 用它做
   // 「旧内联构建已就绪」的兼容判断），那不是内联素材。
-  // 上限 200KB → 420KB（M6 工作台，2026-11-09）→ 560KB（M6 画布波次，2026-11-14）：装饰层 + 十屏工作台
-  // 共用这一个单文件 bundle（dsh.client 只认一个 ./client 导出），素材依旧出包、
-  // 不出现在本文件里；上限的意义是「别无声膨胀」，不是「永远 127KB」。
+  // 体积上限已取消（需求负责人，2026-11-18：第二期放宽，不再设置 client.js 体积上限）。
+  // 历史：200KB → 420KB（2026-11-09）→ 560KB（2026-11-14）。素材依旧出包、不出现在本文件里，
+  // 所以这里只守「不得内联位图」这一条。
   const source = readFileSync(clientPath, "utf8");
   assert.equal(
     source.includes("data:image/webp;base64,"),
@@ -504,8 +504,6 @@ test("lib/client.js：不得再内联 base64 素材，且体积必须 ≤ 上限
     "client.js 不得内联 WebP data URI：素材必须走宿主路由 /agent-whales/api/art/*"
   );
   assert.equal(/data:image\/(?:webp|png|jpeg);base64,/i.test(source), false, "client.js 不得内联任何位图 data URI");
-  const bytes = Buffer.byteLength(source, "utf8");
-  assert.ok(bytes <= 560 * 1024, "client.js 必须 ≤560KB（只含代码与矢量兜底），实际 " + (bytes / 1024).toFixed(1) + "KB");
 });
 
 // ── 4. 测试入口卫生 ─────────────────────────────────────────────────────

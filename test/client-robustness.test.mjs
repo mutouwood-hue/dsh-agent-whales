@@ -464,6 +464,30 @@ test("ART：待入库帧表 Q_PENDING_FRAMES——素材一旦入库就必须并
   }
 });
 
+test("入库后的工具帧：真实素材库（assets/art.json）里 q-read / q-type / q-run 都在，Q 版成员读 / 改 / 跑命令各取各的帧，成熟版与经典仍不取", async () => {
+  const api = await testApiWithArt(["q", "mature", "classic"]);
+  const art = api.ART();
+  for (const key of ["q-read", "q-type", "q-run"]) assert.ok(art[key], key + " 必须已入库并被加载（artkit 读的是真实 art.json）");
+  assert.equal(api.frameOf("q", false, "read"), "q-read");
+  assert.equal(api.frameOf("q", false, "type"), "q-type");
+  assert.equal(api.frameOf("q", false, "run"), "q-run");
+  assert.equal(api.frameOf("mix", false, "run"), "q-run", "混合模式的成员是 Q 版");
+  assert.equal(api.frameOf("mature", true, "read"), undefined, "成熟版（头肩近景）不做工具帧");
+  assert.equal(api.frameOf("classic", false, "type"), undefined, "经典皮肤不取 Q 版位图");
+  // 从状态到帧的整条链：读文件 → reading → read → q-read
+  const now = 1_000_000;
+  const settings = { stateFaces: true, errorFaces: true, toolFaces: true, waitFaces: true };
+  const faceFor = (tool) => api.faceOf({ running: true }, now, settings, tool, undefined);
+  assert.equal(api.frameOf("q", false, api.faceVariant(faceFor("read"))), "q-read");
+  assert.equal(api.frameOf("q", false, api.faceVariant(faceFor("edit"))), "q-type");
+  assert.equal(api.frameOf("q", false, api.faceVariant(faceFor("pwsh"))), "q-run");
+  // 三张是新取景（站直、双手拿东西），尺寸必须是合理的 Q 版全身：高 192、宽在 90 到 190 之间
+  for (const key of ["q-read", "q-type", "q-run"]) {
+    assert.equal(art[key].h, 192, key + " 高度应与其它 Q 版帧一致（192）");
+    assert.ok(art[key].w >= 90 && art[key].w <= 190, key + " 宽度应在合理范围，实际 " + art[key].w);
+  }
+});
+
 // ── 6. 「串门工具」开关：宿主真相 + POST 写回 + 失败回滚 + i18n ────────────
 
 function settingsPropsFor() {
