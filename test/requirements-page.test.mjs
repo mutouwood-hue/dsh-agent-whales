@@ -336,3 +336,149 @@ test("回流之后：详情页里每条运行都被重新取一遍（批注从�
     // 待办 / 任务只有「有订阅者」时才会重取（侧栏在真页面里订阅它们；这里没挂侧栏，不应该发请求，也不该断言它）。
   } finally { d.restore(); }
 });
+// ── 手动截图上传 + E2E 配置面板 ───────────────────────────────────────────────
+
+const fakeFile = (name, size, bytes) => ({ name, size, arrayBuffer: () => Promise.resolve((bytes || new Uint8Array(size)).buffer.slice(0)) });
+
+test("wbFileToUpload：只收 png / jpg / webp、非空、≤ 5MB；原因是中文；读成 base64（含大文件分块）", async () => {
+  const { wbFileToUpload } = api();
+  await assert.rejects(wbFileToUpload(null), /没有选中文件/);
+  await assert.rejects(wbFileToUpload(fakeFile("a.gif", 10)), /只支持 png/);
+  await assert.rejects(wbFileToUpload(fakeFile("a.exe", 10)), /只支持 png/);
+  await assert.rejects(wbFileToUpload(fakeFile("clip.webm", 10)), /录屏由执行器附加/);
+  await assert.rejects(wbFileToUpload(fakeFile("a.png", 0)), /空的/);
+  await assert.rejects(wbFileToUpload(fakeFile("a.png", 5 * 1024 * 1024 + 1)), /超过 5MB/);
+  await assert.rejects(wbFileToUpload({ name: "a.png", size: 3 }), /读不了/);
+  const small = await wbFileToUpload(fakeFile("Step 3.PNG", 3, new Uint8Array([0x89, 0x50, 0x4e])));
+  assert.deepEqual(small, { name: "Step 3.PNG", data: Buffer.from([0x89, 0x50, 0x4e]).toString("base64") }, "扩展名不分大小写，base64 与 Buffer 一致");
+  const big = new Uint8Array(100000).map((_, i) => i % 251);
+  const out = await wbFileToUpload(fakeFile("big.jpg", big.length, big));
+  assert.deepEqual(Buffer.from(out.data, "base64"), Buffer.from(big), "超过分块大小的数据也要原样还原");
+  // 分块行为本身：浏览器里 String.fromCharCode.apply 的参数个数有上限（约 12 万 ~ 50 万，视引擎），
+  // 一次塞进整张截图会抛 RangeError。Node 的上限高、复现不了，所以直接断言「每次调用的参数个数有界」。
+  const original = String.fromCharCode;
+  let widest = 0;
+  String.fromCharCode = function () { widest = Math.max(widest, arguments.length); return original.apply(String, arguments); };
+  try {
+    await wbFileToUpload(fakeFile("big.png", 200000, new Uint8Array(200000)));
+  } finally { String.fromCharCode = original; }
+  assert.ok(widest > 0 && widest <= 0x8000, "每次最多 32768 个字节参数，实际最宽 " + widest);
+});
+
+test("wbE2eConfigPatch：只发真的改了的字段；去空白；非手动驱动没有执行器时前端先拦", () => {
+  const { wbE2eConfigDraft, wbE2eConfigPatch } = api();
+  assert.deepEqual(wbE2eConfigDraft(undefined), { trigger: "auto", driver: "manual", executorSessionId: "", baseUrl: "" });
+  assert.deepEqual(wbE2eConfigDraft({ trigger: "weird", driver: "selenium", executorSessionId: 5 }), { trigger: "auto", driver: "manual", executorSessionId: "", baseUrl: "" });
+  const saved = { trigger: "auto", driver: "manual", executorSessionId: "", baseUrl: "" };
+  assert.deepEqual(wbE2eConfigPatch(saved, wbE2eConfigDraft(saved)), { patch: {}, error: "" }, "没改就是空补丁");
+  assert.deepEqual(wbE2eConfigPatch(saved, { trigger: "manual", driver: "manual", executorSessionId: "", baseUrl: "  http://x  " }), { patch: { trigger: "manual", baseUrl: "http://x" }, error: "" });
+  assert.equal(wbE2eConfigPatch(saved, { trigger: "auto", driver: "tabbit-cli", executorSessionId: "", baseUrl: "" }).error, "needExecutor");
+  assert.deepEqual(wbE2eConfigPatch(saved, { trigger: "auto", driver: "tabbit-cli", executorSessionId: "s1", baseUrl: "" }), { patch: { driver: "tabbit-cli", executorSessionId: "s1" }, error: "" });
+  const configured = { trigger: "auto", driver: "tabbit-cli", executorSessionId: "s1", baseUrl: "" };
+  assert.equal(wbE2eConfigPatch(configured, { trigger: "manual", driver: "tabbit-cli", executorSessionId: "s1", baseUrl: "" }).error, "", "已配好执行器，只改触发方式不会被拦");
+});
+
+async function renderConfig(project, onWrite) {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const method = (init && init.method) || "GET";
+    calls.push({ target, method, body: init && init.body ? JSON.parse(init.body) : undefined });
+    if (method !== "GET") return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(onWrite ? onWrite(target, init) : ok({})) });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ok({ project })) });
+  };
+  const { mount, shim } = createMount();
+  const { plugin } = loadPlugin({ react: shim });
+  installDocumentStub();
+  const t = plugin.__test;
+  await t.wbCache.read("/projects/p1");
+  const view = mount(t.WbE2eConfigPanel, { t: (key, vars) => (vars ? KEY(key) + JSON.stringify(vars) : KEY(key)), projectId: "p1" });
+  await tick();
+  calls.length = 0;
+  return { view, calls, restore: () => { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; } };
+}
+const selects = (tree) => byTag(tree, "select");
+const projectOf = (cfg) => ({ projectId: "p1", name: "P", members: [{ sessionId: "session-a", title: "主线" }, { sessionId: "session-exec", title: "验收执行器" }], e2eConfig: cfg });
+
+test("E2E 配置面板：收起时只有摘要；展开后改触发方式并保存，只发改了的字段；保存按钮没改动时不可点", async () => {
+  const c = await renderConfig(projectOf({ trigger: "auto", driver: "manual", executorSessionId: "", baseUrl: "" }));
+  try {
+    assert.match(texts(c.view.tree), /\[req\.cfg\.summary\]/);
+    assert.equal(selects(c.view.tree).length, 0, "收起时没有表单");
+    button(c.view.tree, "req.cfg.edit").props.onClick();
+    const tree = c.view.rerender();
+    assert.equal(selects(tree).length, 2, "手动驱动下只有触发方式和驱动两个下拉（没有执行器下拉）");
+    assert.equal(button(tree, "req.cfg.save").props.disabled, true, "没改动不可保存");
+    selects(tree)[0].props.onChange({ target: { value: "manual" } });
+    const tree2 = c.view.rerender();
+    assert.equal(button(tree2, "req.cfg.save").props.disabled, false);
+    button(tree2, "req.cfg.save").props.onClick();
+    await tick(); await tick();
+    assert.deepEqual(c.calls.find((x) => x.method === "PUT"), { target: "/projects/p1/e2e-config", method: "PUT", body: { trigger: "manual" } });
+  } finally { c.restore(); }
+});
+
+test("E2E 配置面板：选了非手动驱动才出现执行器下拉（列项目成员）；没选执行器不发请求并提示；computer use 带未验证提示；宿主拒绝显示真原因", async () => {
+  const c = await renderConfig(projectOf({ trigger: "auto", driver: "manual", executorSessionId: "", baseUrl: "" }), () => ({ code: 40000, msg: "executorSessionId must be a project member" }));
+  try {
+    button(c.view.tree, "req.cfg.edit").props.onClick();
+    let tree = c.view.rerender();
+    selects(tree)[1].props.onChange({ target: { value: "computer-use" } });
+    tree = c.view.rerender();
+    assert.equal(selects(tree).length, 3, "出现执行器下拉");
+    const options = byTag(selects(tree)[2], "option").map((n) => [n.props.value, texts(n)]);
+    assert.deepEqual(options, [["", "[req.cfg.executor.none]"], ["session-a", "主线"], ["session-exec", "验收执行器"]], "列项目成员，用成员名");
+    assert.match(texts(tree), /\[req\.cfg\.cu\.warn\]/, "computer use 要说明未验证");
+    button(tree, "req.cfg.save").props.onClick();
+    await tick();
+    assert.equal(c.calls.filter((x) => x.method === "PUT").length, 0, "没选执行器：前端先拦，不发请求");
+    assert.match(texts(c.view.rerender()), /\[req\.cfg\.needExecutor\]/);
+    selects(c.view.rerender())[2].props.onChange({ target: { value: "session-exec" } });
+    button(c.view.rerender(), "req.cfg.save").props.onClick();
+    await tick(); await tick();
+    assert.deepEqual(c.calls.find((x) => x.method === "PUT").body, { driver: "computer-use", executorSessionId: "session-exec" });
+    assert.match(texts(c.view.rerender()), /executorSessionId must be a project member/, "宿主拒绝时显示它给的原因");
+  } finally { c.restore(); }
+});
+
+test("手动截图上传：只在「手动驱动 + 运行中」出现；选文件真发 POST（base64 + 文件名）；不合格的文件显示原因且不发请求", async () => {
+  const running = failedRun({ driver: "manual", status: "running", results: [{ caseId: "c1", title: "A", status: "pending", shots: [], note: "" }], summary: { total: 1, passed: 0, failed: 0, errored: 0, pending: 1, accepted: 0, reflowed: 0 } });
+  const notes = [];
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (url, init) => { calls.push({ target: String(url).replace("/agent-whales/api", ""), method: (init && init.method) || "GET", body: init && init.body ? JSON.parse(init.body) : undefined }); return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ok({ run: running })) }); };
+  try {
+    const { mount, shim } = createMount();
+    const { plugin } = loadPlugin({ react: shim });
+    installDocumentStub();
+    const t = plugin.__test;
+    const view = mount(t.WbReqRunCard, { t: (k) => KEY(k), run: running, projectId: "p1", reqId: "r1", onNote: (m) => notes.push(m) });
+    const input = byTag(view.tree, "input").find((n) => n.props.type === "file");
+    assert.ok(input, "手动驱动 + 运行中有文件选择");
+    assert.equal(input.props.accept, "image/png,image/jpeg,image/webp", "不接受视频 / 其它类型");
+    calls.length = 0;
+    await input.props.onChange({ target: { files: [fakeFile("Step3.PNG", 3, new Uint8Array([1, 2, 3]))] } });
+    assert.deepEqual(calls.find((x) => x.method === "POST"), { target: "/projects/p1/e2e/run-ab12cd34/shots/c1", method: "POST", body: { name: "Step3.PNG", data: Buffer.from([1, 2, 3]).toString("base64") } });
+    calls.length = 0; notes.length = 0;
+    await input.props.onChange({ target: { files: [fakeFile("virus.exe", 3)] } });
+    await input.props.onChange({ target: { files: [fakeFile("huge.png", 6 * 1024 * 1024)] } });
+    assert.equal(calls.filter((x) => x.method === "POST").length, 0, "不合格的文件不发请求");
+    assert.match(notes.join("|"), /只支持 png/);
+    assert.match(notes.join("|"), /超过 5MB/);
+    await input.props.onChange({ target: { files: [] } });
+    assert.equal(calls.filter((x) => x.method === "POST").length, 0, "取消选择不发请求");
+    // 执行器驱动的运行 / 已结束的运行：没有上传入口
+    const tool = mount(t.WbReqRunCard, { t: (k) => KEY(k), run: Object.assign({}, running, { driver: "tabbit-cli" }), projectId: "p1", reqId: "r1", onNote() {} });
+    assert.equal(byTag(tool.tree, "input").filter((n) => n.props.type === "file").length, 0, "执行器驱动的运行不给人传（它自己上报）");
+    const finished = mount(t.WbReqRunCard, { t: (k) => KEY(k), run: failedRun({ driver: "manual" }), projectId: "p1", reqId: "r1", onNote() {} });
+    assert.equal(byTag(finished.tree, "input").filter((n) => n.props.type === "file").length, 0, "运行结束后宿主不再收截图，不给入口");
+  } finally { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; }
+});
+
+test("需求列表页顶部挂着 E2E 配置面板；新增文案键中英一致", async () => {
+  const t = api();
+  for (const key of ["req.cfg.title", "req.cfg.summary", "req.cfg.save", "req.cfg.needExecutor", "req.shot.upload", "req.cfg.driver.computer-use", "req.cfg.cu.warn"]) assert.ok(t.WB_TEXT.zh[key] && t.WB_TEXT.en[key], key);
+  for (const v of ["auto", "manual"]) assert.ok(t.WB_TEXT.zh["req.cfg.trigger." + v] && t.WB_TEXT.en["req.cfg.trigger." + v]);
+  for (const v of ["manual", "tabbit-cli", "computer-use"]) assert.ok(t.WB_TEXT.zh["req.cfg.driver." + v] && t.WB_TEXT.en["req.cfg.driver." + v]);
+});
