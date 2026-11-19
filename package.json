@@ -24,6 +24,7 @@
     "lib/prototype-vocab.js",
     "lib/auto-dispatch.js",
     "lib/requirements.js",
+    "lib/e2e.js",
     "lib/view-host.js",
     "lib/view/*.js",
     "lib/view/LICENSE-deep-view",

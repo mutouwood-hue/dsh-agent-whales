@@ -51,3 +51,6 @@ import "./view-e2e.test.mjs";
 import "./requirements.test.mjs";
 import "./requirements-http.test.mjs";
 import "./requirements-ui.test.mjs";
+// 需求主线 P4：E2E 协议与状态机。
+import "./e2e-protocol.test.mjs";
+import "./e2e-runs-http.test.mjs";

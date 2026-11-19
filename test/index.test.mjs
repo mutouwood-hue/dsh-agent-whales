@@ -1776,7 +1776,7 @@ test("宿主 apply：服务重载（作用域释放 + 重新注入）不重复�
   host.apply(injectHost.ctx);
   flushInjected(injectHost);
   const toolCount = Object.keys(injectHost.state.tools).length;
-  assert.equal(toolCount, 17, "5 个串门工具 + 提案工具 + 2 个简报工具 + 2 个流程图工具 + 原型工具 + 5 个画布工具 + show_view");
+  assert.equal(toolCount, 18, "5 个串门工具 + 提案工具 + 2 个简报工具 + 2 个流程图工具 + 原型工具 + 5 个画布工具 + show_view + E2E 上报工具");
   assert.equal(injectHost.state.routes.length, 1);
 
   disposeInjected(injectHost);

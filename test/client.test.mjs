@@ -965,7 +965,7 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
     effect: (run) => { run(); return () => {}; }
   });
 
-  assert.deepEqual(Object.keys(registered).sort(), ["show_view", "whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_canvas_layout", "whales_canvas_link", "whales_canvas_list", "whales_canvas_unlink", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send", "whales_visit_trace"]);
+  assert.deepEqual(Object.keys(registered).sort(), ["show_view", "whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_canvas_layout", "whales_canvas_link", "whales_canvas_list", "whales_canvas_unlink", "whales_e2e_report", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send", "whales_visit_trace"]);
   assert.equal(typeof registered.whales_visit_send.output.render, "function", "工具必须带 output.render");
   // 网关按 OpenAI function calling 校验：parameters 必须是 { type: "object", properties } 的 JSON Schema。
   // 传「属性表」或空对象会让整轮请求 400（真实事故：whales_visit_list 变成 type: null）。
