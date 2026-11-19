@@ -271,3 +271,73 @@ test("经典画布：存过的位置不影响需求卡（经典画布里它们�
     assert.equal(buttons.length, 1, "经典画布也有需求入口");
   } finally { c.restore(); }
 });
+// ── 缩放三档 ────────────────────────────────────────────────────────────────
+
+test("wbZoomLevel：< 0.5 远景、≥ 1 近景、其余中景；边界值；非数字不乱切", () => {
+  const { wbZoomLevel } = api();
+  assert.equal(wbZoomLevel(0.3), "far");
+  assert.equal(wbZoomLevel(0.49), "far");
+  assert.equal(wbZoomLevel(0.5), "mid", "0.5 属于中景");
+  assert.equal(wbZoomLevel(0.99), "mid");
+  assert.equal(wbZoomLevel(1), "near", "1 属于近景");
+  assert.equal(wbZoomLevel(2), "near");
+  for (const bad of [undefined, null, NaN, Infinity, -Infinity, "1", {}]) assert.equal(wbZoomLevel(bad), "mid", "非有限数字回落中景：" + String(bad));
+});
+
+test("新画布缩放档：视口变化回调改变容器 data-zoom 与档位提示；初始按实例 getZoom；平移（zoom 不变）不改档", async () => {
+  const state = { puts: [], rows: [row({ reqId: "r1" })] };
+  const { shim, mount } = createMount({ effects: true });
+  installDocumentStub();
+  let flowProps = null;
+  const lib = {
+    ReactFlow: function ReactFlow(props) { flowProps = props; return { type: "div", props: { className: "rf", children: props.children } }; },
+    Background: function () { return null; }, Controls: function () { return null; }, MiniMap: function () { return null; },
+    Handle: function () { return null; }, Position: { Left: "left", Right: "right" },
+    applyNodeChanges: (changes, nodes) => nodes, FLOW_CSS: ""
+  };
+  const loaded = loadPlugin({ react: shim, requireAsync: () => Promise.resolve(lib) });
+  const t = loaded.plugin.__test;
+  const original = globalThis.fetch;
+  const fetcher = makeFetch(state);
+  globalThis.fetch = (url, init) => { const body = fetcher(String(url).replace("/agent-whales/api", ""), init); return Promise.resolve({ ok: body.code === 200, status: 200, json: () => Promise.resolve(body) }); };
+  try {
+    for (const url of ["/projects/p1", "/tasks?projectId=p1", "/sessions", "/projects/p1/requirements"]) await t.wbCache.read(url).catch(() => {});
+    const view = mount(t.WbCanvasPage, { t: KEY, projectId: "p1" });
+    await view.settle(10);
+    let tree = view.rerender();
+    const zoomOf = (tr) => { const out = []; collect(tr, out, (n) => String(n.props.className || "").split(/\s+/).indexOf("daw-wb-flow") >= 0); return out[0] && out[0].props["data-zoom"]; };
+    const labelOf = (tr) => { const out = []; collect(tr, out, (n) => n.props["data-zoom-label"] !== undefined); return out[0] ? [out[0].props["data-zoom-label"], texts(out[0])] : null; };
+    assert.equal(zoomOf(tree), "mid", "默认中景");
+    assert.deepEqual(labelOf(tree), ["mid", "[canvas.zoom.mid]"]);
+    flowProps.onViewportChange({ x: 10, y: 10, zoom: 0.3 });
+    tree = view.rerender();
+    assert.equal(zoomOf(tree), "far");
+    assert.deepEqual(labelOf(tree), ["far", "[canvas.zoom.far]"], "档位提示跟着变");
+    flowProps.onViewportChange({ x: 500, y: 500, zoom: 0.3 });
+    assert.equal(zoomOf(view.rerender()), "far", "只平移、缩放没变：档位不变");
+    flowProps.onViewportChange({ x: 0, y: 0, zoom: 1.4 });
+    assert.equal(zoomOf(view.rerender()), "near");
+    flowProps.onViewportChange(null);
+    flowProps.onViewportChange({ zoom: "x" });
+    assert.equal(zoomOf(view.rerender()), "near", "坏回调参数被忽略，不会把档位打回去");
+    flowProps.onInit({ getZoom: () => 0.2 });
+    assert.equal(zoomOf(view.rerender()), "far", "初始化时按实例当前缩放定档");
+    flowProps.onInit({ getZoom() { throw new Error("boom"); } });
+    assert.equal(zoomOf(view.rerender()), "far", "读不到缩放不抛、保持原档");
+    flowProps.onInit({});
+  } finally { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; }
+});
+
+test("缩放三档的 CSS：每一档都有规则；远景隐藏需求卡的下一步 / 计数与节点副标题并放大标题；中景把「下一步」限两行；近景不截断", () => {
+  const t = api();
+  const css = Array.isArray(t.WB_CSS) ? t.WB_CSS.join("\n") : String(t.WB_CSS);
+  const rule = (needle) => { const i = css.indexOf(needle); return i < 0 ? "" : css.slice(i, css.indexOf("}", i) + 1); };
+  assert.match(rule('.daw-wb-flow[data-zoom=far] .daw-wb-reqnode .daw-wb-req-next'), /display:none/, "远景隐藏下一步");
+  assert.ok(rule('.daw-wb-flow[data-zoom=far] .daw-wb-reqnode .daw-wb-req-next').includes(".daw-wb-node-sub"), "远景也隐藏节点副标题");
+  assert.match(rule('.daw-wb-flow[data-zoom=far] .daw-wb-reqnode-title'), /font-size:18px/, "远景放大标题，缩小后仍可读");
+  assert.match(rule('.daw-wb-flow[data-zoom=mid] .daw-wb-reqnode .daw-wb-req-next'), /line-clamp:2/);
+  assert.equal(css.includes('data-zoom=near] .daw-wb-reqnode .daw-wb-req-next'), false, "近景不对「下一步」加任何截断 / 隐藏");
+  assert.ok(css.includes(".daw-wb-zoomlevel{"));
+  for (const level of ["far", "mid", "near"]) assert.ok(t.WB_TEXT.zh["canvas.zoom." + level] && t.WB_TEXT.en["canvas.zoom." + level], level);
+  assert.ok(t.WB_TEXT.zh["canvas.zoom.hint"] && t.WB_TEXT.en["canvas.zoom.hint"]);
+});

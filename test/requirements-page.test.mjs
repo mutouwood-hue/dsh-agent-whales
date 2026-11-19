@@ -482,3 +482,90 @@ test("需求列表页顶部挂着 E2E 配置面板；新增文案键中英一致
   for (const v of ["auto", "manual"]) assert.ok(t.WB_TEXT.zh["req.cfg.trigger." + v] && t.WB_TEXT.en["req.cfg.trigger." + v]);
   for (const v of ["manual", "tabbit-cli", "computer-use"]) assert.ok(t.WB_TEXT.zh["req.cfg.driver." + v] && t.WB_TEXT.en["req.cfg.driver." + v]);
 });
+// ── 筛选 ────────────────────────────────────────────────────────────────────
+
+const frow = (reqId, stage, attention, extra) => Object.assign({ reqId, title: reqId, virtual: false, stage, attention: attention || "", tone: "neutral", next: "", tasks: 0, tasksDone: 0, prototypes: 0, updatedAt: 1 }, extra || {});
+const sampleRows = () => [
+  frow("clarify1", "clarify"), frow("design1", "design", "confirm-design"), frow("dev1", "develop"), frow("accept1", "accept"),
+  frow("mismatch1", "mismatch", "e2e-mismatch"), frow("limit1", "mismatch", "rework-limit"), frow("passed1", "passed"),
+  frow("unassigned", "develop", "", { virtual: true })
+];
+
+test("wbRequirementFilter：待我处理 / E2E 不符 / 进行中 / 已通过；未归类只在「全部」里；未知键回落成全部；坏数据不抛", () => {
+  const { wbRequirementFilter, wbRequirementFilterCounts } = api();
+  const ids = (key) => wbRequirementFilter(sampleRows(), key).map((r) => r.reqId);
+  assert.equal(ids("all").length, 8, "全部包含未归类");
+  assert.deepEqual(ids("attention"), ["design1", "mismatch1", "limit1"], "待确认设计 / 验收不符 / 返工超限");
+  assert.deepEqual(ids("mismatch"), ["mismatch1", "limit1"], "返工超限也在「不符」阶段，应当在 E2E 不符里");
+  assert.deepEqual(ids("active"), ["clarify1", "design1", "dev1", "accept1"], "进行中 = 澄清 / 设计 / 开发 / 验收");
+  assert.deepEqual(ids("passed"), ["passed1"]);
+  for (const key of ["attention", "mismatch", "active", "passed"]) assert.ok(!ids(key).includes("unassigned"), "未归类没有阶段可筛：" + key);
+  assert.equal(ids("weird").length, 8, "未知键 = 全部");
+  assert.equal(ids(undefined).length, 8);
+  assert.deepEqual(wbRequirementFilter(undefined, "attention"), []);
+  assert.deepEqual(wbRequirementFilter([null, undefined, 5], "mismatch"), [], "坏元素跳过");
+  assert.deepEqual(wbRequirementFilterCounts(sampleRows()), { all: 8, attention: 3, mismatch: 2, active: 4, passed: 1 });
+  assert.deepEqual(wbRequirementFilterCounts(undefined), { all: 0, attention: 0, mismatch: 0, active: 0, passed: 0 });
+  const original = sampleRows();
+  const frozen = JSON.stringify(original);
+  wbRequirementFilter(original, "attention");
+  assert.equal(JSON.stringify(original), frozen, "不改入参");
+});
+
+async function renderList(rows) {
+  const original = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ok({ requirements: rows })) });
+  const { mount, shim } = createMount();
+  const { plugin } = loadPlugin({ react: shim });
+  installDocumentStub();
+  const t = plugin.__test;
+  await t.wbCache.read("/projects/p1/requirements");
+  const view = mount(t.WbReqsPage, { t: (key) => KEY(key), projectId: "p1" });
+  await tick();
+  return { view, restore: () => { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; } };
+}
+const chips = (tree) => byTag(tree, "button").filter((b) => b.props["data-filter"]);
+const listed = (tree) => byClass(tree, "daw-wb-card").map((n) => texts(n));
+
+test("需求列表页：筛选条带数字；点「需要我处理」只剩待办卡；点「已通过」只剩通过的；没有符合时给提示；筛选条在没有需求时不出现", async () => {
+  const rows = [
+    reqView({ reqId: "r1", title: "表单导入", stage: "mismatch", attention: "e2e-mismatch", tone: "bad" }),
+    reqView({ reqId: "r2", title: "批量审批", stage: "design", attention: "confirm-design", tone: "info" }),
+    reqView({ reqId: "r3", title: "导入历史", stage: "clarify", attention: null, tone: "neutral" }),
+    reqView({ reqId: "r4", title: "对账", stage: "passed", attention: null, tone: "ok" })
+  ];
+  const d = await renderList(rows);
+  try {
+    assert.deepEqual(chips(d.view.tree).map((b) => texts(b)), ["[req.filter.all] 4", "[req.filter.attention] 2", "[req.filter.mismatch] 1", "[req.filter.active] 2", "[req.filter.passed] 1"]);
+    assert.equal(chips(d.view.tree).filter((b) => b.props["data-on"] === "true").length, 1, "只有一个选中");
+    assert.equal(listed(d.view.tree).length, 4);
+    chips(d.view.tree).find((b) => b.props["data-filter"] === "attention").props.onClick();
+    let tree = d.view.rerender();
+    assert.equal(listed(tree).length, 2);
+    assert.ok(listed(tree).every((s) => /批量审批|表单导入/.test(s)));
+    assert.equal(chips(tree).find((b) => b.props["data-on"] === "true").props["data-filter"], "attention", "选中态跟着走");
+    chips(tree).find((b) => b.props["data-filter"] === "passed").props.onClick();
+    tree = d.view.rerender();
+    assert.deepEqual(listed(tree).map((s) => /对账/.test(s)), [true]);
+  } finally { d.restore(); }
+
+  const calm = await renderList([reqView({ reqId: "r3", title: "导入历史", stage: "clarify", attention: null, tone: "neutral" })]);
+  try {
+    chips(calm.view.tree).find((b) => b.props["data-filter"] === "mismatch").props.onClick();
+    const tree = calm.view.rerender();
+    assert.equal(listed(tree).length, 0);
+    assert.match(texts(tree), /\[req\.filter\.empty\]/, "筛没了要说清楚，而不是显示「还没有需求」");
+    assert.doesNotMatch(texts(tree), /\[req\.empty\]/);
+  } finally { calm.restore(); }
+
+  const none = await renderList([]);
+  try {
+    assert.equal(chips(none.view.tree).length, 0, "没有需求时不显示筛选条");
+    assert.match(texts(none.view.tree), /\[req\.empty\]/);
+  } finally { none.restore(); }
+});
+
+test("筛选文案键中英都有", () => {
+  const t = api();
+  for (const key of ["req.filter.title", "req.filter.all", "req.filter.attention", "req.filter.mismatch", "req.filter.active", "req.filter.passed", "req.filter.empty"]) assert.ok(t.WB_TEXT.zh[key] && t.WB_TEXT.en[key], key);
+});
