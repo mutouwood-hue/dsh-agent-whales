@@ -148,7 +148,7 @@ describe("createBundledSkillProvider", () => {
 		// provider 直接读仓库副本也要能发现（等于验证 files 白名单漏项时的症状）
 		const provider = createBundledSkillProvider({ skillsRoot: pathToFileURL(join(pluginDir, "skills") + "\\"), providerName: "dsh-agent-whales" });
 		const names = provider.list().map((candidate) => candidate.name).sort();
-		assert.deepEqual(names, ["deep-effort", "whales-project-playbook"]);
+		assert.deepEqual(names, ["deep-effort", "whales-e2e-executor", "whales-project-playbook"]);
 	});
 });
 
@@ -179,7 +179,7 @@ describe("随包 skill 注册进宿主", () => {
 		const provider = registered[0];
 		assert.equal(provider.name, "dsh-agent-whales", "provider 名 = 包名（用户对得上来源）");
 		const candidates = provider.list();
-		assert.deepEqual(candidates.map((candidate) => candidate.name).sort(), ["deep-effort", "whales-project-playbook"], "协议层 + deep-effort 两个随包 skill 都要能发现");
+		assert.deepEqual(candidates.map((candidate) => candidate.name).sort(), ["deep-effort", "whales-e2e-executor", "whales-project-playbook"], "协议层 + deep-effort + E2E 执行器三个随包 skill 都要能发现");
 		// 卸载真的会发生：清理函数倒序跑（后注册的先清理）
 		assert.ok(cleanups.length > 0, "必须把 disposer 挂到 ctx.effect，否则热重载会重复注册");
 		for (const cleanup of cleanups.slice().reverse()) cleanup();
@@ -199,4 +199,27 @@ describe("随包 skill 注册进宿主", () => {
 			on: () => () => {}
 		}));
 	});
+});
+
+// ── E2E 执行器手册（需求主线 P6）：文档里写的工具名 / 状态词必须和代码一致，防止文档漂移 ──
+test("随包 skill whales-e2e-executor：frontmatter 合法；工具名、状态词、诊断词、限额与代码一致；写明不能做什么", async () => {
+  const text = readFileSync(join(pluginDir, "skills", "whales-e2e-executor", "SKILL.md"), "utf8");
+  const parsed = parseSkillFrontmatter(text);
+  assert.equal(parsed.data.name, "whales-e2e-executor", "目录名与 frontmatter 的 name 必须一致");
+  assert.ok((parsed.data.description || "").length > 0);
+  assert.ok((parsed.data.whenToUse || "").length > 0);
+  const e2e = await import("../lib/e2e.js");
+  assert.match(text, /whales_e2e_report/, "必须点名上报工具");
+  for (const status of e2e.E2E_REPORTABLE) assert.ok(text.includes("`" + status + "`") || text.includes(status), "上报状态词 " + status + " 必须写进手册");
+  for (const kind of e2e.E2E_DIAGNOSIS_KINDS) assert.ok(text.includes("`" + kind + "`"), "诊断类别 " + kind + " 必须写进手册");
+  assert.ok(text.includes("finish: true"));
+  assert.ok(text.includes("≤ " + e2e.E2E_LIMITS.shotBytes / (1024 * 1024) + "MB") && text.includes("≤ " + e2e.E2E_LIMITS.videoBytes / (1024 * 1024) + "MB"), "截图 / 录屏大小上限必须与代码一致");
+  assert.ok(text.includes("每条用例 ≤ " + e2e.E2E_LIMITS.shotsPerResult + " 个"), "附件个数上限必须与代码一致");
+  for (const ext of ["png", "jpg", "webp", "webm"]) assert.ok(text.includes(ext), "支持的扩展名 " + ext);
+  assert.match(text, /手动.*只有人能填/, "必须写明不能代报手动运行");
+  assert.match(text, /accepted/, "必须写明不能标可接受");
+  assert.match(text, /不要假装/, "没有 computer use 时不能假装");
+  assert.match(text, /不要把「我没跑成」报成 failed/, "error 与 failed 的区别必须写清");
+  // 手册里每个 caseId / runId 的例子要和真实格式对得上
+  assert.match(text, /run-[0-9a-f]{8}/);
 });
