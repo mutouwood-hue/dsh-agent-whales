@@ -23,6 +23,7 @@
     "lib/client.view.js",
     "lib/prototype-vocab.js",
     "lib/auto-dispatch.js",
+    "lib/requirements.js",
     "lib/view-host.js",
     "lib/view/*.js",
     "lib/view/LICENSE-deep-view",

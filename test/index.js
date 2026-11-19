@@ -47,3 +47,6 @@ import "./office.test.mjs";
 import "./view-host.test.mjs";
 import "./view-chunk.test.mjs";
 import "./view-e2e.test.mjs";
+// 需求主线 P0（2026-11-19）：需求实体的纯逻辑层——清洗 / 阶段推导 / 「未归类」迁移。
+import "./requirements.test.mjs";
+import "./requirements-http.test.mjs";

@@ -523,6 +523,25 @@ Enter 发送、Shift+Enter 换行、输入法组合中不发，「在对话中�
   普通对话（不在项目里）仍然什么都不显示（2026-11-10 验收反馈）。
 - **未验**：隔离实例没有模型，「agent 在普通对话里首次画图 → 自动建项目」只有单测（`index.test.mjs` 两条新用例）。
 
+### 需求主线 P0：需求实体与阶段推导（2026-11-19，设计稿见 `docs/plans/需求主线-业务流设计.md`）
+
+把零散功能串成一条线：**一个项目下多个需求**，每个需求从澄清走到验收。本期只做宿主侧的数据与读写，**界面与 agent 工具后续期次再接**。
+
+- **阶段是推出来的，不是手填的**（`lib/requirements.js`，纯函数）：澄清 → 设计 → 开发 → 验收 → 不符 / 通过。
+  依据只有事实：该需求下有没有原型帧、原型帧有没有在「确认设计」之后又被改过、任务是否全部已报完工、
+  最近一次 E2E 对**当前设计版本**的结论。旧版本的运行结果不能拿来充数；返工次数到上限转人工（`attention: "rework-limit"`）。
+- **存储**：`projects.json` 顶层多一张 `requirements` 表（与 `tasks` 平级，旧数据不动）；`e2eRuns` 表本期只读不写（P4 才有）。
+- **老数据不迁移**：没有 `requirementId` 的任务 / 原型帧并入读时派生的虚拟需求「未归类」（`reqId: "unassigned"`，
+  只读、不可改、排在最后）；没有孤儿数据时它不出现。
+- **路由**（`/agent-whales/api` 下；读无 token，写带 `x-whales-token`）：
+  `GET|POST /projects/:id/requirements`、`GET|PATCH /projects/:id/requirements/:reqId`。
+  PATCH 必须带 `expectedRevision`（过期 `40902`，不覆盖）；标题 / 目标 / 验收点过长直接拒绝而不是悄悄截断；
+  `composerSessionId` 必须是项目成员（`40703`），缺省 = 项目主对话。
+- **未做**（后续期次）：任务 / 原型帧 / 提案写入时带 `requirementId`（P1）、确认设计版本（P2）、界面（P3）、E2E（P4–P6）。
+- 测试：`test/requirements.test.mjs`（33 例：六个阶段、「设计优先」、旧版本运行不充数、「可接受」算通过、未归类并入）+
+  `test/requirements-http.test.mjs`（真 HTTP：建 / 列 / 取 / 改、CAS、越权、重启持久化）；
+  五种变异（拿掉设计优先级 / 旧版本充数 / 可接受不算通过 / 不并入未归类 / 不判返工上限）都会让测试变红。
+
 ### 原型帧 + 组件库节点（PRD v2.2 · 波次 6，2026-11-17）
 
 - **架构（已确认）**：React Flow 是底座，Puck（`@puckeditor/core` 0.24，MIT）只活在「原型帧」节点里。
