@@ -54,18 +54,27 @@ test("工作台路由：解析 / 生成互为逆运算，非法片段回落列�
   const { wbRouteOf, wbPathOf } = testApi();
   assert.deepEqual(wbRouteOf("/"), { kind: "list" });
   assert.deepEqual(wbRouteOf("/inbox"), { kind: "inbox" });
-  assert.deepEqual(wbRouteOf("/handoffs"), { kind: "handoffs" });
-  assert.deepEqual(wbRouteOf("/events"), { kind: "events" });
-  assert.deepEqual(wbRouteOf("/p/proj-1/tasks"), { kind: "workbench", projectId: "proj-1", tab: "tasks" });
+  // 重新规划 R3 / R4：发送记录、事件台并入「需要我处理」；团队、首次体验页已删；任务 + 执行并入「表格」；简报并入「需求」。
+  assert.deepEqual(wbRouteOf("/handoffs"), { kind: "inbox" });
+  assert.deepEqual(wbRouteOf("/events"), { kind: "inbox" });
+  assert.deepEqual(wbRouteOf("/team"), { kind: "list" });
+  assert.deepEqual(wbRouteOf("/first"), { kind: "list" });
+  assert.deepEqual(wbRouteOf("/settings"), { kind: "settings" });
+  assert.deepEqual(wbRouteOf("/p/proj-1/tasks"), { kind: "workbench", projectId: "proj-1", tab: "table" });
+  assert.deepEqual(wbRouteOf("/p/proj-1/exec"), { kind: "workbench", projectId: "proj-1", tab: "table" });
+  assert.deepEqual(wbRouteOf("/p/proj-1/brief"), { kind: "workbench", projectId: "proj-1", tab: "reqs" });
+  assert.deepEqual(wbRouteOf("/p/proj-1/table"), { kind: "workbench", projectId: "proj-1", tab: "table" });
+  assert.deepEqual(wbRouteOf("/p/proj-1/__proto__"), { kind: "workbench", projectId: "proj-1", tab: "canvas" }, "原型链上的名字不是页签");
   assert.deepEqual(wbRouteOf("/p/proj-1"), { kind: "workbench", projectId: "proj-1", tab: "canvas" });
   assert.deepEqual(wbRouteOf("/p/proj-1/nope"), { kind: "workbench", projectId: "proj-1", tab: "canvas" }, "未知 tab 回落 canvas");
   assert.deepEqual(wbRouteOf("/p"), { kind: "list" }, "缺项目 id 不能进工作台");
   assert.deepEqual(wbRouteOf("/nope"), { kind: "list" });
   assert.deepEqual(wbRouteOf(""), { kind: "list" });
   assert.equal(wbPathOf({ kind: "list" }), "/");
-  assert.equal(wbPathOf({ kind: "workbench", projectId: "proj-1", tab: "brief" }), "/p/proj-1/brief");
+  assert.equal(wbPathOf({ kind: "workbench", projectId: "proj-1", tab: "table" }), "/p/proj-1/table");
   assert.equal(wbPathOf({ kind: "inbox" }), "/inbox");
-  assert.equal(wbPathOf(wbRouteOf("/p/proj-1/exec")), "/p/proj-1/exec", "round-trip 必须稳定");
+  assert.equal(wbPathOf(wbRouteOf("/p/proj-1/table")), "/p/proj-1/table", "round-trip 必须稳定");
+  assert.equal(wbPathOf(wbRouteOf("/p/proj-1/exec")), "/p/proj-1/table", "旧链接 round-trip 后落到新页签，且之后稳定");
 });
 
 // ── 3. token 估算与简报预算 ────────────────────────────────────────────────
@@ -557,9 +566,14 @@ test("画布位置：hydrate 容忍坏数据（宿主 5xx / 空响应）", () =>
 });
 
 test("画布路由：记住上次选择，无记录时仍是列表（D10 两条都要）", () => {
-  const seeded = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": JSON.stringify({ kind: "workbench", projectId: "proj-9", tab: "exec" }) } });
+  const seeded = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": JSON.stringify({ kind: "workbench", projectId: "proj-9", tab: "office" }) } });
   const route = seeded.plugin.__test.wbRoute;
-  assert.deepEqual(route.get(), { kind: "workbench", projectId: "proj-9", tab: "exec" }, "必须 recall 上次的项目与 tab");
+  assert.deepEqual(route.get(), { kind: "workbench", projectId: "proj-9", tab: "office" }, "必须 recall 上次的项目与 tab");
+  // 旧版本记住的页签：任务 / 执行 → 表格，简报 → 需求（R4）
+  for (const [old, now] of [["tasks", "table"], ["exec", "table"], ["brief", "reqs"], ["canvas", "canvas"], ["reqs", "reqs"], ["table", "table"], ["nope", "canvas"], ["__proto__", "canvas"], ["constructor", "canvas"]]) {
+    const r = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": JSON.stringify({ kind: "workbench", projectId: "proj-9", tab: old }) } }).plugin.__test.wbRoute.get();
+    assert.deepEqual(r, { kind: "workbench", projectId: "proj-9", tab: now }, "旧页签 " + old + " → " + now);
+  }
   const dirty = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": JSON.stringify({ kind: "nope", projectId: 5 }) } });
   assert.deepEqual(dirty.plugin.__test.wbRoute.get(), { kind: "list" }, "非法 kind 回落 list");
   const broken = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": "{不是 JSON" } });
@@ -570,11 +584,11 @@ test("画布路由：每次 set 都落盘，首次无记录不进画布", () => 
   const loaded = loadPlugin();
   const api = loaded.plugin.__test;
   assert.deepEqual(api.wbRoute.get(), { kind: "list" }, "首次必须是列表——不默认进画布（D10）");
-  api.wbRoute.project("proj-1", "tasks");
-  assert.deepEqual(api.wbRoute.get(), { kind: "workbench", projectId: "proj-1", tab: "tasks" });
+  api.wbRoute.project("proj-1", "table");
+  assert.deepEqual(api.wbRoute.get(), { kind: "workbench", projectId: "proj-1", tab: "table" });
   const raw = loaded.storage.get("dsh-agent-whales.last-view");
   assert.ok(raw !== undefined, "切换视图必须写盘，否则刷新回不去");
-  assert.equal(JSON.parse(raw).tab, "tasks");
+  assert.equal(JSON.parse(raw).tab, "table");
 });
 
 // ── 13. 画布件契约：小地图 + 网格开关（R2 返工）────────────────────────────

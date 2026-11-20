@@ -62,6 +62,8 @@ import "./settings-advanced.test.mjs";
 import "./canvas-replan.test.mjs";
 // 重新规划 R3：菜单 6 → 3、活动分区。
 import "./menu-replan.test.mjs";
+// 重新规划 R4：页签 6 → 4。
+import "./tabs-replan.test.mjs";
 // 需求主线 P4：E2E 协议与状态机。
 import "./e2e-protocol.test.mjs";
 import "./e2e-runs-http.test.mjs";
