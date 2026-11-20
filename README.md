@@ -240,8 +240,6 @@ DeepSeek Harness Web UI 的「智能体鲸鱼」插件：**每多一个正在干
 | `whales_visit_list` | 列出可串门的会话：id / 标题 / 是否在跑 / 所属工作区。只读。 |
 | `whales_visit_send` | 给另一个会话说话。**默认插话**（`mode: "steer"`）：它正在跑的那一轮会在**下一个步边界**注入你这句话，不用等整轮跑完；要排队等它跑完再处理就显式传 `mode: "queue"`。`waitForReply=true` 会阻塞等它回话。 |
 | `whales_visit_read` | 读某个会话最近的对话文本（默认 20 行，上限 100）。**只读活会话**（读内存日志）。 |
-| `whales_visit_trace` | 回放某个会话最近几轮**是怎么干的**：每轮投了什么任务、说过什么、调过哪些工具、哪一步失败与原因、每轮终态。只读、不唤醒、不产生模型调用。走宿主 `sessionQuery.readSession()`——**活会话读内存、离线会话也能读**（读到的是落盘部分）；服务缺失时退到活会话内存快照。`turns` 默认 2、上限 20，正文按条截断并有总量护栏。 |
-| `whales_visit_resume` | 把持久化的离线会话重新拉上线（`agents.resume`，幂等：已在线直接返回），之后才能给它发消息。 |
 
 > **投递方式默认是「插话」（steer）**，2026-10-31 按用户决定改的：智能体之间互相说话不该排队等对方整轮跑完。
 > 宿主契约里 `steer` 对 **running** 的 agent 在**下一个步边界**消费、对 **idle** 的直接开一轮——它不会打断
@@ -895,11 +893,7 @@ W2 审核发现的缺口：画布此前只有人能在浏览器里摆，**agent 
 
 | 工具 | 作用 |
 |---|---|
-| `whales_canvas_list` | 列有画布页的项目 + revision + 节点数（read） |
 | `whales_canvas_inspect` | 看某个项目的画布：位置 + 关联线 + 成员（read，项目不存在 `40401`） |
-| `whales_canvas_layout` | 整体覆盖位置；`expectedRevision` 过期回 `40902`，**不覆盖**（edit） |
-| `whales_canvas_link` | 建无向关联线（同项目、自连 `40001`、重复幂等）（edit） |
-| `whales_canvas_unlink` | 删关联线（删不存在的也当成功，幂等）（edit） |
 
 **没有 `node_add` / `node_delete`**：画布节点是**派生**的——上下文节点来自任务落点
 （`worktree` / `execRoot`，§55.3.1）、Agent 节点来自项目成员、Composer 来自主会话。
@@ -1496,3 +1490,24 @@ node _scratch/preview.mjs
   实时 HTTP 未跑；探针里 **`mcp__` 调用 0 条**（当时没连 MCP），所以「guard 真的拦下未连接的
   MCP」只有单测覆盖，要连一个 MCP 再跑一轮才算闭环。
 - 未验证 · 画布上断开 MCP 服务：占位按钮只负责引导，真正断开仍要在 DSH 设置里做。
+
+## 重新规划 R1：agent 工具 17 → 12（2026-11-20）
+
+删除清单与理由见 [docs/plans/重规划-删除清单.md](docs/plans/重规划-删除清单.md)。**上面各节里出现的 `whales_canvas_list / layout / link / unlink`、`whales_visit_resume`、`whales_visit_trace` 已不再存在**，对应关系：
+
+| 原工具 | 现在 |
+| --- | --- |
+| `whales_canvas_list` | 删。`whales_canvas_inspect` 的 `projectId` 可省略（= 调用者所在项目） |
+| `whales_canvas_layout` | 删。位置由人在画布上拖（HTTP `PUT /canvas` 不变） |
+| `whales_canvas_link` / `_unlink` | 删。关联线由系统建（成员入项目自动与主对话连线），人在画布上拉线 / 删线走 `POST/DELETE /projects/:id/links`（不变）。agent 要和另一个普通成员通话而没有线时，报错（`40707`）会明确告诉它「让用户在画布上连，或通过主对话转达」 |
+| `whales_visit_resume` | 并入 `whales_visit_send`：对方离线**自动唤醒**再发，输出 `resumed:true`；唤醒失败 / 唤醒后仍不在线 → 报错且一条消息也不发。**访问闸在唤醒之前**：被拦下的发送不会触发唤醒；同一会话并发发送只唤醒一次 |
+| `whales_visit_trace` | 并入 `whales_visit_read`：`trace:true` 看回合轨迹，`turns` 只配 trace、`limit` 只配文字行，混用报错 |
+| —（新增）`whales_requirement` | agent 读 / 建 / 改需求：`list`（摘要）/ `get`（含验收点全文）/ `create` / `update`（可带 `expectedRevision`）。**只能动标题 / 目标 / 验收点**；负责人、返工上限、Composer、设计版本、阶段这些字段一律拒绝，错误信息说明「只有人能设置，请让用户在需求页里改」。只读写调用者所在项目的需求；虚拟的「未归类」读不到也改不了 |
+
+保留的 12 个：`whales_brief_read` / `_write`、`whales_canvas_inspect`、`whales_e2e_report`、`whales_flow_draw` / `_read`、`whales_propose_tasks`、`whales_prototype_draw`、`whales_requirement`、`whales_visit_list` / `_read` / `_send`。
+
+**测试**：全量 840 项通过（上一次 830：新增 10 例，迁移 / 合并若干例）。新增 `test/tools-slim.test.mjs`（清单恰好 12 个、随包 skill 里点名的工具必须都真实注册 [防文档漂移]、`whales_requirement` 的正常路径 / 越权字段 / 边界、inspect 省略 projectId、read 的 trace 选项、send 的自动唤醒与访问闸顺序）。
+既有测试里依赖被删工具的断言**没有简单删掉**：串门工具开关（5 → 3 个，倍数 10 → 6）、resume 的幂等语义（迁到 send，并新增并发去重）、trace 的 25 条用例（经适配器改走 `read` + `trace:true`，一条没少）、link / unlink 的语义（改成直接打路由）。
+**变异验证**：二十多种变异（send 永不唤醒 / 总是唤醒 / 在线也唤醒 / 先唤醒后过闸 / 不报「未在线」、read 的三种参数混用、`whales_requirement` 放行负责人 / 返工上限 / 未知字段 / 跨项目 / 虚拟需求、CAS 失效、inspect 默认项目等）全部变红；其中两条因为测试写得太宽（正则两种报错都放行）或前提没造出来（「未归类」根本不存在，断言空转）最初没被抓到，收紧后变红。
+
+**没验证 / 没做**：真模型是否会用好这 12 个工具（尤其是「离线自动唤醒」后对方真实恢复的表现）只有假宿主的单测；`whales_requirement` 的 agent 调用路径同样没有真模型验证（C1 会一起验）。

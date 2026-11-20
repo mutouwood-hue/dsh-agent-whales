@@ -41,11 +41,12 @@ description: dsh-agent-whales 的项目协作协议手册——在一个鲸鱼�
 - 「已产出 ≠ 已送达」：做完了不等于对方知道了；要通报就走串门（§4），别假设。
 - 任务板与画布是**派生视图**：真相在 `projects.json` 的任务表里。
 
-## 3. 画布：只能摆位置、连关联线
+## 3. 画布：只读
 
-`whales_canvas_inspect` 看位置 / 关联线 / 成员；`whales_canvas_layout` 整体覆盖位置
-（带 `expectedRevision`，过期回 `40902` 且**不覆盖**，重读再写）；`whales_canvas_link` /
-`whales_canvas_unlink` 管**会话关联线**。
+`whales_canvas_inspect` 看位置 / 关联线 / 成员（省略 `projectId` = 你所在的项目）。**你不能改画布**：
+节点位置由人在画布上拖，**会话关联线由系统建**——成员加入项目时自动与主对话连一条线；
+两个普通成员之间要通话，得**让用户在画布上把它们连起来**（或通过主对话转达）。
+需求（标题 / 目标 / 验收点）用 `whales_requirement` 读写，但负责人、返工上限、确认设计、标可接受**只有人能做**。
 
 - **没有 `node_add` / `node_delete`**：节点是派生的——上下文节点来自任务落点
   （`worktree` / `execRoot`，入库前已做路径归一，同一目录只出一个节点）、Agent 节点来自项目成员、
@@ -58,16 +59,14 @@ description: dsh-agent-whales 的项目协作协议手册——在一个鲸鱼�
 | 工具 | 什么时候用 |
 | --- | --- |
 | `whales_visit_list` | 发消息前先确认目标（id / 标题 / 在不在跑 / 哪个工作区） |
-| `whales_visit_send` | 说话。**默认插话（steer）**：对方在跑的那一轮在下一个步边界注入，不用等整轮；要排队显式 `mode:"queue"`；`waitForReply:true` 阻塞等回话 |
-| `whales_visit_read` | 读对方最近的对话文本行（默认 20 行，上限 100）——**只读活会话** |
-| `whales_visit_trace` | 回放对方最近几轮**怎么干的**：任务 / 正文 / 调过哪些工具 / 哪一步失败与原因 / 每轮终态。`turns` 默认 2、上限 20。活会话读内存、离线会话也读得到；不唤醒、不产生模型调用 |
-| `whales_visit_resume` | 把离线会话拉上线（幂等），之后才能发消息 |
+| `whales_visit_send` | 说话。**默认插话（steer）**：对方在跑的那一轮在下一个步边界注入，不用等整轮；要排队显式 `mode:"queue"`；`waitForReply:true` 阻塞等回话。**对方离线会自动唤醒**再发（输出 `resumed:true`）；唤醒失败就报错、一条消息也不发 |
+| `whales_visit_read` | 读对方最近的对话文本行（默认 20 行，上限 100）——**只读活会话**。`trace:true` 改看**回合轨迹**：任务 / 正文 / 调过哪些工具 / 哪一步失败与原因 / 每轮终态；`turns` 默认 2、上限 20；活会话读内存、离线会话也读得到；不唤醒、不产生模型调用。`turns` 只配 `trace`，`limit` 只配文字行，混用会报错 |
 
 **访问闸**（与发送同权）：只要一方在项目里，就必须**同项目 + 双方是成员 + 有关联线**
 （`40703` / `40704` / `40707`）；双方都不在任何项目里才保持旧的自由串门。
 拿不到执行上下文身份直接 `40301`，不静默跳过。
 
-排查「它怎么把自己搞失败的」用 `whales_visit_trace`，别去 `message_worker` 式地追问——
+排查「它怎么把自己搞失败的」用 `whales_visit_read` 加 `trace:true`，别去 `message_worker` 式地追问——
 那会多开一轮，还可能把对方带偏。
 
 ## 5. 事件台账与只读降级
@@ -95,9 +94,9 @@ description: dsh-agent-whales 的项目协作协议手册——在一个鲸鱼�
    ↓
 派活：whales_propose_tasks（结构化、带依赖与写入范围）→ 等人在画布确认
    ↓
-执行中：需要协作先 whales_canvas_link 关联线，再 whales_visit_send（默认插话）
+执行中：需要协作用 whales_visit_send（默认插话；对方离线会自动唤醒；没有关联线就让用户在画布上连）
    ↓
-复盘：whales_visit_trace 回放轨迹（失败在哪一步、为什么）
+复盘：whales_visit_read 加 trace:true 回放轨迹（失败在哪一步、为什么）
    ↓
 留记忆：whales_brief_write 写决定与理由（CAS，不记流水账）
 ```

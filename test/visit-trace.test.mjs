@@ -1,5 +1,8 @@
 /**
- * 回合级轨迹：foldTurns / renderTranscript 纯函数 + whales_visit_trace 工具。
+ * 回合级轨迹：foldTurns / renderTranscript 纯函数 + 工具面。
+ *
+ * 重新规划 R1：原 whales_visit_trace 已并入 whales_visit_read（trace:true）。下面「工具面」的全部用例
+ * 通过一个适配器（traceOf）改走 read+trace:true，断言一条没少。
  *
  * 两条纪律照旧：
  *   · fixture 用**真实落盘会话**解出来的事件（test/fixtures/real-session-events.json），
@@ -253,7 +256,7 @@ describe("renderTranscript：体积护栏", () => {
 	});
 });
 
-// ── 工具面：whales_visit_trace ────────────────────────────────────────────
+// ── 工具面：whales_visit_read(trace:true) ────────────────────────────────────────────
 //
 // 与 whales_visit_read 的分工：read 给「谁说了什么」的文本行（只读活会话），
 // trace 给回合结构（走 sessionQuery，活会话读内存、离线会话读盘，都不唤醒）。
@@ -288,6 +291,17 @@ function mountTraceHost({ live = new Map(), query } = {}) {
 	return registered;
 }
 
+/**
+ * 原 whales_visit_trace 的调用形状 → 合并后的 whales_visit_read(trace:true)。
+ * execute 补上 trace:true；output 直接用 read 的（read 的 render 能渲染轨迹形状）。
+ */
+function traceOf(registered) {
+	const read = registered.whales_visit_read;
+	assert.ok(read, "read 工具必须注册（trace 已并入它）");
+	assert.equal(registered.whales_visit_trace, undefined, "trace 工具已不再单独注册");
+	return { execute: (args, exec) => read.execute(Object.assign({}, args, { trace: true }), exec), output: read.output, parameters: read.parameters };
+}
+
 /** 一个跑完的会话：一轮、两句用户、一次失败工具。 */
 function finishedEvents() {
 	return [
@@ -301,7 +315,7 @@ function finishedEvents() {
 	];
 }
 
-describe("whales_visit_trace：读取路径", () => {
+describe("whales_visit_read(trace:true)：读取路径", () => {
 	test("走 sessionQuery.readSession：活会话读内存、离线会话也能读，且不唤醒", async () => {
 		const dir = isolatedStore("query");
 		try {
@@ -313,8 +327,8 @@ describe("whales_visit_trace：读取路径", () => {
 				}
 			};
 			const registered = mountTraceHost({ query });
-			const tool = registered.whales_visit_trace;
-			assert.ok(tool, "trace 工具必须注册");
+			const tool = traceOf(registered);
+			assert.ok(tool, "trace（read 的 trace 模式）必须可用");
 
 			// 目标会话根本不在 agents 里（离线）：只有 sessionQuery 能读到
 			const result = await tool.execute({ sessionId: "s-offline" }, { agent: { id: "caller" } });
@@ -325,7 +339,7 @@ describe("whales_visit_trace：读取路径", () => {
 			assert.match(result.text, /## 回合 1 · completed/);
 			assert.match(result.text, /pwsh（失败：TOOL_TIMEOUT）/);
 			assert.match(result.text, /超时了，换条路/);
-			assertLossless(result, "whales_visit_trace");
+			assertLossless(result, "whales_visit_read(trace)");
 			assert.equal(tool.output.render({}, result).length, 1, "render 给一个 text block");
 			assert.equal(tool.output.render({}, result)[0].type, "text");
 		} finally {
@@ -338,7 +352,7 @@ describe("whales_visit_trace：读取路径", () => {
 		try {
 			const events = [{ seq: 1, type: "session/title", data: { title: "修 bug 的会话" } }, ...finishedEvents()];
 			const registered = mountTraceHost({ query: { readSession: async () => ({ events }) } });
-			const result = await registered.whales_visit_trace.execute({ sessionId: "s1" }, { agent: { id: "caller" } });
+			const result = await traceOf(registered).execute({ sessionId: "s1" }, { agent: { id: "caller" } });
 			assert.equal(result.name, "修 bug 的会话");
 			assert.match(result.text, /会话 s1（修 bug 的会话）/);
 		} finally {
@@ -351,7 +365,7 @@ describe("whales_visit_trace：读取路径", () => {
 		try {
 			const live = new Map([["s-live", { id: "s-live", session: { events: finishedEvents() } }]]);
 			const registered = mountTraceHost({ live, query: undefined });
-			const result = await registered.whales_visit_trace.execute({ sessionId: "s-live" }, { agent: { id: "caller" } });
+			const result = await traceOf(registered).execute({ sessionId: "s-live" }, { agent: { id: "caller" } });
 			assert.equal(result.totalTurns, 1);
 			assert.match(result.text, /pwsh（失败：TOOL_TIMEOUT）/);
 		} finally {
@@ -364,7 +378,7 @@ describe("whales_visit_trace：读取路径", () => {
 		try {
 			const registered = mountTraceHost({ live: new Map(), query: undefined });
 			await assert.rejects(
-				() => registered.whales_visit_trace.execute({ sessionId: "s-gone" }, { agent: { id: "caller" } }),
+				() => traceOf(registered).execute({ sessionId: "s-gone" }, { agent: { id: "caller" } }),
 				/whales_visit_resume/,
 				"必须指出补救动作"
 			);
@@ -380,7 +394,7 @@ describe("whales_visit_trace：读取路径", () => {
 				query: { readSession: async () => { throw new Error("no such session"); } }
 			});
 			await assert.rejects(
-				() => registered.whales_visit_trace.execute({ sessionId: "s-missing" }, { agent: { id: "caller" } }),
+				() => traceOf(registered).execute({ sessionId: "s-missing" }, { agent: { id: "caller" } }),
 				/no such session/
 			);
 		} finally {
@@ -393,7 +407,7 @@ describe("whales_visit_trace：读取路径", () => {
 		try {
 			const registered = mountTraceHost({ query: { readSession: async () => ({ session: {} }) } });
 			await assert.rejects(
-				() => registered.whales_visit_trace.execute({ sessionId: "s-bad" }, { agent: { id: "caller" } }),
+				() => traceOf(registered).execute({ sessionId: "s-bad" }, { agent: { id: "caller" } }),
 				/缺 events 数组/
 			);
 		} finally {
@@ -402,12 +416,12 @@ describe("whales_visit_trace：读取路径", () => {
 	});
 });
 
-describe("whales_visit_trace：入参与访问闸", () => {
+describe("whales_visit_read(trace:true)：入参与访问闸", () => {
 	test("turns 默认 2、范围 1..20，字符串/小数/越界一律拒绝", async () => {
 		const dir = isolatedStore("args");
 		try {
 			const registered = mountTraceHost({ query: { readSession: async () => ({ events: finishedEvents() }) } });
-			const tool = registered.whales_visit_trace;
+			const tool = traceOf(registered);
 			await assert.rejects(() => tool.execute({ sessionId: "s1", turns: "3" }, { agent: { id: "caller" } }), /1 到 20 的整数/);
 			await assert.rejects(() => tool.execute({ sessionId: "s1", turns: 1.5 }, { agent: { id: "caller" } }), /1 到 20 的整数/);
 			await assert.rejects(() => tool.execute({ sessionId: "s1", turns: 0 }, { agent: { id: "caller" } }), /1 到 20 的整数/);
@@ -427,7 +441,7 @@ describe("whales_visit_trace：入参与访问闸", () => {
 		try {
 			const registered = mountTraceHost({ query: { readSession: async () => ({ events: finishedEvents() }) } });
 			await assert.rejects(
-				() => registered.whales_visit_trace.execute({ sessionId: "s1" }, {}),
+				() => traceOf(registered).execute({ sessionId: "s1" }, {}),
 				/40301/
 			);
 		} finally {
@@ -459,7 +473,7 @@ describe("whales_visit_trace：入参与访问闸", () => {
 				}
 			}), "utf8");
 			const registered = mountTraceHost({ query: { readSession: async () => ({ events: finishedEvents() }) } });
-			const tool = registered.whales_visit_trace;
+			const tool = traceOf(registered);
 
 			// 同项目、都是成员、但没有关联线 → 40707
 			await assert.rejects(

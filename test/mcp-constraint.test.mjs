@@ -60,7 +60,7 @@ test("mcpServerOfTool：只认 mcp__ 前缀", () => {
 	assert.equal(mcpServerOfTool("mcp__my-server__do_thing"), "my-server");
 	assert.equal(mcpServerOfTool("pwsh"), "", "原生工具不是 MCP");
 	assert.equal(mcpServerOfTool("read"), "");
-	assert.equal(mcpServerOfTool("whales_canvas_list"), "");
+	assert.equal(mcpServerOfTool("whales_canvas_inspect"), "");
 	assert.equal(mcpServerOfTool("mcp_"), "", "只有前缀没有服务名");
 	assert.equal(mcpServerOfTool("mcp__pencil"), "", "缺第二段下划线");
 	assert.equal(mcpServerOfTool("mcp__pencil__a__b"), "pencil", "raw 里还有下划线不影响取服务名");
@@ -86,7 +86,7 @@ test("guard：没连过这个服务的会话，MCP 工具被拒且理由是给�
 
 test("guard：只拦 MCP 工具，bash/文件读写永远放行", () => {
 	seedStore(LINKED);
-	for (const name of ["pwsh", "read", "edit", "skill", "whales_canvas_list", "whales_visit_send"]) {
+	for (const name of ["pwsh", "read", "edit", "skill", "whales_canvas_inspect", "whales_visit_send"]) {
 		assert.equal(mcpConstraintGuard({ name, agent: { id: "session-s1" } }), undefined, name + " 必须放行");
 	}
 });

@@ -934,7 +934,7 @@ test("串门：session_bridge_* 的工具都翻译成短句，且不超过 5 字
     assert.ok(text.length <= 5, name + " 的文案要 ≤5 字，实际「" + text + "」");
   }
 });
-test("串门：注册三个工具，发话走 followup/steer，读话折叠成文本行", async () => {
+test("串门：注册 list / send / read 三个工具（resume 已并入 send、trace 已并入 read），发话走 followup/steer，读话折叠成文本行", async () => {
   const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
   const registered = {};
   const followups = [];
@@ -965,7 +965,7 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
     effect: (run) => { run(); return () => {}; }
   });
 
-  assert.deepEqual(Object.keys(registered).sort(), ["show_view", "whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_canvas_layout", "whales_canvas_link", "whales_canvas_list", "whales_canvas_unlink", "whales_e2e_report", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_visit_list", "whales_visit_read", "whales_visit_resume", "whales_visit_send", "whales_visit_trace"]);
+  assert.deepEqual(Object.keys(registered).sort(), ["show_view", "whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_e2e_report", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_requirement", "whales_visit_list", "whales_visit_read", "whales_visit_send"]);
   assert.equal(typeof registered.whales_visit_send.output.render, "function", "工具必须带 output.render");
   // 网关按 OpenAI function calling 校验：parameters 必须是 { type: "object", properties } 的 JSON Schema。
   // 传「属性表」或空对象会让整轮请求 400（真实事故：whales_visit_list 变成 type: null）。
@@ -994,7 +994,10 @@ test("串门：注册三个工具，发话走 followup/steer，读话折叠成�
   assert.deepEqual(read.messages.map((row) => row.role), ["user", "assistant"]);
   assert.equal(read.messages[1].text, "看过了");
 
-  await assert.rejects(() => registered.whales_visit_send.execute({ sessionId: "nope", message: "x" }, { agent: { id: "caller-client" } }), /不活着/);
+  // 对方不在线：现在 send 会先尝试自动唤醒；这个假宿主没有 agents.resume，所以如实报「无法恢复」，而不是谎称已送达。
+  const deliveredBefore = followups.length + steers.length;
+  await assert.rejects(() => registered.whales_visit_send.execute({ sessionId: "nope", message: "x" }, { agent: { id: "caller-client" } }), /无法恢复离线会话/);
+  assert.equal(followups.length + steers.length, deliveredBefore, "唤醒不了：这一次一条消息也没发出去");
   await assert.rejects(() => registered.whales_visit_send.execute({ sessionId: "s2", message: "  " }, { agent: { id: "caller-client" } }), /不能为空/);
 });
 test("心情帧：每 3 个 tick 换一次表情，收工只走抱膝", async () => {
@@ -1083,12 +1086,13 @@ test("串门：工具返回值必须是 lossless JSON（不能带 undefined 键�
   assertLossless(sent);
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), sent, "序列化往返必须等价");
 });
-test("串门：resume 幂等，离线会话才会真的拉起", async () => {
+test("串门：离线会话由 send 自动唤醒——在线不重复 resume、离线才拉起且只拉一次（并发去重）、用 resumeSessionId 传参、结果 lossless（原 whales_visit_resume 的幂等语义迁到这里）", async () => {
   const host = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
   const registered = {};
   const resumed = [];
+  const sent = [];
   let live = new Set(["already-on"]);
-  const liveAgent = (id) => (live.has(id) ? { id, status: "idle", session: { events: [] } } : undefined);
+  const liveAgent = (id) => (live.has(id) ? { id, status: "idle", session: { events: [] }, steer: (m) => sent.push([id, "steer"]), followup: (m) => sent.push([id, "followup"]) } : undefined);
 
   host.apply({
     get: (name) => {
@@ -1099,6 +1103,7 @@ test("串门：resume 幂等，离线会话才会真的拉起", async () => {
           list: () => [...live].map(liveAgent),
           resume: async (options) => {
             resumed.push(options.resumeSessionId);
+            await new Promise((resolve) => setTimeout(resolve, 15)); // 让并发调用真的重叠
             live.add(options.resumeSessionId);
             return { agent: liveAgent(options.resumeSessionId), dispose: async () => {} };
           }
@@ -1110,23 +1115,33 @@ test("串门：resume 幂等，离线会话才会真的拉起", async () => {
     effect: (run) => { run(); return () => {}; }
   });
 
-  const tool = registered.whales_visit_resume;
-  assert.ok(tool, "必须注册 whales_visit_resume");
+  assert.equal(registered.whales_visit_resume, undefined, "resume 工具已并入 send，不再单独注册");
+  const tool = registered.whales_visit_send;
+  assert.ok(tool, "必须注册 whales_visit_send");
   assert.equal(tool.parameters.type, "object", "parameters 必须是 object schema");
 
-  const already = await tool.execute({ sessionId: "already-on" }, {});
-  assert.deepEqual(already, { sessionId: "already-on", live: true, resumed: false }, "在线会话不重复 resume");
-  assert.equal(resumed.length, 0);
+  const already = await tool.execute({ sessionId: "already-on", message: "hi" }, {agent: { id: "caller" }});
+  assert.equal(already.resumed, undefined, "在线会话：不 resume，输出里没有 resumed");
+  assert.equal(resumed.length, 0, "在线会话不重复 resume");
 
-  const offline = await tool.execute({ sessionId: "offline-1" }, {});
+  const offline = await tool.execute({ sessionId: "offline-1", message: "hi" }, {agent: { id: "caller" }});
   assert.deepEqual(resumed, ["offline-1"], "resume 用 resumeSessionId 传参");
-  assert.deepEqual(offline, { sessionId: "offline-1", live: true, resumed: true });
+  assert.equal(offline.resumed, true);
+  assert.equal(offline.accepted, true);
+  assert.deepEqual(sent.filter(([id]) => id === "offline-1").length, 1, "唤醒后消息送到了");
 
-  await assert.rejects(() => tool.execute({ sessionId: "  " }, {}), /不能为空/);
+  // 并发：同一个离线会话同时来两条 send，只会唤醒一次
+  const [x, y] = await Promise.all([
+    tool.execute({ sessionId: "offline-2", message: "a" }, {agent: { id: "caller" }}),
+    tool.execute({ sessionId: "offline-2", message: "b" }, {agent: { id: "caller" }})
+  ]);
+  assert.equal(resumed.filter((id) => id === "offline-2").length, 1, "并发去重：同一会话只 resume 一次");
+  assert.equal(x.accepted && y.accepted, true, "两条消息都送到了");
+
+  await assert.rejects(() => tool.execute({ sessionId: "  ", message: "hi" }, {agent: { id: "caller" }}), /不能为空/);
   // 输出必须是 lossless JSON（无 undefined 键），否则宿主判非法
   assert.deepEqual(JSON.parse(JSON.stringify(offline)), offline);
 });
-
 // ── 状态表情（v0.23 状态信号接线，2026-10-30）──────────────────────────────
 test("状态表情：失败 > 庆祝 > 思考 > 工作 > 空闲 的优先级与时效", () => {
   const { faceOf, faceVariant } = testApi();
