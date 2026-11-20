@@ -427,3 +427,40 @@ test("确认设计与阶段联动：确认后设计阶段结束；确认后原�
   const reconfirmed = applyDesignConfirmation(confirmed, snap, { now: T2 + 1000 });
   assert.equal(deriveStage({ requirement: reconfirmed, prototypes: [proto("proto:a", T2)], tasks: [doneTask("t")], runs: [] }).stage, "accept", "重新确认后回到验收");
 });
+// ── 需求负责人（ownerSessionId）：纯函数 ───────────────────────────────────────
+import { cleanRequirementInput as cleanOwnerInput, newRequirementRecord as newOwnerRecord, normalizeRequirement as normalizeOwnerReq, requirementView as ownerView, pickRequirementRecipient } from "../lib/requirements.js";
+
+test("ownerSessionId：建 / 改时清洗（去空白、允许空串表示清除、类型与长度校验）；不给就不出现在结果里", () => {
+  assert.equal(cleanOwnerInput({ title: "A" }).value.ownerSessionId, undefined, "没给就不出现，PATCH 时不会误清");
+  assert.equal(cleanOwnerInput({ title: "A", ownerSessionId: "  s1  " }).value.ownerSessionId, "s1");
+  assert.equal(cleanOwnerInput({ ownerSessionId: "" }, { partial: true }).value.ownerSessionId, "", "空串 = 清除负责人");
+  assert.equal(cleanOwnerInput({ ownerSessionId: "   " }, { partial: true }).value.ownerSessionId, "", "全空白也是清除");
+  assert.match(cleanOwnerInput({ title: "A", ownerSessionId: 5 }).error, /ownerSessionId must be a string/);
+  assert.match(cleanOwnerInput({ title: "A", ownerSessionId: "x".repeat(129) }).error, /ownerSessionId exceeds 128/);
+  assert.equal(cleanOwnerInput({ title: "A", ownerSessionId: "x".repeat(128) }).value.ownerSessionId.length, 128, "128 恰好允许");
+  assert.equal(cleanOwnerInput({ ownerSessionId: null }, { partial: true }).error, "ownerSessionId must be a string", "null 不是清除，要显式给空串");
+});
+
+test("ownerSessionId：新建记录带上；旧记录（没有这个字段）读出来是空串；坏类型回空串；视图暴露", () => {
+  const made = newOwnerRecord({ reqId: "r1", projectId: "p1", input: { title: "T", ownerSessionId: "s9" }, now: 1 });
+  assert.equal(made.ownerSessionId, "s9");
+  assert.equal(newOwnerRecord({ reqId: "r1", projectId: "p1", input: { title: "T" }, now: 1 }).ownerSessionId, "", "默认没有负责人");
+  assert.equal(normalizeOwnerReq({ reqId: "r1", projectId: "p1", title: "T" }).ownerSessionId, "", "旧数据兼容");
+  assert.equal(normalizeOwnerReq({ reqId: "r1", projectId: "p1", title: "T", ownerSessionId: 7 }).ownerSessionId, "");
+  assert.equal(normalizeOwnerReq(made).ownerSessionId, "s9");
+  const view = ownerView(normalizeOwnerReq(made), { tasks: [], prototypes: [], flows: [], runs: [] });
+  assert.equal(view.ownerSessionId, "s9");
+  assert.equal(ownerView(normalizeOwnerReq({ reqId: "unassigned", projectId: "p1", title: "未归类" }), {}, { virtual: true }).ownerSessionId, "", "虚拟需求没有负责人");
+});
+
+test("pickRequirementRecipient：负责人（仍是成员）> Composer > 主对话；负责人不是成员就跳过；返回来源便于展示", () => {
+  const project = { mainSessionId: "main", members: [{ sessionId: "main" }, { sessionId: "owner" }, { sessionId: "composer" }] };
+  const req = (over) => Object.assign({ ownerSessionId: "", composerSessionId: "" }, over || {});
+  assert.deepEqual(pickRequirementRecipient(req({ ownerSessionId: "owner", composerSessionId: "composer" }), project), { sessionId: "owner", role: "owner" });
+  assert.deepEqual(pickRequirementRecipient(req({ composerSessionId: "composer" }), project), { sessionId: "composer", role: "composer" });
+  assert.deepEqual(pickRequirementRecipient(req(), project), { sessionId: "main", role: "main" });
+  assert.deepEqual(pickRequirementRecipient(req({ ownerSessionId: "gone", composerSessionId: "composer" }), project), { sessionId: "composer", role: "composer" }, "负责人已不在项目里：不发给悬空的人");
+  assert.deepEqual(pickRequirementRecipient(req({ ownerSessionId: "owner" }), { mainSessionId: "main", members: [] }), { sessionId: "main", role: "main" }, "成员表为空也不炸");
+  assert.deepEqual(pickRequirementRecipient(null, project), { sessionId: "main", role: "main" });
+  assert.deepEqual(pickRequirementRecipient(req({ ownerSessionId: "owner" }), null), { sessionId: "", role: "none" }, "没有项目就没有收件人");
+});

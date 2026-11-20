@@ -341,3 +341,33 @@ test("缩放三档的 CSS：每一档都有规则；远景隐藏需求卡的下�
   for (const level of ["far", "mid", "near"]) assert.ok(t.WB_TEXT.zh["canvas.zoom." + level] && t.WB_TEXT.en["canvas.zoom." + level], level);
   assert.ok(t.WB_TEXT.zh["canvas.zoom.hint"] && t.WB_TEXT.en["canvas.zoom.hint"]);
 });
+// ── 画布卡上的负责人 ────────────────────────────────────────────────────────────
+
+test("wbRequirementCard：有负责人名就显示「负责人：名字」；没负责人显示「未指定负责人」；调用方不给名字时（旧调用）不加这一行", () => {
+  const { wbRequirementCard } = api();
+  const withOwner = wbRequirementCard(row({ ownerSessionId: "a" }), (k, v) => KEY(k, v), () => {}, undefined, "后端对话");
+  assert.match(texts(withOwner), /\[req\.owner\.set\]\{"name":"后端对话"\}/);
+  assert.equal(withOwner.props["data-owner"], "a");
+  const noOwner = wbRequirementCard(row({ ownerSessionId: "" }), (k, v) => KEY(k, v), () => {}, undefined, "");
+  assert.match(texts(noOwner), /\[req\.owner\.unset\]/);
+  assert.equal(noOwner.props["data-owner"], "");
+  const legacy = wbRequirementCard(row({ ownerSessionId: "a" }), (k, v) => KEY(k, v), () => {});
+  assert.doesNotMatch(texts(legacy), /req\.owner/, "旧签名（不传名字表）：不显示，保持原样");
+});
+
+test("画布接线：新画布 / 经典画布上的需求卡都显示负责人名（来自项目成员），没指定的显示未指定", async () => {
+  const rowsWith = [row({ reqId: "r1", title: "表单导入", ownerSessionId: "a" }), row({ reqId: "r2", title: "批量审批", ownerSessionId: "" })];
+  const flow = await renderCanvas({ puts: [], rows: rowsWith });
+  try {
+    const card1 = flow.flow().nodes.find((n) => n.id === "req:r1");
+    const card2 = flow.flow().nodes.find((n) => n.id === "req:r2");
+    assert.match(texts(card1.data.el), /\[req\.owner\.set\]\{"name":"a"\}/, "成员 a 在项目成员里，没有别的名字 → 显示 id（这里 id 本身就是 a）");
+    assert.match(texts(card2.data.el), /\[req\.owner\.unset\]/);
+  } finally { flow.restore(); }
+  const classic = await renderClassic({ puts: [], rows: rowsWith });
+  try {
+    const cards = reqCards(classic.view.tree);
+    assert.match(texts(cards.find((n) => /表单导入/.test(texts(n)))), /\[req\.owner\.set\]/);
+    assert.match(texts(cards.find((n) => /批量审批/.test(texts(n)))), /\[req\.owner\.unset\]/);
+  } finally { classic.restore(); }
+});

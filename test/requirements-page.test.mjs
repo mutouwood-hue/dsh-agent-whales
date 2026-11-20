@@ -620,3 +620,188 @@ test("computer use 提示：中英都说明要自装第三方插件与 KimiCU、
     assert.match(texts(c.view.rerender()), /\[req\.cfg\.cu\.warn\]/, "选 computer-use 时显示");
   } finally { c.restore(); }
 });
+// ── 需求负责人（界面）───────────────────────────────────────────────────────────
+
+test("wbMemberNames：会话名 > 成员登记的角色名 > 截断的 id；主对话不在成员表里也要有名字；坏数据不抛", () => {
+  const { wbMemberNames } = api();
+  const project = { mainSessionId: "m", members: [{ sessionId: "m", title: "主线" }, { sessionId: "a", title: "实现者" }, { sessionId: "long-session-id-b" }, { sessionId: "session-1234567890abcdef" }, null, { sessionId: 5 }] };
+  const names = wbMemberNames(project, { sessions: [{ sessionId: "a", title: "后端对话" }, { sessionId: "long-session-id-b", title: "long-session-id-b" }, { sessionId: "m", title: "  " }] });
+  assert.equal(names.a, "后端对话", "宿主给了会话标题就用它");
+  assert.equal(names.m, "主线", "标题是空白 → 退到成员登记的名字");
+  assert.equal(names["long-session-id-b"], "long-session", "标题等于 id 也算没有标题：退到截断 id，而不是把整个 id 当名字显示");
+  assert.equal(names["session-1234567890abcdef"], "session-1234", "没有任何名字：截断到 12 个字符");
+  assert.equal(Object.keys(names).length, 4, "坏成员被跳过");
+  assert.equal(wbMemberNames({ mainSessionId: "only-main", members: [] }, undefined)["only-main"], "only-main", "主对话没登记也有名字");
+  assert.deepEqual(wbMemberNames(undefined, undefined), {});
+});
+
+test("wbRequirementByOwner / wbOwnerFilterOptions：全部 / 未指定 / 某个对话；未归类不属于任何负责人；选项只列真有需求的负责人且带数字", () => {
+  const { wbRequirementByOwner, wbOwnerFilterOptions } = api();
+  const rows = [
+    frow("r1", "develop", "", { ownerSessionId: "a" }), frow("r2", "design", "confirm-design", { ownerSessionId: "a" }), frow("r3", "develop", "", { ownerSessionId: "b" }),
+    frow("r4", "clarify", "", { ownerSessionId: "" }), frow("unassigned", "develop", "", { virtual: true, ownerSessionId: "" })
+  ];
+  const ids = (key) => wbRequirementByOwner(rows, key).map((r) => r.reqId);
+  assert.deepEqual(ids("all"), ["r1", "r2", "r3", "r4", "unassigned"], "全部包含未归类");
+  assert.deepEqual(ids("none"), ["r4"], "未指定负责人：不含虚拟的未归类");
+  assert.deepEqual(ids("a"), ["r1", "r2"]);
+  assert.deepEqual(ids("b"), ["r3"]);
+  assert.deepEqual(ids("ghost"), [], "没有这个负责人就是空，不会回落成全部");
+  assert.deepEqual(ids(undefined), ["r1", "r2", "r3", "r4", "unassigned"], "没选 = 全部");
+  assert.deepEqual(wbRequirementByOwner(undefined, "a"), []);
+  const names = { a: "后端对话", b: "前端对话", c: "没分到活的" };
+  const options = wbOwnerFilterOptions(rows, names);
+  assert.deepEqual(options.map((o) => [o.key, o.count]), [["all", 5], ["none", 1], ["a", 2], ["b", 1]], "c 没有需求不列；虚拟的不计入未指定");
+  assert.deepEqual(options.map((o) => o.label || ""), ["", "", "后端对话", "前端对话"], "负责人用名字，全部 / 未指定由界面用文案键");
+  const unknown = wbOwnerFilterOptions([frow("r9", "develop", "", { ownerSessionId: "left-the-project" })], {});
+  assert.deepEqual(unknown.map((o) => o.key), ["all", "none", "left-the-project"], "负责人不在名字表里（旧数据）也要能筛，名字退到截断 id");
+  assert.equal(unknown[2].label, "left-the-pro", "截断到 12 个字符");
+});
+
+test("wbRequirementRows 带出 ownerSessionId（非字符串回空串）", () => {
+  const { wbRequirementRows } = api();
+  const rows = wbRequirementRows({ requirements: [{ reqId: "a", ownerSessionId: "s1" }, { reqId: "b", ownerSessionId: 5 }, { reqId: "c" }] });
+  assert.deepEqual(rows.map((r) => [r.reqId, r.ownerSessionId]).sort(), [["a", "s1"], ["b", ""], ["c", ""]]);
+});
+
+async function renderListWithProject(rows, members, sessions) {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = (url, init) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const method = (init && init.method) || "GET";
+    calls.push({ target, method });
+    let data = {};
+    if (target === "/projects/p1/requirements") data = { requirements: rows };
+    else if (target === "/projects/p1") data = { project: { projectId: "p1", mainSessionId: "m", members: members, e2eConfig: {} } };
+    else if (target === "/sessions") data = { sessions: sessions || [] };
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ok(data)) });
+  };
+  const { mount, shim } = createMount();
+  const { plugin } = loadPlugin({ react: shim });
+  installDocumentStub();
+  const t = plugin.__test;
+  for (const url of ["/projects/p1/requirements", "/projects/p1", "/sessions"]) await t.wbCache.read(url).catch(() => {});
+  const view = mount(t.WbReqsPage, { t: (key, vars) => KEY(key) + (vars ? JSON.stringify(vars) : ""), projectId: "p1" });
+  await tick();
+  return { view, calls, restore: () => { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; } };
+}
+const ownerSelect = (tree) => byTag(tree, "select").find((s) => s.props["data-owner-filter"] !== undefined);
+
+test("需求列表页：负责人筛选下拉（全部 / 未指定 / 各负责人，带数字）；选了之后列表与阶段筛选的数字都按负责人收窄；卡片显示负责人名", async () => {
+  const rows = [
+    reqView({ reqId: "r1", title: "表单导入", stage: "mismatch", attention: "e2e-mismatch", tone: "bad", ownerSessionId: "a" }),
+    reqView({ reqId: "r2", title: "批量审批", stage: "design", attention: "confirm-design", tone: "info", ownerSessionId: "b" }),
+    reqView({ reqId: "r3", title: "导入历史", stage: "clarify", attention: null, tone: "neutral", ownerSessionId: "" }),
+    reqView({ reqId: "r4", title: "对账", stage: "passed", attention: null, tone: "ok", ownerSessionId: "a" })
+  ];
+  const members = [{ sessionId: "m", title: "主线" }, { sessionId: "a", title: "后端" }, { sessionId: "b", title: "前端" }];
+  const d = await renderListWithProject(rows, members);
+  try {
+    const select = ownerSelect(d.view.tree);
+    assert.ok(select, "有负责人下拉");
+    const options = byTag(select, "option").map((o) => [o.props.value, texts(o)]);
+    assert.deepEqual(options.map((o) => o[0]), ["all", "none", "a", "b"]);
+    assert.match(options[0][1], /\[req\.filter\.owner\.all\]/);
+    assert.match(options[0][1], /4/);
+    assert.match(options[1][1], /\[req\.filter\.owner\.none\].*1|1.*\[req\.filter\.owner\.none\]/);
+    assert.match(options[2][1], /后端.*2|2.*后端/, "负责人用名字并带数字");
+    const cards = byClass(d.view.tree, "daw-wb-card");
+    assert.equal(cards.length, 4);
+    assert.match(texts(cards.find((n) => /表单导入/.test(texts(n)))), /\[req\.owner\.set\]\{"name":"后端"\}/, "卡片上显示负责人名");
+    assert.match(texts(cards.find((n) => /导入历史/.test(texts(n)))), /\[req\.owner\.unset\]/, "没负责人显示「未指定」");
+    // 选「后端」
+    select.props.onChange({ target: { value: "a" } });
+    let tree = d.view.rerender();
+    assert.deepEqual(byClass(tree, "daw-wb-card").map((n) => /表单导入|对账/.test(texts(n))), [true, true], "只剩 a 负责的两个");
+    const chipTexts = chips(tree).map((b) => texts(b));
+    assert.deepEqual(chipTexts, ["[req.filter.all] 2", "[req.filter.attention] 1", "[req.filter.mismatch] 1", "[req.filter.active] 0", "[req.filter.passed] 1"], "阶段芯片的数字也按负责人收窄");
+    // 再叠加阶段筛选
+    chips(tree).find((b) => b.props["data-filter"] === "passed").props.onClick();
+    tree = d.view.rerender();
+    assert.deepEqual(byClass(tree, "daw-wb-card").map((n) => /对账/.test(texts(n))), [true], "负责人 + 阶段两个筛选叠加");
+    // 选「未指定」
+    ownerSelect(tree).props.onChange({ target: { value: "none" } });
+    chips(d.view.rerender()).find((b) => b.props["data-filter"] === "all").props.onClick();
+    assert.deepEqual(byClass(d.view.rerender(), "daw-wb-card").map((n) => /导入历史/.test(texts(n))), [true]);
+  } finally { d.restore(); }
+});
+
+test("负责人下拉：没有需求 / 没有任何负责人时不出现（避免空的筛选噪音）；筛没了提示用筛选空态", async () => {
+  const none = await renderListWithProject([], [{ sessionId: "m", title: "主线" }]);
+  try { assert.equal(ownerSelect(none.view.tree), undefined, "没有需求不显示"); } finally { none.restore(); }
+  const noOwners = await renderListWithProject([reqView({ reqId: "r1", title: "A", stage: "clarify", attention: null, tone: "neutral", ownerSessionId: "" })], [{ sessionId: "m", title: "主线" }]);
+  try {
+    assert.equal(ownerSelect(noOwners.view.tree), undefined, "没有任何需求指定了负责人：不显示筛选");
+    assert.equal(byClass(noOwners.view.tree, "daw-wb-card").length, 1);
+  } finally { noOwners.restore(); }
+});
+
+async function renderDetailWithMembers(view, members, onWrite) {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    const target = String(url).replace("/agent-whales/api", "");
+    const method = (init && init.method) || "GET";
+    calls.push({ target, method, body: init && init.body ? JSON.parse(init.body) : undefined });
+    let data = {};
+    if (target === "/projects/p1/requirements/r1") data = { requirement: view };
+    else if (target === "/projects/p1/requirements/r1/e2e") data = { reqId: "r1", runs: [] };
+    else if (target === "/projects/p1") data = { project: { projectId: "p1", mainSessionId: "m", members: members, e2eConfig: {} } };
+    else if (target === "/sessions") data = { sessions: [] };
+    const body = method !== "GET" ? (onWrite ? onWrite(target, init) : ok({})) : ok(data);
+    return Promise.resolve({ ok: body.code === 200, status: body.code === 200 ? 200 : 400, json: () => Promise.resolve(body) });
+  };
+  const { mount, shim } = createMount();
+  const { plugin } = loadPlugin({ react: shim });
+  installDocumentStub();
+  const t = plugin.__test;
+  for (const url of ["/projects/p1/requirements/r1", "/projects/p1/requirements/r1/e2e", "/projects/p1", "/sessions"]) await t.wbCache.read(url).catch(() => {});
+  const mounted = mount(t.WbReqDetail, { t: (key, vars) => KEY(key) + (vars ? JSON.stringify(vars) : ""), projectId: "p1", reqId: "r1", onBack: () => {} });
+  await tick();
+  calls.length = 0;
+  return { view: mounted, calls, restore: () => { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; } };
+}
+const detailOwnerSelect = (tree) => byTag(tree, "select").find((s) => s.props["data-owner-select"] !== undefined);
+
+test("需求详情·负责人：下拉列项目成员（含「未指定」），当前负责人选中；改选发 PATCH 带 expectedRevision（CAS）；清除发空串；宿主拒绝显示真原因", async () => {
+  const members = [{ sessionId: "m", title: "主线" }, { sessionId: "a", title: "后端" }, { sessionId: "b", title: "前端" }];
+  const d = await renderDetailWithMembers(reqView({ ownerSessionId: "a", revision: 7 }), members);
+  try {
+    const select = detailOwnerSelect(d.view.tree);
+    assert.ok(select, "详情页有负责人下拉");
+    assert.equal(select.props.value, "a", "当前负责人选中");
+    assert.deepEqual(byTag(select, "option").map((o) => [o.props.value, texts(o)]), [["", "[req.owner.none]"], ["m", "主线"], ["a", "后端"], ["b", "前端"]]);
+    assert.match(texts(d.view.tree), /\[req\.owner\.hint\]/, "有一句话说明负责人的作用");
+    select.props.onChange({ target: { value: "b" } });
+    await tick();
+    assert.deepEqual(d.calls.find((c) => c.method === "PATCH"), { target: "/projects/p1/requirements/r1", method: "PATCH", body: { expectedRevision: 7, ownerSessionId: "b" } });
+    d.calls.length = 0;
+    detailOwnerSelect(d.view.rerender()).props.onChange({ target: { value: "" } });
+    await tick();
+    assert.deepEqual(d.calls.find((c) => c.method === "PATCH").body, { expectedRevision: 7, ownerSessionId: "" }, "清除 = 空串，不是 null");
+  } finally { d.restore(); }
+  const rejected = await renderDetailWithMembers(reqView({ ownerSessionId: "", revision: 2 }), members, () => ({ code: 40703, msg: "ownerSessionId must be a project member" }));
+  try {
+    detailOwnerSelect(rejected.view.tree).props.onChange({ target: { value: "b" } });
+    await tick(); await tick();
+    assert.match(byClass(rejected.view.rerender(), "daw-wb-banner").map(texts).join("|"), /ownerSessionId must be a project member/);
+  } finally { rejected.restore(); }
+  const virtual = await renderDetailWithMembers(reqView({ virtual: true, reqId: "r1" }), members);
+  try { assert.equal(detailOwnerSelect(virtual.view.tree), undefined, "未归类没有负责人"); } finally { virtual.restore(); }
+});
+
+test("负责人文案键中英都有", () => {
+  const t = api();
+  for (const key of ["req.owner", "req.owner.none", "req.owner.set", "req.owner.unset", "req.owner.hint", "req.filter.owner.title", "req.filter.owner.all", "req.filter.owner.none"]) assert.ok(t.WB_TEXT.zh[key] && t.WB_TEXT.en[key], key);
+});
+test("筛选条样式：阶段芯片有自己的样式（未选中 / 选中），负责人下拉不撑满整行（真机截图发现它们曾是裸按钮和整行下拉）", () => {
+  const t = api();
+  const css = Array.isArray(t.WB_CSS) ? t.WB_CSS.join("\n") : String(t.WB_CSS);
+  const rule = (needle) => { const i = css.indexOf(needle); return i < 0 ? "" : css.slice(i, css.indexOf("}", i) + 1); };
+  assert.match(rule(".daw-wb-filters button{"), /border-radius:999px/, "芯片是胶囊形");
+  assert.match(rule(".daw-wb-filters button{"), /cursor:pointer/);
+  assert.match(rule(".daw-wb-filters button[data-on=true]{"), /background:var\(--daw-brand\)/, "选中态有明显区别");
+  assert.match(rule(".daw-wb-filters .daw-wb-owner-filter{"), /width:auto/, "覆盖 .daw-wb-select 的 width:100%");
+  assert.match(rule(".daw-wb-filters .daw-wb-owner-filter{"), /max-width:280px/);
+});
