@@ -26,17 +26,16 @@ function collect(node, out, match) {
   collect(node.props ? node.props.children : undefined, out, match);
 }
 
-test("边规格：依赖 = 实线箭头带标签、互发 = 虚线、约束 = 点线、上下文 = 不可选粗管", () => {
+test("边规格：依赖 = 实线箭头带标签、互发 = 虚线、上下文 = 不可选粗管（约束线已随 MCP 节点删除）", () => {
   const { wbFlowEdges } = api();
   const nodes = [
-    { id: "m", kind: "composer" }, { id: "a", kind: "agent" }, { id: "b", kind: "agent" }, { id: "mcp:pencil", kind: "mcp" },
+    { id: "m", kind: "composer" }, { id: "a", kind: "agent" }, { id: "b", kind: "agent" },
     { id: "ctx:repo", kind: "folder", tasks: [{ ownerSessionId: "a" }, { ownerSessionId: "a" }, { ownerSessionId: "ghost" }] }
   ];
   const edges = [
     { a: "m", b: "a", reason: "", label: "" },
     { a: "a", b: "b", reason: "blocked", label: "等待 ptask-1" },
-    { a: "a", b: "b", reason: "blocked", label: "等待 ptask-2" },
-    { a: "mcp:pencil", b: "a", reason: "", label: "" }
+    { a: "a", b: "b", reason: "blocked", label: "等待 ptask-2" }
   ];
   const specs = wbFlowEdges(edges, nodes, []);
   const byKind = (kind) => specs.filter((spec) => spec.data.kind === kind);
@@ -51,7 +50,11 @@ test("边规格：依赖 = 实线箭头带标签、互发 = 虚线、约束 = �
   assert.equal(dep.style.strokeDasharray, undefined, "依赖是实线");
   assert.equal(dep.label, "等待 ptask-1");
   assert.equal(dep.data.pick, "dep:a|b", "选中依赖线后删除走 /dependencies");
-  assert.equal(byKind("mcp")[0].style.strokeDasharray, "2 4");
+  assert.equal(byKind("mcp").length, 0, "不再有「约束」类型的边（MCP 约束在 设置 › 高级）");
+  assert.deepEqual([...new Set(specs.map((spec) => spec.data.kind))].sort(), ["context", "dependency", "relay"], "边的种类只剩这三种");
+  // 旧数据 / 旧会话残留的、以 mcp: 开头的端点：不能再被识别成一种「约束」边
+  const stale = wbFlowEdges([{ a: "mcp:pencil", b: "a", reason: "", label: "" }], nodes, []);
+  assert.deepEqual(stale.filter((spec) => spec.source === "mcp:pencil").map((spec) => spec.data.kind), ["relay"], "mcp: 前缀不再有特殊含义，按普通互发线处理（上下文粗管来自落点节点，与它无关）");
   const ctx = byKind("context");
   assert.deepEqual(ctx.map((spec) => [spec.source, spec.target]), [["ctx:repo", "a"]], "粗管只连到画布上有的 owner，同一 owner 只一根");
   assert.equal(ctx[0].selectable, false);
@@ -76,21 +79,25 @@ test("锚点按相对位置选边：同列上下排走上下边，左右排走�
   assert.deepEqual([byId["relay:b|a"].sourceHandle, byId["relay:b|a"].targetHandle], ["s-t", "t-b"]);
 });
 
-test("节点清单：派生节点复用经典卡片，Thread / 占位 / 引导不带锚点", () => {
+test("节点清单：派生节点 + 「加 Agent」占位 + 空态引导；占位 / 引导不带锚点；Thread 与 MCP 引导卡已删除（传了也不画）", () => {
   const { wbFlowItems } = api();
   const el = { type: "div", props: {} };
   const items = wbFlowItems({
     nodes: [{ id: "m", kind: "composer", x: 430, y: 220, w: 320 }, { id: "a", kind: "agent", x: 800, y: 24, w: 200 }],
-    classicNode: (node) => ({ type: "div", props: { "data-id": node.id } }),
-    threadEl: el, addEl: el, mcpGuideEl: el, emptyGuideEl: null, agentCount: 1
+    nodeEl: (node) => ({ type: "div", props: { "data-id": node.id } }),
+    addEl: el, emptyGuideEl: el, agentCount: 1,
+    // 旧调用方可能还传这些：必须被忽略
+    threadEl: el, mcpGuideEl: el, classicNode: () => el
   });
-  assert.deepEqual(items.map((item) => item.id), ["__thread", "m", "a", "__add", "__mcpguide"]);
+  assert.deepEqual(items.map((item) => item.id), ["m", "a", "__add", "__guide"]);
   assert.equal(items.find((item) => item.id === "a").el.props["data-id"], "a");
   assert.equal(items.find((item) => item.id === "__add").y, 24 + 168);
-  assert.deepEqual(items.filter((item) => item.handles === false).map((item) => item.id), ["__thread", "__add", "__mcpguide"]);
+  assert.deepEqual(items.filter((item) => item.handles === false).map((item) => item.id), ["__add", "__guide"]);
+  assert.equal(items.some((item) => item.id === "__thread" || item.id === "__mcpguide"), false);
+  const bare = wbFlowItems({ nodes: [{ id: "m", kind: "composer", x: 0, y: 0, w: 1 }] });
+  assert.deepEqual(bare.map((item) => [item.id, item.el]), [["m", null]], "没给 nodeEl：节点仍在，只是没有卡片内容，不抛");
 });
-
-test("chunk 加载器：宿主没有 require.async → unavailable（画布用经典舞台，不白屏）", () => {
+test("chunk 加载器：宿主没有 require.async → unavailable（画布显示「需要更新 DSH」的说明，其余页签照常，不白屏）", () => {
   const t = api();
   t.wbFlowLoader.load();
   assert.equal(t.wbFlowLoader.get().status, "unavailable");
@@ -120,15 +127,6 @@ test("chunk 加载器：require.async 成功 → ready 且注入样式；失败 
   assert.equal(loader.get().status, "ready");
   assert.deepEqual(asked, ["./client.flow.js", "./client.flow.js"], "包内 chunk 契约：相对路径 ./client.flow.js");
   assert.ok(globalThis.document.getElementById("dsh-agent-whales-flow-css"), "React Flow 样式注入一次");
-});
-
-test("画布引擎偏好：默认新画布，记住选择", () => {
-  const fresh = loadPlugin().plugin.__test.wbCanvasEngine;
-  assert.equal(fresh.get(), "flow");
-  const kept = loadPlugin({ storedExtra: { "dsh-agent-whales.canvas-engine": "classic" } }).plugin.__test.wbCanvasEngine;
-  assert.equal(kept.get(), "classic");
-  kept.set("flow");
-  assert.equal(kept.get(), "flow");
 });
 
 function canvasFetch(target) {
@@ -173,7 +171,8 @@ test("新画布接线：ReactFlow 收到派生节点与类型化边；依赖模�
     view.rerender();
     assert.ok(flowProps, "chunk 就绪后必须渲染 ReactFlow");
     const ids = flowProps.nodes.map((node) => node.id);
-    assert.ok(ids.includes("m") && ids.includes("a") && ids.includes("b") && ids.includes("__thread"), ids.join(","));
+    assert.ok(ids.includes("m") && ids.includes("a") && ids.includes("b"), ids.join(","));
+    assert.ok(!ids.includes("__thread") && !ids.some((id) => id.indexOf("mcp:") === 0 || id === "__mcpguide"), "Thread 与 MCP 节点已删除：" + ids.join(","));
     assert.equal(flowProps.deleteKeyCode, null, "不让 Backspace 静默删线");
     const kinds = flowProps.edges.map((edge) => edge.data.kind).sort();
     assert.deepEqual(kinds, ["dependency", "relay"], "t2 等 t1 → a→b 依赖实线；a↔m 互发虚线");
@@ -198,7 +197,7 @@ test("新画布接线：ReactFlow 收到派生节点与类型化边；依赖模�
     // 线型图例五行
     const legendRows = [];
     collect(view.tree, legendRows, (node) => node.props.className === "daw-wb-legend-row");
-    assert.deepEqual(legendRows.map((row) => row.props["data-kind"]), ["dependency", "relay", "context", "mcp", "flow"]);
+    assert.deepEqual(legendRows.map((row) => row.props["data-kind"]), ["dependency", "relay", "context", "flow"], "图例里不再有 MCP 约束线");
   } finally {
     if (original === undefined) delete globalThis.fetch;
     else globalThis.fetch = original;

@@ -130,7 +130,8 @@ test("画布接线：需求卡作为节点出现（未归类除外），按需�
     const ids = c.flow().nodes.map((n) => n.id);
     assert.ok(ids.includes("req:r1") && ids.includes("req:r2") && ids.includes("req:r3"), ids.join(","));
     assert.ok(!ids.includes("req:unassigned"), "未归类不上画布");
-    assert.ok(ids.includes("m") && ids.includes("a") && ids.includes("__thread"), "原有节点一个不少");
+    assert.ok(ids.includes("m") && ids.includes("a"), "原有节点一个不少");
+    assert.ok(!ids.includes("__thread"), "Thread 回合记录节点已删除");
     const node = c.flow().nodes.find((n) => n.id === "req:r2");
     assert.equal(node.data.kind, "requirement");
     assert.match(texts(node.data.el), /批量审批/);
@@ -214,7 +215,8 @@ test("画布接线：超过 12 个需求时只画前 12 张，工具条入口的
 });
 // ── 经典画布（宿主不支持按需分包时的回退）──────────────────────────────────────
 
-async function renderClassic(state) {
+/** 宿主不支持按需分包（没有 require.async）：画布进入 unavailable 态。 */
+async function renderUnavailable(state) {
   const { shim, mount } = createMount({ effects: true });
   installDocumentStub();
   const loaded = loadPlugin({ react: shim });
@@ -232,44 +234,30 @@ async function renderClassic(state) {
   view.rerender();
   return { t, view, restore: () => { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; } };
 }
-const reqCards = (tree) => { const out = []; collect(tree, out, (n) => n.props["data-kind"] === "requirement"); return out; };
 
-test("经典画布：需求卡画在最右一列（固定位置、纵向不重叠、可点击进需求页）；未归类不画；没有需求 / 旧宿主不画", async () => {
-  const c = await renderClassic({ puts: [], rows: [
-    row({ reqId: "r1", title: "表单导入" }),
-    row({ reqId: "r2", title: "批量审批", stage: "design", attention: "confirm-design", tone: "brand" }),
-    row({ reqId: "unassigned", title: "未归类", virtual: true })
-  ] });
+test("旧宿主（不支持按需分包）：画布给一块明确的「需要更新 DSH」说明，不再退回第二套画布；需求入口仍在、能跳到需求页；不画任何节点", async () => {
+  const c = await renderUnavailable({ puts: [], rows: [row({ reqId: "r1" }), row({ reqId: "r2", title: "批量审批" })] });
   try {
-    const cards = reqCards(c.view.tree);
-    assert.equal(cards.length, 2, "未归类不画");
-    assert.deepEqual(cards.map((n) => texts(n).includes("表单导入") || texts(n).includes("批量审批")), [true, true]);
-    assert.ok(cards.every((n) => n.props.style.left >= 1000), "在 Agent / 添加卡右边的那一列（x ≥ 1000），不压住它们");
-    assert.ok(cards[1].props.style.top - cards[0].props.style.top >= 132, "纵向不重叠");
-    assert.ok(cards.every((n) => typeof n.props.style.left === "number" && typeof n.props.style.top === "number"), "经典舞台是绝对定位，必须带 left / top");
-    assert.ok(cards.every((n) => String(n.props.className).includes("daw-wb-node")));
+    const fallback = [];
+    collect(c.view.tree, fallback, (n) => String(n.props.className || "").split(/\s+/).indexOf("daw-wb-canvas-fallback") >= 0);
+    assert.equal(fallback.length, 1);
+    assert.equal(fallback[0].props["data-state"], "unavailable");
+    assert.match(texts(fallback[0]), /\[canvas\.fallback\.unavailable\]/);
+    const cards = []; collect(c.view.tree, cards, (n) => n.props["data-kind"] === "requirement" || String(n.props.className || "").split(/\s+/).indexOf("daw-wb-node") >= 0);
+    assert.equal(cards.length, 0, "没有画布节点（也没有第二套舞台）");
+    const stage = []; collect(c.view.tree, stage, (n) => ["daw-wb-stage", "daw-wb-canvas", "daw-wb-minimap", "daw-wb-zoombar"].some((cls) => String(n.props.className || "").split(/\s+/).indexOf(cls) >= 0));
+    assert.equal(stage.length, 0, "经典舞台 / 小地图 / 缩放条都已删除");
+    // 需求入口仍在，且能用
+    const entry = []; collect(c.view.tree, entry, (n) => n.type === "button" && n.props.title === "[canvas.req.title]");
+    assert.equal(entry.length, 1, "画布降级时，去需求页的入口仍在");
     c.t.wbRoute.set({ kind: "workbench", projectId: "p1", tab: "canvas" });
-    cards[0].props.onClick();
-    assert.equal(c.t.wbRoute.get().tab, "reqs", "点卡进需求页");
-    const keys = cards.map((n) => n.props.key);
-    assert.equal(new Set(keys).size, keys.length, "每张卡有唯一 key（React 列表要求）");
+    entry[0].props.onClick();
+    assert.equal(c.t.wbRoute.get().tab, "reqs");
   } finally { c.restore(); }
-
   for (const state of [{ puts: [], rows: [] }, { puts: [], rows: [], noRequirementsRoute: true }]) {
-    const none = await renderClassic(state);
-    try { assert.equal(reqCards(none.view.tree).length, 0); } finally { none.restore(); }
+    const none = await renderUnavailable(state);
+    try { assert.doesNotThrow(() => none.view.rerender(), "没有需求 / 旧宿主没有需求路由：降级页也不炸"); } finally { none.restore(); }
   }
-});
-
-test("经典画布：存过的位置不影响需求卡（经典画布里它们不可拖，位置固定）；工具条入口两种画布都有", async () => {
-  const c = await renderClassic({ puts: [], rows: [row({ reqId: "r1" })], savedNodes: { "req:r1": { x: -500, y: -500, w: 0, h: 0 } } });
-  try {
-    const card = reqCards(c.view.tree)[0];
-    assert.equal(card.props.style.left, 1030, "新画布里拖到别处存下的位置，不能把经典画布里的卡带到屏幕外");
-    const buttons = [];
-    collect(c.view.tree, buttons, (n) => n.type === "button" && n.props.title === "[canvas.req.title]");
-    assert.equal(buttons.length, 1, "经典画布也有需求入口");
-  } finally { c.restore(); }
 });
 // ── 缩放三档 ────────────────────────────────────────────────────────────────
 
@@ -355,7 +343,7 @@ test("wbRequirementCard：有负责人名就显示「负责人：名字」；没
   assert.doesNotMatch(texts(legacy), /req\.owner/, "旧签名（不传名字表）：不显示，保持原样");
 });
 
-test("画布接线：新画布 / 经典画布上的需求卡都显示负责人名（来自项目成员），没指定的显示未指定", async () => {
+test("画布接线：画布上的需求卡显示负责人名（来自项目成员），没指定的显示未指定", async () => {
   const rowsWith = [row({ reqId: "r1", title: "表单导入", ownerSessionId: "a" }), row({ reqId: "r2", title: "批量审批", ownerSessionId: "" })];
   const flow = await renderCanvas({ puts: [], rows: rowsWith });
   try {
@@ -364,10 +352,4 @@ test("画布接线：新画布 / 经典画布上的需求卡都显示负责人�
     assert.match(texts(card1.data.el), /\[req\.owner\.set\]\{"name":"a"\}/, "成员 a 在项目成员里，没有别的名字 → 显示 id（这里 id 本身就是 a）");
     assert.match(texts(card2.data.el), /\[req\.owner\.unset\]/);
   } finally { flow.restore(); }
-  const classic = await renderClassic({ puts: [], rows: rowsWith });
-  try {
-    const cards = reqCards(classic.view.tree);
-    assert.match(texts(cards.find((n) => /表单导入/.test(texts(n)))), /\[req\.owner\.set\]/);
-    assert.match(texts(cards.find((n) => /批量审批/.test(texts(n)))), /\[req\.owner\.unset\]/);
-  } finally { classic.restore(); }
 });

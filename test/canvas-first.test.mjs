@@ -10,6 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { createMount, installDocumentStub, loadPlugin } from "./harness.mjs";
+import { flowLoadPlugin, flowMount } from "./flow-harness.mjs";
 
 const api = () => loadPlugin().plugin.__test;
 
@@ -374,7 +375,7 @@ function canvasFetch(target) {
 
 test("画布 Composer：有 SessionProvider + 会话引用时挂 session 子槽，并在卸载时释放引用", async () => {
   const { shim, mount } = createMount({ effects: true });
-  const loaded = loadPlugin({ react: shim });
+  const loaded = flowLoadPlugin(shim);
   installDocumentStub();
   const t = loaded.plugin.__test;
   const retained = [];
@@ -383,7 +384,7 @@ test("画布 Composer：有 SessionProvider + 会话引用时挂 session 子槽�
   function SessionProvider(props) { return { type: "session-provider", props: { "data-session": props.session.sessionId, children: props.children } }; }
   await withFetch(canvasFetch, async () => {
     for (const url of ["/projects/p1", "/tasks?projectId=p1", "/sessions"]) await t.wbCache.read(url).catch(() => {});
-    const view = mount(t.WbCanvasPage, {
+    const view = await flowMount(mount, t, {
       t: KEY,
       projectId: "p1",
       SessionProvider,
@@ -407,12 +408,12 @@ test("画布 Composer：有 SessionProvider + 会话引用时挂 session 子槽�
 
 test("画布 Composer：拿不到 SessionProvider（旧宿主 / 测试垫片）就退回 Q1 轻量版", async () => {
   const { shim, mount } = createMount({ effects: true });
-  const loaded = loadPlugin({ react: shim });
+  const loaded = flowLoadPlugin(shim);
   installDocumentStub();
   const t = loaded.plugin.__test;
   await withFetch(canvasFetch, async () => {
     for (const url of ["/projects/p1", "/tasks?projectId=p1", "/sessions"]) await t.wbCache.read(url).catch(() => {});
-    const view = mount(t.WbCanvasPage, { t: KEY, projectId: "p1" });
+    const view = await flowMount(mount, t, { t: KEY, projectId: "p1" });
     await view.settle();
     assert.ok(buttonByText(view.tree, "composer.put"), "降级 UI 仍在");
     t.wbCache.reset();

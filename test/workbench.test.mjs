@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { createMount, createReactShim, findByClass, installDocumentStub, loadPlugin, render, walk } from "./harness.mjs";
+import { flowLoadPlugin, flowMount } from "./flow-harness.mjs";
 function testApi() {
   return loadPlugin().plugin.__test;
 }
@@ -757,17 +758,6 @@ test("画布路由：每次 set 都落盘，首次无记录不进画布", () => 
 // ── 13. 画布件契约：小地图 + 网格开关（R2 返工）────────────────────────────
 // 这两条原审核结论是「没做」。小地图是只读镜像（不接交互），网格原来常开且没有开关。
 
-test("画布件：小地图与网格开关的样式/文案契约齐了", () => {
-  const { WB_TEXT } = testApi();
-  assert.ok(WB_TEXT.zh["canvas.minimap"].length > 0 && WB_TEXT.en["canvas.minimap"].length > 0, "小地图要有中英文案");
-  assert.ok(WB_TEXT.zh["canvas.grid"].length > 0 && WB_TEXT.en["canvas.grid"].length > 0, "网格开关要有中英文案");
-  const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
-  for (const fragment of ["daw-wb-minimap", "daw-wb-mininode", "daw-wb-miniview", "data-grid", "canvas.minimap", "canvas.grid"]) {
-    assert.ok(source.indexOf(fragment) >= 0, "client.js 里必须有 " + fragment);
-  }
-  assert.ok(source.indexOf("daw-wb-canvas[data-grid=off] .daw-wb-canvas-grid{display:none}") >= 0, "网格关掉要有对应的 CSS");
-});
-
 test("画布件：空项目下画布页仍能渲染（小地图不能把它带崩）", () => {
   installDocumentStub();
   const { WbCanvasPage } = testApi();
@@ -1069,8 +1059,8 @@ test("A1：画布上真的有「添加 Agent」落点，点得开也关得掉", 
   // 2026-11-14 真机三连——addState 元组当值用（弹窗条件永不成立）、setAddState 未声明
   // （点击即抛 ReferenceError）、busyState 从没声明（点「加入」就抛）。
   // 现在用 createMount 真点一遍：挂画布 → 点添加节点 → 弹窗出现 → 取消 → 弹窗消失。
-  const { shim, mount } = createMount();
-  const loaded = loadPlugin({ react: shim });
+  const { shim, mount } = createMount({ effects: true });
+  const loaded = flowLoadPlugin(shim);
   installDocumentStub();
   const api = loaded.plugin.__test;
   const originalFetch = globalThis.fetch;
@@ -1121,7 +1111,7 @@ test("A1：画布上真的有「添加 Agent」落点，点得开也关得掉", 
       if (!vars) return raw;
       return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
     };
-    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
+    const view = await flowMount(mount, api, { t: t, projectId: "p1" }, loaded);
     const addNodes = [];
     collect(view.tree, addNodes, (n) => n.props["data-kind"] === "add");
     assert.equal(addNodes.length, 1, "画布上必须有一个「添加 Agent」占位节点");
@@ -1295,8 +1285,8 @@ test("wbGrowthLabel：可读名报 done/total（纯图形必须有文字复述�
 });
 
 test("渲染：Agent 卡上真出现 6 个等宽分段，aria-label 与数据一致", async () => {
-  const { shim, mount } = createMount();
-  const loaded = loadPlugin({ react: shim });
+  const { shim, mount } = createMount({ effects: true });
+  const loaded = flowLoadPlugin(shim);
   installDocumentStub();
   const api = loaded.plugin.__test;
   const originalFetch = globalThis.fetch;
@@ -1326,7 +1316,7 @@ test("渲染：Agent 卡上真出现 6 个等宽分段，aria-label 与数据一
       if (!vars) return raw;
       return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
     };
-    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
+    const view = await flowMount(mount, api, { t: t, projectId: "p1" }, loaded);
     const segs = [];
     const collect = (node) => {
       if (node === null || node === undefined || typeof node === "boolean") return;
@@ -1359,110 +1349,6 @@ test("渲染：Agent 卡上真出现 6 个等宽分段，aria-label 与数据一
 
 
 // ── 20. Thread 回合记录节点（参考图 V2 顶部；全部来自已有事实） ─────────────
-
-test("wbThreadNode：目标/成员/任务/最近动态/执行顺序/留痕，坏数据不炸", () => {
-  const { wbThreadNode } = testApi();
-  const project = {
-    mainSessionId: "main",
-    members: [{ sessionId: "main" }, { sessionId: "s1" }, { sessionId: "s2" }],
-    brief: { goal: "  把上线前体检做完  " }
-  };
-  const events = [
-    { eventId: "e1", kind: "task.command", text: "dispatch ptask-t1", at: 300, evidence: "req-1" },
-    { eventId: "e2", kind: "proposal.submit", text: "体检分工", at: 200, evidence: "prop-1" },
-    { eventId: "e3", kind: "store.degraded", text: "只读降级", at: 100 }
-  ];
-  const tasks = [
-    { taskId: "t1", status: "completed", ownerSessionId: "s1", createdAt: 10 },
-    { taskId: "t2", status: "in_progress", ownerSessionId: "s2", createdAt: 20 }
-  ];
-  const node = wbThreadNode(project, events, tasks);
-  assert.equal(node.goal, "把上线前体检做完", "goal 去首尾空白");
-  assert.equal(node.members, 3, "成员数含主对话");
-  assert.deepEqual(node.tasks, { done: 1, total: 2 });
-  assert.equal(node.state, "active", "有 in_progress → active");
-  assert.equal(node.recent.length, 3, "最近动态按 at 倒序全给（内部再 slice）");
-  assert.ok(node.recent[0].at >= node.recent[1].at, "倒序");
-  assert.deepEqual(node.order, ["s1", "s2"], "执行顺序按任务创建序的去重 owner 链");
-  assert.equal(node.evidence, 2, "只数带 evidence 的事件");
-
-  // 全完成 → done；没有任务 → pending
-  assert.equal(wbThreadNode(project, [], [{ status: "completed" }]).state, "done");
-  assert.equal(wbThreadNode(project, [], []).state, "pending");
-  // 空 goal 不编造
-  assert.equal(wbThreadNode({ members: [], brief: {} }, [], []).goal, "");
-  // 坏数据不炸
-  assert.equal(wbThreadNode(undefined, undefined, undefined).members, 0);
-  assert.deepEqual(wbThreadNode(null, null, null).recent, []);
-  assert.equal(wbThreadNode({ members: "x", brief: "y" }, "z", "w").state, "pending");
-});
-
-test("渲染：画布上出现 Thread 节点，带走目标/成员/任务/留痕四行", async () => {
-  const { shim, mount } = createMount();
-  const loaded = loadPlugin({ react: shim });
-  installDocumentStub();
-  const api = loaded.plugin.__test;
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (url) => {
-    const target = String(url).replace("/agent-whales/api", "");
-    const ok = (data) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ code: 200, msg: "success", data }) });
-    if (target === "/projects") return ok([{ projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1", role: "member" }], links: [], brief: { goal: "把 MCP 约束落到画布" } }]);
-    if (target === "/projects/p1") return ok({ project: { projectId: "p1", name: "画布", mainSessionId: "main", members: [{ sessionId: "s1", role: "member" }], links: [], brief: { goal: "把 MCP 约束落到画布" } } });
-    if (target === "/projects/p1/brief") return ok({ brief: { version: 1, goal: "g", decisions: [], constraints: [] } });
-    if (target === "/projects/p1/mcp-links") return ok({ projectId: "p1", available: [], links: [], members: [{ sessionId: "s1" }], mainSessionId: "main" });
-    if (target.startsWith("/tasks?projectId=")) return ok({ source: "project", projectId: "p1", tasks: [
-      { taskId: "t-1", subject: "接画布", status: "in_progress", ownerSessionId: "s1", revision: 2, createdAt: 5 }
-    ] });
-    if (target === "/sessions") return ok({ source: "host", sessions: [{ sessionId: "s1", title: "Agent 甲", running: true }] });
-    if (target === "/activity") return ok({ at: Date.now(), active: {} });
-    if (target.startsWith("/events")) return ok({ events: [
-      { eventId: "e1", projectId: "p1", source: "plugin", kind: "task.command", text: "dispatch t-1", evidence: "req-1", at: Date.now() - 60000, state: "pending", rules: [] }
-    ], stats: { pending: 1, today: 1, opened: 0, ignored: 0 }, health: [] });
-    if (target.startsWith("/canvas")) return ok({ rev: 1, nodes: [] });
-    if (target.startsWith("/inbox")) return ok({ groups: [] });
-    if (target.startsWith("/handoffs")) return ok({ entries: [] });
-    return ok({});
-  };
-  try {
-    const urls = ["/projects", "/projects/p1", "/projects/p1/brief", "/projects/p1/mcp-links", "/tasks?projectId=p1", "/sessions", "/activity", "/canvas?projectId=p1", "/events?projectId=p1", "/inbox?projectId=p1", "/handoffs?projectId=p1"];
-    for (const url of urls) await api.wbCache.read(url).catch(() => {});
-    const t = (key, vars) => {
-      const raw = api.WB_TEXT.zh[key];
-      if (raw === undefined) return "«" + key + "»";
-      if (!vars) return raw;
-      return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
-    };
-    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
-    const nodes = [];
-    const collect = (node) => {
-      if (node === null || node === undefined || typeof node === "boolean") return;
-      if (Array.isArray(node)) { node.forEach(collect); return; }
-      if (typeof node !== "object") return;
-      if (typeof node.type === "string" && node.props && node.props["data-kind"] === "thread") nodes.push(node);
-      collect(node.props ? node.props.children : undefined);
-    };
-    collect(view.tree);
-    assert.equal(nodes.length, 1, "画布上必须有一个 Thread 节点");
-    const texts = [];
-    const walk = (n) => {
-      if (n === null || n === undefined || typeof n === "boolean") return;
-      if (typeof n === "string" || typeof n === "number") { texts.push(String(n)); return; }
-      if (Array.isArray(n)) { n.forEach(walk); return; }
-      if (typeof n !== "object") return;
-      walk(n.props ? n.props.children : undefined);
-    };
-    walk(nodes[0]);
-    const joined = texts.join("|");
-    for (const word of ["Thread · 回合记录", "把 MCP 约束落到画布", "成员 1", "任务 0/1", "留痕 1 条", "task.command", "执行顺序：Agent 甲"]) {
-      assert.ok(joined.indexOf(word) >= 0, "Thread 节点必须出现「" + word + "」，实际：" + joined.slice(0, 200));
-    }
-  } finally {
-    if (originalFetch === undefined) delete globalThis.fetch;
-    else globalThis.fetch = originalFetch;
-    api.wbCache.reset();
-  }
-});
-
 
 // ── 21. 借鉴 troupe：证据优先的 Agent 态 + 产物越界（outside） ──────────────
 
@@ -1578,8 +1464,8 @@ test("wbDepLinks：blockedBy 派生依赖线，两端有 owner 才画，同对�
 });
 
 test("渲染：画布上的依赖连线带「等待 <task>」文字，且 Agent 卡说「已报完工」", async () => {
-  const { shim, mount } = createMount();
-  const loaded = loadPlugin({ react: shim });
+  const { shim, mount } = createMount({ effects: true });
+  const loaded = flowLoadPlugin(shim);
   installDocumentStub();
   const api = loaded.plugin.__test;
   const originalFetch = globalThis.fetch;
@@ -1611,18 +1497,11 @@ test("渲染：画布上的依赖连线带「等待 <task>」文字，且 Agent 
       if (!vars) return raw;
       return raw.replace(/\{(\w+)\}/g, (all, name) => (Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : all));
     };
-    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
-    // 1) 依赖连线的边上有「等待 t1」文字
-    const labels = [];
-    const collectText = (node) => {
-      if (node === null || node === undefined || typeof node === "boolean") return;
-      if (Array.isArray(node)) { node.forEach(collectText); return; }
-      if (typeof node !== "object") return;
-      if (node.type === "text" && typeof node.props?.children === "string") labels.push(node.props.children);
-      collectText(node.props ? node.props.children : undefined);
-    };
-    collectText(view.tree);
-    assert.ok(labels.indexOf("等待 t1") >= 0, "依赖边上必须标注「等待 t1」，实际：" + labels.join("|").slice(0, 200));
+    const view = await flowMount(mount, api, { t: t, projectId: "p1" }, loaded);
+    // 1) 依赖连线的边上有「等待 t1」文字（新画布：边规格的 label）
+    const depEdges = view.flow().edges.filter((edge) => String(edge.className || "").indexOf("daw-wb-edge-dependency") >= 0);
+    assert.equal(depEdges.length, 1, "只有一条依赖边（t2 等 t1）");
+    assert.equal(depEdges[0].label, "等待 t1", "依赖边上必须标注「等待 t1」，实际：" + depEdges[0].label);
     // 2) 有 report 的 Agent 卡说「已报完工」而不是「已完工」（证据分级）
     assert.equal(api.WB_TEXT.zh["canvas.agent.chip.done"], "已报完工", "done 只能说「已报」，不能说「已」");
     const chip = api.wbAgentChip({ report: { status: "done" } }, true);
@@ -1785,8 +1664,8 @@ test("空态引导：点「新建任务」弹画布内模态，取消关得掉�
   // 2026-11-16 真机实测：点「+ 新建任务」→ ReferenceError: views is not defined
   // → 「slot entry crashed in 'main'」→ 整个工作台白屏（页签全没、节点全没）。
   // 离线没抓到是因为空 tasks 时那个分支根本不渲染，变量错误要到点下去才暴露。
-  const { shim, mount } = createMount();
-  const loaded = loadPlugin({ react: shim });
+  const { shim, mount } = createMount({ effects: true });
+  const loaded = flowLoadPlugin(shim);
   installDocumentStub();
   const api = loaded.plugin.__test;
   loaded.win.fetch = (url) => {
@@ -1815,7 +1694,7 @@ test("空态引导：点「新建任务」弹画布内模态，取消关得掉�
   try {
     const urls = ["/projects", "/projects/p1", "/projects/p1/brief", "/projects/p1/mcp-links", "/tasks?projectId=p1", "/sessions", "/activity", "/canvas?projectId=p1", "/inbox?projectId=p1", "/handoffs?projectId=p1", "/events?projectId=p1"];
     for (const url of urls) await api.wbCache.read(url).catch(() => {});
-    const view = mount(api.WbCanvasPage, { t: t, projectId: "p1" });
+    const view = await flowMount(mount, api, { t: t, projectId: "p1" }, loaded);
     await new Promise((resolve) => setImmediate(resolve));
     view.rerender();
 
@@ -1840,14 +1719,15 @@ test("空态引导：点「新建任务」弹画布内模态，取消关得掉�
       return out.join("");
     };
     collect(view.tree);
-    // 引导节点 = 没有 data-kind 的 .daw-wb-node（MCP 占位是 data-kind="guide"）
+    // 引导节点 = data-kind="guide" 的 .daw-wb-node。（以前这里靠「没有 data-kind」来认，是因为旧代码把 data-kind 误写进了 style 对象里；
+    // 现在引导卡的 data-kind 是真属性，MCP 引导卡已随 MCP 节点一起删除，所以全画布只剩这一张。）
     const guides = [];
     const collectGuides = (node) => {
       if (node === null || node === undefined || typeof node === "boolean") return;
       if (Array.isArray(node)) { node.forEach(collectGuides); return; }
       if (typeof node !== "object") return;
       if (typeof node.type === "string" && node.props && typeof node.props.className === "string"
-        && node.props.className.split(" ").indexOf("daw-wb-node") >= 0 && node.props["data-kind"] === undefined) guides.push(node);
+        && node.props.className.split(" ").indexOf("daw-wb-node") >= 0 && node.props["data-kind"] === "guide") guides.push(node);
       collectGuides(node.props ? node.props.children : undefined);
     };
     collectGuides(view.tree);

@@ -12,6 +12,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { createMount, installDocumentStub, loadPlugin } from "./harness.mjs";
+import { flowLoadPlugin, flowMount } from "./flow-harness.mjs";
 
 function collect(node, out, match) {
   if (node === null || node === undefined || typeof node === "boolean") return;
@@ -83,14 +84,14 @@ function fetchMap(resume) {
 
 async function mountCanvas(t, mount) {
   for (const url of ["/projects/p1", "/tasks?projectId=p1", "/sessions"]) await t.wbCache.read(url).catch(() => {});
-  const view = mount(t.WbCanvasPage, { t: KEY, projectId: "p1" });
+  const view = await flowMount(mount, t, { t: KEY, projectId: "p1" });
   await view.settle();
   return view;
 }
 
 test("「唤醒」只出现在宿主说已下线（live:false）的成员上；在跑的、空闲但活着的都没有", async () => {
   const { shim, mount } = createMount({ effects: true });
-  const t = loadPlugin({ react: shim }).plugin.__test;
+  const t = flowLoadPlugin(shim).plugin.__test;
   installDocumentStub();
   await withFetch(fetchMap(() => ok({})), async () => {
     const view = await mountCanvas(t, mount);
@@ -119,7 +120,7 @@ test("客户端 store 的行没有 live 布尔 → 缺省不离线（旧宿主 /
 
 test("点击「唤醒」：POST /projects/p1/resume，body 只有 sessionId；成功提示出现，按钮复位", async () => {
   const { shim, mount } = createMount({ effects: true });
-  const t = loadPlugin({ react: shim }).plugin.__test;
+  const t = flowLoadPlugin(shim).plugin.__test;
   installDocumentStub();
   await withFetch(fetchMap((body) => ok({ sessionId: body.sessionId, live: true, resumed: true })), async (calls) => {
     const view = await mountCanvas(t, mount);
@@ -139,7 +140,7 @@ test("点击「唤醒」：POST /projects/p1/resume，body 只有 sessionId；�
 
 test("宿主说本来就在线 → 提示「本来就在线」，不报成功也不报错", async () => {
   const { shim, mount } = createMount({ effects: true });
-  const t = loadPlugin({ react: shim }).plugin.__test;
+  const t = flowLoadPlugin(shim).plugin.__test;
   installDocumentStub();
   await withFetch(fetchMap((body) => ok({ sessionId: body.sessionId, live: true, resumed: false })), async () => {
     const view = await mountCanvas(t, mount);
@@ -152,7 +153,7 @@ test("宿主说本来就在线 → 提示「本来就在线」，不报成功也
 
 test("宿主 resume 失败（50201）：原因如实显示、不吞；按钮复位可重试", async () => {
   const { shim, mount } = createMount({ effects: true });
-  const t = loadPlugin({ react: shim }).plugin.__test;
+  const t = flowLoadPlugin(shim).plugin.__test;
   installDocumentStub();
   await withFetch(fetchMap(() => ({ code: 50201, msg: "resume boom: 日志损坏" })), async (calls) => {
     const view = await mountCanvas(t, mount);
@@ -169,7 +170,7 @@ test("宿主 resume 失败（50201）：原因如实显示、不吞；按钮复�
 
 test("宿主说已恢复但会话仍没上线（live:false）→ 按失败提示，不谎报成功", async () => {
   const { shim, mount } = createMount({ effects: true });
-  const t = loadPlugin({ react: shim }).plugin.__test;
+  const t = flowLoadPlugin(shim).plugin.__test;
   installDocumentStub();
   await withFetch(fetchMap((body) => ok({ sessionId: body.sessionId, live: false, resumed: true })), async () => {
     const view = await mountCanvas(t, mount);

@@ -1,7 +1,7 @@
-// 约束层 · 画布纯函数单测（客户端半边）。
+// 约束层 · 纯函数单测（客户端半边）。
 //
-// 打的是四件事：MCP 节点从哪来、约束表怎么适配成连线、会话被允许哪些服务、
-// 以及连线路由靠什么判断「这端是 MCP」。全部纯函数，不发请求、不碰 DOM。
+// 重新规划 R2 之后画布上没有 MCP 节点了（wbMcpNodes / wbIsMcpNodeId 已删），剩下两件：约束表怎么适配成 {a,b} 对（设置页的矩阵也用它）、
+// 会话被允许哪些服务（Agent 卡徽标用）。全部纯函数，不发请求、不碰 DOM。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { loadPlugin } from "./harness.mjs";
@@ -21,69 +21,6 @@ const SAMPLE = {
   members: [{ sessionId: "s1" }],
   mainSessionId: "main"
 };
-
-test("wbMcpNodes：空数据与坏数据都回空数组，不炸", () => {
-  const { wbMcpNodes } = api();
-  assert.deepEqual(wbMcpNodes(undefined), []);
-  assert.deepEqual(wbMcpNodes(null), []);
-  assert.deepEqual(wbMcpNodes("nope"), []);
-  assert.deepEqual(wbMcpNodes({}), []);
-  assert.deepEqual(wbMcpNodes({ available: [] }), []);
-});
-
-test("wbMcpNodes：只认 available 里的服务，id 带 mcp: 前缀", () => {
-  const { wbMcpNodes } = api();
-  const nodes = wbMcpNodes(SAMPLE);
-  assert.equal(nodes.length, 2, "两个服务两个节点");
-  assert.deepEqual(nodes.map((n) => n.id), ["mcp:github", "mcp:pencil"], "按服务名排序，顺序稳定");
-  assert.equal(nodes[0].kind, "mcp");
-  assert.equal(nodes[0].server, "pencil" === nodes[0].server ? "pencil" : "github");
-  assert.equal(nodes[1].toolCount, 12, "工具数从 available 带出来");
-});
-
-test("wbMcpNodes：已连接数量从 links 数，读不到就说未连接", () => {
-  const { wbMcpNodes } = api();
-  const nodes = wbMcpNodes(SAMPLE);
-  const pencil = nodes.filter((n) => n.server === "pencil")[0];
-  const github = nodes.filter((n) => n.server === "github")[0];
-  assert.equal(pencil.linkedCount, 2, "两条同服务同会话的 link 都要数到");
-  assert.equal(pencil.linked, true);
-  assert.equal(github.linkedCount, 0, "没有 link 就是 0");
-  assert.equal(github.linked, false);
-});
-
-test("wbMcpNodes：服务名去重，同份数据两次渲染位置一致", () => {
-  const { wbMcpNodes } = api();
-  const dup = { available: [{ server: "a", toolCount: 1 }, { server: "a", toolCount: 9 }, { server: "b" }], links: [] };
-  const nodes = wbMcpNodes(dup);
-  assert.equal(nodes.length, 2, "重复服务只出一个节点");
-  assert.deepEqual(nodes.map((n) => n.server), ["a", "b"]);
-  assert.equal(nodes[0].toolCount, 1, "去重保留第一条，不拿后来的覆盖");
-  // 位置只由下标决定，与 Map 遍历顺序无关
-  const again = wbMcpNodes(dup);
-  assert.deepEqual(nodes.map((n) => [n.x, n.y]), again.map((n) => [n.x, n.y]), "两次渲染坐标必须一致");
-});
-
-test("wbMcpNodes：脏服务名与脏 link 被跳过", () => {
-  const { wbMcpNodes } = api();
-  const nodes = wbMcpNodes({
-    available: [{ server: "ok" }, null, { server: "" }, "x", { server: 42 }, { toolCount: 3 }],
-    links: [null, { server: "ok" }, { sessionId: "s1" }, { server: "", sessionId: "s1" }, { server: "ok", sessionId: "s1" }]
-  });
-  assert.equal(nodes.length, 1, "只剩一个完好的服务");
-  assert.equal(nodes[0].linkedCount, 1, "只有完好的那条 link 计入");
-  assert.equal(nodes[0].toolCount, 0, "toolCount 不是正数就按 0");
-});
-
-test("wbMcpNodes：布局参数可覆盖，间距按 gap 排", () => {
-  const { wbMcpNodes } = api();
-  const nodes = wbMcpNodes(SAMPLE, { x: 920, y: 40, w: 180, h: 90, gap: 100 });
-  assert.equal(nodes[0].x, 920);
-  assert.equal(nodes[0].y, 40);
-  assert.equal(nodes[1].y, 140, "第二个节点按 gap 下移");
-  assert.equal(nodes[0].w, 180);
-  assert.equal(nodes[0].h, 90);
-});
 
 test("wbMcpLinkPairs：存储形状 {server, sessionId} 适配成连线 {a, b}", () => {
   const { wbMcpLinkPairs } = api();
@@ -111,31 +48,16 @@ test("wbMcpAllowedBySession：会话 → 允许的服务列表，去重且无约
   assert.deepEqual(wbMcpAllowedBySession(undefined), {});
 });
 
-test("wbIsMcpNodeId：只认 mcp: 开头且非空", () => {
-  const { wbIsMcpNodeId } = api();
-  assert.equal(wbIsMcpNodeId("mcp:pencil"), true);
-  assert.equal(wbIsMcpNodeId("mcp:"), false, "只有前缀不算");
-  assert.equal(wbIsMcpNodeId("mcp"), false);
-  assert.equal(wbIsMcpNodeId("s1"), false, "会话 id 不是 MCP 节点");
-  assert.equal(wbIsMcpNodeId("ctx:/d/x"), false, "落点 id 不是 MCP 节点");
-  assert.equal(wbIsMcpNodeId("main"), false);
-  assert.equal(wbIsMcpNodeId(undefined), false);
-  assert.equal(wbIsMcpNodeId(null), false);
-  assert.equal(wbIsMcpNodeId(42), false);
-});
-
-test("i18n：约束层 key 中英文都齐，占位符同名", () => {
-  const { plugin } = loadPlugin();
+test("i18n：约束层在画布上只剩一个 key（Agent 卡徽标），其余已随节点 / 拖线 / 全清一起删除；中英占位符同名", () => {
   const messages = api().WB_TEXT;
   assert.ok(messages, "客户端要暴露 messages 供测试核对");
-  for (const key of ["canvas.node.mcp", "canvas.mcp.linked", "canvas.mcp.unlinked", "canvas.mcp.allowed", "canvas.mcp.deny", "canvas.mcp.dup", "canvas.mcp.cleared", "canvas.mcp.clearAll", "canvas.mcp.empty", "canvas.mcp.unlink", "canvas.mcp.linkfail"]) {
-    for (const lang of ["zh", "en"]) {
-      const dict = messages[lang];
-      assert.ok(dict && typeof dict[key] === "string" && dict[key] !== "", lang + " 缺 " + key);
+  for (const lang of ["zh", "en"]) {
+    const dict = messages[lang];
+    assert.ok(typeof dict["canvas.mcp.allowed"] === "string" && dict["canvas.mcp.allowed"].indexOf("{servers}") >= 0, lang + " 缺 canvas.mcp.allowed 或占位符不对");
+    for (const gone of ["canvas.node.mcp", "canvas.mcp.linked", "canvas.mcp.unlinked", "canvas.mcp.deny", "canvas.mcp.dup", "canvas.mcp.cleared", "canvas.mcp.clearAll", "canvas.mcp.empty", "canvas.mcp.unlink", "canvas.mcp.linkfail", "canvas.legend.mcp", "canvas.link.reason.mcp"]) {
+      assert.equal(dict[gone], undefined, lang + " 的 " + gone + " 应已删除（MCP 约束在 设置 › 高级，文案键是 set.mcp.*）");
     }
   }
-  assert.ok(messages.zh["canvas.mcp.allowed"].indexOf("{servers}") >= 0, "占位符要对上");
-  assert.ok(messages.en["canvas.mcp.allowed"].indexOf("{servers}") >= 0, "占位符要对上");
-  assert.ok(messages.zh["canvas.mcp.linkfail"].indexOf("{reason}") >= 0);
-  assert.ok(messages.en["canvas.mcp.linkfail"].indexOf("{reason}") >= 0);
+  // 设置页这一份必须齐（settings-advanced.test.mjs 逐条测；这里只防「删画布键时误删了设置键」）
+  for (const key of ["set.mcp.title", "set.mcp.rule", "set.mcp.fail"]) for (const lang of ["zh", "en"]) assert.ok(messages[lang][key], lang + " 缺 " + key);
 });
