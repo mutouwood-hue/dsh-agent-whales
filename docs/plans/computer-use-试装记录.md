@@ -54,3 +54,9 @@
 - `skills/whales-e2e-executor/SKILL.md`：新增「computer use（可选；本插件不内置、不依赖）」一节，写明已验证 / 未验证与六条规则；第二节第 2 条指向它。
 - `lib/client.js`：配置面板选 `computer-use` 时的提示，改成如实说明（中英）。
 - 测试：手册这一节的工具名、已验证 / 未验证声明、六条规则、「不内置不依赖」逐条断言；界面提示的中英措辞与显示条件。十二种变异（把「没验证」改成「验证过」、删规则、放宽步数上限等）均变红。
+
+## 补充（2026-11-20，C1）：0.2.2 宿主确实会加载 assemble
+
+在桌面版 0.2.2-rc.5 的隔离 headless profile 里挂 `dsh-kimi-assemble`（`webbridgeEnabled: false`，`kimi_cu_act / kimi_cu_launch / kimi_cu_script` 仍禁用），让真模型调用 `kimi_status`：
+宿主加载了插件、模型能看到并调用 `kimi_status`（它的 `kimi_` 开头工具只有这一个——动作类被禁用后确实没有暴露）。返回：浏览器 ✗；桌面（KimiCU）✗，`ENOENT: connect \\.\pipe\kimi-cu-win-admin`，原因是 KimiCU 常驻进程当时没有运行。
+**因此「宿主是否加载 assemble」这个未验证项现在已验证；「模型通过它真正观察 / 操作桌面」这次没有再做，动作类仍然未验证。** 验证后已从该 profile 撤掉 assemble。

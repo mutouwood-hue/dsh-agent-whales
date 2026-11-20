@@ -86,11 +86,11 @@ describe("createBundledSkillProvider", () => {
 	const BAD_NAME = "---\nname: Bad_Name\ndescription: 名字不合法。\n---\n\n正文\n";
 	const NO_DESC = "---\nname: no-desc\n---\n\n正文\n";
 
-	test("list 只收合法候选：kebab-case 名 + 非空 description", () => {
+	test("list 只收合法候选：kebab-case 名 + 非空 description", async () => {
 		const { dir, root } = withSkillsRoot({ "good-skill": GOOD, "bad-name": BAD_NAME, "no-desc": NO_DESC });
 		try {
 			const provider = createBundledSkillProvider({ skillsRoot: root, providerName: "dsh-agent-whales" });
-			const candidates = provider.list();
+			const candidates = await provider.list();
 			assert.equal(candidates.length, 1, "只有一个合法候选");
 			const candidate = candidates[0];
 			assert.equal(candidate.name, "good-skill");
@@ -104,34 +104,34 @@ describe("createBundledSkillProvider", () => {
 		}
 	});
 
-	test("get 返回正文与最新 description；locator 坏了给 undefined 而不抛", () => {
+	test("get 返回正文与最新 description；locator 坏了给 undefined 而不抛", async () => {
 		const { dir, root } = withSkillsRoot({ "good-skill": GOOD });
 		try {
 			const provider = createBundledSkillProvider({ skillsRoot: root, providerName: "p" });
-			const candidate = provider.list()[0];
-			const loaded = provider.get(candidate);
+			const candidate = (await provider.list())[0];
+			const loaded = await provider.get(candidate);
 			assert.equal(loaded.content, "# 正文\n\n第一段。");
 			assert.equal(loaded.description, "好 skill 的描述。");
-			assert.equal(provider.get({}), undefined, "没有 locator 的候选读不了");
-			assert.equal(provider.get({ locator: { directory: join(dir, "gone") } }), undefined, "目录没了也安静返回");
+			assert.equal(await provider.get({}), undefined, "没有 locator 的候选读不了");
+			assert.equal(await provider.get({ locator: { directory: join(dir, "gone") } }), undefined, "目录没了也安静返回");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
-	test("skills 根读不到：告警并返回空列表（不抛，不连累别的 provider）", () => {
+	test("skills 根读不到：告警并返回空列表（不抛，不连累别的 provider）", async () => {
 		const warnings = [];
 		const provider = createBundledSkillProvider({
 			skillsRoot: pathToFileURL(join(tmpdir(), "aw-skill-missing-" + Math.random().toString(36).slice(2)) + "\\"),
 			providerName: "p",
 			logger: (message) => warnings.push(message)
 		});
-		assert.deepEqual(provider.list(), []);
+		assert.deepEqual(await provider.list(), []);
 		assert.equal(warnings.length, 1, "缺件必须告警——否则协议层凭空消失没有任何信号");
 		assert.match(warnings[0], /读不到随包 skill 目录/);
 	});
 
-	test("仓库里的 SKILL.md 自身合法（发布门禁：包内副本必须能被宿主发现）", () => {
+	test("仓库里的 SKILL.md 自身合法（发布门禁：包内副本必须能被宿主发现）", async () => {
 		const text = readFileSync(join(pluginDir, "skills", "whales-project-playbook", "SKILL.md"), "utf8");
 		const { data, body } = parseSkillFrontmatter(text);
 		assert.match(data.name || "", /^[a-z0-9]+(-[a-z0-9]+)*$/, "skill 名必须 kebab-case");
@@ -147,13 +147,13 @@ describe("createBundledSkillProvider", () => {
 		assert.ok(effortParsed.body.includes("先取证"), "deep-effort 正文不能空（四条硬要求之一要在）");
 		// provider 直接读仓库副本也要能发现（等于验证 files 白名单漏项时的症状）
 		const provider = createBundledSkillProvider({ skillsRoot: pathToFileURL(join(pluginDir, "skills") + "\\"), providerName: "dsh-agent-whales" });
-		const names = provider.list().map((candidate) => candidate.name).sort();
+		const names = (await provider.list()).map((candidate) => candidate.name).sort();
 		assert.deepEqual(names, ["deep-effort", "whales-e2e-executor", "whales-project-playbook"]);
 	});
 });
 
 describe("随包 skill 注册进宿主", () => {
-	test("skills 服务就绪：provider 注册进去，卸载 disposer 挂进 ctx.effect", () => {
+	test("skills 服务就绪：provider 注册进去，卸载 disposer 挂进 ctx.effect", async () => {
 		// 假宿主不给 ctx.inject：whenService 退化成立即执行，注册同步发生（与「服务晚到」
 		// 的差别只在时序，注册内容一致）。
 		const registered = [];
@@ -178,7 +178,7 @@ describe("随包 skill 注册进宿主", () => {
 		assert.equal(registered.length, 1, "apply 后 provider 必须注册");
 		const provider = registered[0];
 		assert.equal(provider.name, "dsh-agent-whales", "provider 名 = 包名（用户对得上来源）");
-		const candidates = provider.list();
+		const candidates = await provider.list();
 		assert.deepEqual(candidates.map((candidate) => candidate.name).sort(), ["deep-effort", "whales-e2e-executor", "whales-project-playbook"], "协议层 + deep-effort + E2E 执行器三个随包 skill 都要能发现");
 		// 卸载真的会发生：清理函数倒序跑（后注册的先清理）
 		assert.ok(cleanups.length > 0, "必须把 disposer 挂到 ctx.effect，否则热重载会重复注册");
@@ -186,6 +186,117 @@ describe("随包 skill 注册进宿主", () => {
 		assert.deepEqual(disposed, ["dsh-agent-whales"], "插件卸载时 provider 必须被摘掉");
 	});
 
+	/**
+	 * 真宿主（0.2.2 的 @deepseek-ai/dsh-skill）的逐行替身。三处都抄自宿主源码：
+	 *   registerProvider(create)：create 必须是函数，宿主调用 create(control) 后读 provider.name；
+	 *   waitWithAbort(promise, signal)：有 signal 时直接 promise.then(...)——同步返回数组会抛 "promise.then is not a function"，
+	 *     宿主把它 catch 成「skill provider skipped」，整个 provider 被丢掉（无 signal 的目录展示路径恰好能走通，所以最初只表现为
+	 *     「目录里有，模型却加载不了」）；
+	 *   validateCandidate / validateDefinition：必填项与类型。
+	 * 之前的假宿主按「传对象、同步返回」写，单测一直是绿的，真宿主上三个随包 skill 一个都加载不了。
+	 */
+	function hostStandIn() {
+		const layer = new Map();
+		const warnings = [];
+		const NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+		const waitWithAbort = (promise, signal) => {
+			if (signal === undefined) return promise;
+			return new Promise((resolve, reject) => { promise.then(resolve, reject); }); // 抄自宿主：这里直接 .then
+		};
+		const validateCandidate = (c, providerName) => {
+			if (typeof c.name !== "string" || !NAME.test(c.name)) throw new Error("bad name " + c.name);
+			if (typeof c.description !== "string" || c.description.length === 0) throw new Error("bad description for " + c.name);
+			if (c.invocation !== undefined) {
+				if (typeof c.invocation !== "object" || c.invocation === null || Array.isArray(c.invocation)) throw new TypeError("bad invocation");
+				if (typeof c.invocation.modelInvocable !== "boolean" || typeof c.invocation.userInvocable !== "boolean") throw new TypeError("bad invocation flags");
+			}
+			if (typeof c.source !== "string") throw new TypeError("bad source");
+			if (typeof c.rank !== "number" || !Number.isFinite(c.rank)) throw new Error("bad rank");
+			if (typeof c.provider !== "string" || c.provider !== providerName) throw new Error("provider mismatch " + c.provider + " vs " + providerName);
+			if (c.path !== undefined && typeof c.path !== "string") throw new TypeError("bad path");
+		};
+		const validateDefinition = (d) => {
+			if (typeof d.name !== "string" || !NAME.test(d.name)) throw new Error("bad loaded name");
+			if (typeof d.description !== "string" || d.description.length === 0) throw new Error("bad loaded description");
+			if (typeof d.source !== "string" || typeof d.provider !== "string") throw new TypeError("bad loaded source/provider");
+			if (typeof d.content !== "string") throw new TypeError("loaded content must be a string");
+		};
+		const service = {
+			registerProvider(create) {
+				const control = { signal: new AbortController().signal, invalidate: () => {} };
+				const provider = create(control); // 不是函数 → TypeError: create is not a function
+				const name = provider.name;
+				if (name === "runtime") throw new Error('"runtime" is reserved');
+				if (layer.has(name)) throw new Error("already registered " + name);
+				layer.set(name, provider);
+				return () => layer.delete(name);
+			},
+			/** 抄 collect + listLayerCandidates：list 抛错 = 跳过整个 provider（告警）；候选必须过校验。 */
+			async list(options) {
+				const out = new Map();
+				for (const provider of layer.values()) {
+					let output;
+					try { output = await waitWithAbort(provider.list(options), options && options.signal); } catch (error) { warnings.push("skill provider \"" + provider.name + "\" skipped: " + String(error && error.message || error)); continue; }
+					for (const c of output) { validateCandidate(c, provider.name); out.set(c.name, { c, provider }); }
+				}
+				return out;
+			},
+			/** 抄 SkillService.get：找不到 → undefined（skill 工具据此报「unknown or no longer available」）。 */
+			async get(name, options) {
+				const entries = await service.list(options);
+				const match = entries.get(name);
+				if (match === undefined) return undefined;
+				const definition = await waitWithAbort(match.provider.get(match.c, options), options && options.signal);
+				if (definition === undefined) return undefined;
+				validateDefinition(definition);
+				return definition;
+			}
+		};
+		return { service, layer, warnings };
+	}
+
+	function applyTo(service, warnings) {
+		host.apply({
+			get: (name) => (name === "skills" ? service : undefined),
+			effect: (run) => run(),
+			on: () => () => {},
+			logger: { warn: (m) => warnings.push(String(m)) }
+		});
+	}
+
+	test("真宿主契约：注册成功；skill 工具走的路径（带 AbortSignal 的 list → get）能找到并加载三个随包 skill，正文真的读到", async () => {
+		const { service, layer, warnings } = hostStandIn();
+		applyTo(service, warnings);
+		assert.equal(layer.size, 1, "必须真的注册进去了（告警：" + warnings.join(" | ") + "）");
+		assert.ok(layer.has("dsh-agent-whales"), "provider 名 = 包名");
+		const options = { signal: new AbortController().signal, cwd: process.cwd(), scope: {} };
+		// 目录展示路径（无 signal）与工具路径（有 signal）都要通
+		const noSignal = await service.list({});
+		const withSignal = await service.list(options);
+		assert.deepEqual([...noSignal.keys()].sort(), ["deep-effort", "whales-e2e-executor", "whales-project-playbook"]);
+		assert.deepEqual([...withSignal.keys()].sort(), ["deep-effort", "whales-e2e-executor", "whales-project-playbook"], "带 signal 时也要能发现——这是 skill 工具的路径；warnings: " + warnings.join(" | "));
+		for (const name of ["whales-e2e-executor", "deep-effort", "whales-project-playbook"]) {
+			const def = await service.get(name, options);
+			assert.ok(def, name + " 必须能被加载（skill 工具返回 unknown or no longer available 就是这里 undefined）；warnings: " + warnings.join(" | "));
+			assert.equal(def.provider, "dsh-agent-whales");
+			assert.ok(def.content.length > 200, name + " 正文真的读到了");
+		}
+		assert.match((await service.get("whales-e2e-executor", options)).content, /whales_e2e_report/, "E2E 执行器手册的正文是真内容");
+		assert.deepEqual(warnings.filter((m) => /skipped|bundled skills/.test(m)), [], "不能有任何「provider 被跳过」的告警");
+	});
+
+	test("旧宿主契约（registerProvider(provider) 直接收对象、直接读 .name / .list / .get；list/get 可同步也可异步）仍然可用", async () => {
+		const registered = [];
+		host.apply({
+			get: (name) => (name === "skills" ? { registerProvider: (provider) => { registered.push(provider); return () => {}; } } : undefined),
+			effect: (run) => run(), on: () => () => {}
+		});
+		assert.equal(registered.length, 1);
+		const provider = registered[0];
+		assert.equal(provider.name, "dsh-agent-whales", "旧宿主直接读 .name");
+		assert.deepEqual((await provider.list()).map((c) => c.name).sort(), ["deep-effort", "whales-e2e-executor", "whales-project-playbook"], "await 对同步 / 异步返回都成立");
+		assert.equal(typeof provider.get, "function");
+	});
 	test("宿主没有 skills 服务 / registerProvider 不是函数 / 它抛错：都不抛", () => {
 		assert.doesNotThrow(() => host.apply({ get: () => undefined, effect: (run) => run(), on: () => () => {} }));
 		assert.doesNotThrow(() => host.apply({
@@ -250,7 +361,6 @@ test("执行器手册·computer use 一节：工具名、只读已验证 / 动�
   assert.match(run, /不要假装/);
   assert.match(run, /需要 computer use，当前环境没有/);
 });
-
 
 test("文档不再承诺已砍掉的功能：设计稿里「3 天未处理提醒」只能出现在「不做 / 没做」的语境里，代码里没有对应的提醒实现", () => {
   const doc = readFileSync(join(pluginDir, "docs", "plans", "需求主线-业务流设计.md"), "utf8");

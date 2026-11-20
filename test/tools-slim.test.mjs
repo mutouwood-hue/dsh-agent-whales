@@ -294,3 +294,69 @@ test("whales_visit_send：跨项目被拒（40704）且不唤醒", async () => {
     assert.deepEqual(app.resumed, []);
   });
 });
+
+test("所有 whales_* 工具的成功返回值都是无损 JSON（真宿主会拒收含 undefined 的输出：INVALID_TOOL_OUTPUT「value is not lossless JSON」）", async () => {
+  // 真机（2026-11-20，0.2.2 宿主 + 真模型）：whales_brief_read 不带参数 → 没有对话简报时 conversationBrief / truncated / omitted 是 undefined →
+  // 宿主报 value is not lossless JSON，模型拿不到简报。单测里的假宿主不校验输出，所以一直没发现。
+  await withApp({}, async ({ app, projectId, as }) => {
+    const calls = [
+      ["whales_brief_read", {}, "session-a"],
+      ["whales_brief_read", {}, "session-b"],
+      ["whales_brief_read", { projectId }, "session-a"],
+      ["whales_brief_read", { sessionId: "session-a" }, "session-a"],
+      ["whales_brief_write", { projectId, goal: "目标" }, "session-a"],
+      ["whales_brief_write", { duty: "负责后端" }, "session-b"],
+      ["whales_brief_read", {}, "session-b"],
+      ["whales_canvas_inspect", {}, "session-a"],
+      ["whales_canvas_inspect", { projectId }, "session-a"],
+      ["whales_visit_list", {}, "session-a"],
+      ["whales_visit_read", { sessionId: "session-b" }, "session-a"],
+      ["whales_flow_read", {}, "session-a"],
+      ["whales_requirement", { action: "list" }, "session-a"],
+      ["whales_requirement", { action: "create", title: "A" }, "session-b"]
+    ];
+    let resolved = 0;
+    const seen = new Set();
+    for (const [name, args, as_] of calls) {
+      assert.ok(app.tools[name], name + " 已注册");
+      let out;
+      try { out = await app.tools[name].execute(args, as(as_)); } catch (error) { continue; } // 拒绝不是本测试关心的：只管「成功返回的值」
+      resolved += 1; seen.add(name);
+      assertLossless(out, name + " " + JSON.stringify(args));
+      assert.doesNotMatch(JSON.stringify(out, (k, v) => (v === undefined ? "__UNDEF__" : v)), /__UNDEF__/, name + " 的返回里不能有 undefined 值");
+    }
+    assert.ok(resolved >= 10, "至少 10 次调用真的成功返回（否则这条测试是空转），实际 " + resolved);
+    for (const must of ["whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_requirement"]) assert.ok(seen.has(must), must + " 至少成功返回过一次");
+  });
+});
+
+test("losslessResult / losslessTools：undefined 键被去掉、整体 undefined 变 null、嵌套与数组里的 undefined 也处理；只包 whales_ 前缀的工具；其余成员原样透传", async () => {
+  assert.equal(plugin.losslessResult(undefined), null);
+  assert.deepEqual(plugin.losslessResult({ a: 1, b: undefined, c: { d: undefined, e: [1, undefined, { f: undefined }] } }), { a: 1, c: { e: [1, null, {}] } }, "嵌套里的 undefined 键去掉；数组里的 undefined 变 null（JSON 语义）");
+  assertLossless(plugin.losslessResult({ x: undefined, y: [undefined] }), "result");
+  const registered = [];
+  const base = { register: (tool, extra) => { registered.push({ tool, extra }); return () => "disposed"; }, schemas: () => ["S"], marker: 7 };
+  const wrapped = plugin.losslessTools(base);
+  const mine = { name: "whales_demo", execute: async () => ({ ok: true, hidden: undefined }) };
+  const theirs = { name: "other_plugin_tool", execute: async () => ({ ok: true, hidden: undefined }) };
+  assert.equal(typeof wrapped.register(mine, "x"), "function", "register 的返回值（注销器）原样透传");
+  wrapped.register(theirs);
+  assert.notEqual(registered[0].tool, mine, "whales_ 工具被包了一层");
+  assert.equal(registered[0].extra, "x", "多余参数原样透传");
+  assert.deepEqual(await registered[0].tool.execute(), { ok: true }, "包过的 execute 返回无损值");
+  assert.equal(registered[1].tool, theirs, "别的插件的工具不动：传给宿主的就是同一个对象");
+  assert.deepEqual(wrapped.schemas(), ["S"], "非 register 的函数成员透传且可调用");
+  assert.equal(wrapped.marker, 7, "非函数成员透传");
+  // 宿主的 tools 服务是带私有字段的类实例：方法不 bind 到真实对象，经 Proxy 转发时 this 是代理，读 #私有字段 会抛 TypeError
+  class HostToolsService { #secret = 42; register(tool) { return () => tool.name; } peek() { return this.#secret; } }
+  const hostLike = plugin.losslessTools(new HostToolsService());
+  assert.equal(hostLike.peek(), 42, "私有字段方法经包装后仍可调用");
+  assert.equal(hostLike.register({ name: "whales_x", execute: async () => 1 })(), "whales_x");
+  assert.equal(plugin.losslessTools(undefined), undefined, "没有 tools 服务：原样返回");
+  const noRegister = { schemas: () => [] };
+  assert.equal(plugin.losslessTools(noRegister), noRegister, "没有 register：不包");
+  const noExec = { name: "whales_noexec" };
+  assert.equal(plugin.losslessTool(noExec), noExec, "没有 execute：不动");
+  const rejecting = plugin.losslessTool({ name: "whales_boom", execute: async () => { throw new Error("[40301] nope"); } });
+  await assert.rejects(() => rejecting.execute(), /\[40301\] nope/, "execute 抛错原样抛出（不吞、不改写）");
+});
