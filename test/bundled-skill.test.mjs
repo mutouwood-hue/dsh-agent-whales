@@ -250,3 +250,16 @@ test("执行器手册·computer use 一节：工具名、只读已验证 / 动�
   assert.match(run, /不要假装/);
   assert.match(run, /需要 computer use，当前环境没有/);
 });
+
+
+test("文档不再承诺已砍掉的功能：设计稿里「3 天未处理提醒」只能出现在「不做 / 没做」的语境里，代码里没有对应的提醒实现", () => {
+  const doc = readFileSync(join(pluginDir, "docs", "plans", "需求主线-业务流设计.md"), "utf8");
+  const lines = doc.split("\n").filter((l) => /3 天/.test(l) && /提醒/.test(l));
+  assert.ok(lines.length >= 1, "至少还留着一条说明它被砍掉了");
+  for (const line of lines) assert.match(line, /不做|没做|砍掉|不再|默认 3 天，写事件台/, "提到 3 天提醒的每一行都必须带「不做 / 没做」之类的说明：" + line.slice(0, 80));
+  const open = doc.split("\n").filter((l) => /^\|\s*多久没处理的需求要升级提醒/.test(l));
+  assert.equal(open.length, 1);
+  assert.match(open[0], /不做/, "待定问题表里这一行不能再是一个悬着的默认值");
+  const code = readFileSync(join(pluginDir, "lib", "requirements.js"), "utf8") + readFileSync(join(pluginDir, "lib", "e2e.js"), "utf8");
+  assert.doesNotMatch(code, /STALE_DAYS|staleReminder|remindAfter|3 \* 24 \* 60 \* 60 \* 1000|259200000/, "没有悄悄实现提醒");
+});
