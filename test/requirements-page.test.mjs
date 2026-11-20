@@ -596,3 +596,27 @@ test("需求页的运行卡不使用顶栏「运行中」药丸的类名（.daw-
     assert.equal(byClass(d.view.tree, "daw-wb-e2erun-head").length >= 1, true);
   } finally { d.restore(); }
 });
+test("computer use 提示：中英都说明要自装第三方插件与 KimiCU、只验证过只读观察、动作未验证且会占用真实鼠标键盘；选 computer-use 时才显示", async () => {
+  const t = api();
+  const zh = t.WB_TEXT.zh["req.cfg.cu.warn"];
+  const en = t.WB_TEXT.en["req.cfg.cu.warn"];
+  for (const text of [zh, en]) { assert.ok(text.includes("dsh-kimi-assemble") && text.includes("KimiCU")); }
+  assert.match(zh, /只验证过「只读观察」/);
+  assert.match(zh, /没验证过/);
+  assert.match(zh, /占用真实鼠标键盘/);
+  assert.match(en, /Only read-only observation has been verified/);
+  assert.match(en, /not/);
+  assert.match(en, /take over the real mouse and keyboard/);
+  assert.doesNotMatch(zh, /本机是否可用未验证/, "旧措辞已被取代");
+  // 面板里：只有选了 computer-use 才出现
+  const c = await renderConfig(projectOf({ trigger: "auto", driver: "manual", executorSessionId: "", baseUrl: "" }));
+  try {
+    button(c.view.tree, "req.cfg.edit").props.onClick();
+    let tree = c.view.rerender();
+    assert.doesNotMatch(texts(tree), /req\.cfg\.cu\.warn/, "手动驱动时不显示");
+    selects(tree)[1].props.onChange({ target: { value: "tabbit-cli" } });
+    assert.doesNotMatch(texts(c.view.rerender()), /req\.cfg\.cu\.warn/, "tabbit 驱动时不显示");
+    selects(c.view.rerender())[1].props.onChange({ target: { value: "computer-use" } });
+    assert.match(texts(c.view.rerender()), /\[req\.cfg\.cu\.warn\]/, "选 computer-use 时显示");
+  } finally { c.restore(); }
+});

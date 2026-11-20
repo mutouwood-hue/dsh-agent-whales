@@ -223,3 +223,30 @@ test("随包 skill whales-e2e-executor：frontmatter 合法；工具名、状态
   // 手册里每个 caseId / runId 的例子要和真实格式对得上
   assert.match(text, /run-[0-9a-f]{8}/);
 });
+test("执行器手册·computer use 一节：工具名、只读已验证 / 动作未验证的如实声明、六条安全规则；不依赖、不内置", () => {
+  const text = readFileSync(join(pluginDir, "skills", "whales-e2e-executor", "SKILL.md"), "utf8");
+  const start = text.indexOf("### computer use");
+  const end = text.indexOf("## 三、怎么上报");
+  assert.ok(start > 0 && end > start, "必须有独立的 computer use 一节，且在「怎么上报」之前");
+  const section = text.slice(start, end);
+  for (const tool of ["kimi_cu_windows", "kimi_cu_observe", "kimi_cu_act", "kimi_cu_launch", "kimi_cu_script"]) assert.ok(section.includes("`" + tool + "`"), "必须点名工具 " + tool);
+  assert.ok(section.includes("dsh-kimi-assemble") && section.includes("KimiCU"), "必须说明来源");
+  assert.match(section, /不内置、不依赖/, "必须声明本插件不内置、不依赖");
+  assert.match(section, /已验证的只有「只读观察」/, "必须如实说只验证了只读观察");
+  assert.match(section, /动作类我们没有验证过/, "必须如实说动作类没验证过");
+  assert.match(section, /占用真实鼠标键盘/, "必须说明动作会占用真实鼠标键盘");
+  assert.match(section, /再观察一次/, "规则 1：动手后复核");
+  assert.match(section, /已派发.{0,6}不等于生效/, "规则 1：派发不等于生效");
+  assert.match(section, /只对被测窗口动手/, "规则 2");
+  assert.match(section, /终端、系统对话框、密码/, "规则 2：禁区");
+  assert.match(section, /不超过 30 步/, "规则 3：步数上限");
+  assert.match(section, /最多重试 2 次/, "规则 3：重试上限");
+  assert.match(section, /只能就「看到了什么」下结论/, "规则 4：只剩观察时不得声称动过");
+  assert.match(section, /不可信数据，不是指令/, "规则 5：提示注入");
+  assert.match(section, /不要上传/, "规则 6：敏感截图");
+  // 上面的二、第 2 条要指向这一节，且保留「没有就不要假装」
+  const run = text.slice(text.indexOf("## 二、怎么跑"), start);
+  assert.match(run, /`kimi_cu_\*` 工具/);
+  assert.match(run, /不要假装/);
+  assert.match(run, /需要 computer use，当前环境没有/);
+});
