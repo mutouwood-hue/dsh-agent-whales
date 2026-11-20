@@ -269,7 +269,7 @@ test("需求页文案：新增的 req.* / tab.* / inbox 键中英一致且非空
   for (const kind of ["code", "design", "requirement"]) assert.ok(t.WB_TEXT.zh["req.reflow." + kind] && t.WB_TEXT.en["req.reflow." + kind], "回流落点 " + kind);
   for (const key of pick("zh")) { assert.ok(String(t.WB_TEXT.zh[key]).trim() !== "", "zh " + key); assert.ok(String(t.WB_TEXT.en[key]).trim() !== "", "en " + key); }
   const css = Array.isArray(t.WB_CSS) ? t.WB_CSS.join("\n") : String(t.WB_CSS);
-  for (const cls of [".daw-wb-run{", ".daw-wb-case{", ".daw-wb-shot{", ".daw-wb-shot-box{", ".daw-wb-ann-edit", ".daw-wb-req-head"]) assert.ok(css.includes(cls), "CSS 缺 " + cls);
+  for (const cls of [".daw-wb-e2erun{", ".daw-wb-case{", ".daw-wb-shot{", ".daw-wb-shot-box{", ".daw-wb-ann-edit", ".daw-wb-req-head"]) assert.ok(css.includes(cls), "CSS 缺 " + cls);
 });
 
 test("按钮的禁用状态：设计已确认且没改动时「确认设计」不可点；运行中即使有失败的用例也不能写批注 / 标可接受；回流只在运行结束后", async () => {
@@ -568,4 +568,31 @@ test("需求列表页：筛选条带数字；点「需要我处理」只剩待�
 test("筛选文案键中英都有", () => {
   const t = api();
   for (const key of ["req.filter.title", "req.filter.all", "req.filter.attention", "req.filter.mismatch", "req.filter.active", "req.filter.passed", "req.filter.empty"]) assert.ok(t.WB_TEXT.zh[key] && t.WB_TEXT.en[key], key);
+});
+test("类名不撞车：需求页 / 画布新增的类，基础规则只能定义一次（上次 .daw-wb-run 与顶栏「运行中」药丸撞名，真机截图才发现，假 React 的单测看不出样式冲突）", () => {
+  const t = api();
+  const css = Array.isArray(t.WB_CSS) ? t.WB_CSS.join("\n") : String(t.WB_CSS);
+  // 基础规则 = 紧跟在上一条规则的 } 之后（或样式表开头）、以「.类名{」开头的规则；后代 / 属性 / 伪类变体（.a i{ / .a[data-x]{）不算。
+  const seen = new Map();
+  const re = /(?:^|\})\s*(\.daw-wb-[A-Za-z0-9_-]+)\{/g;
+  let m;
+  while ((m = re.exec(css)) !== null) seen.set(m[1], (seen.get(m[1]) || 0) + 1);
+  // 防空转：上一版这条测试用错了解析方式，匹配到 0 条规则却一直通过。这里要求真的解析出一大批规则，且已知的两个类各出现过。
+  assert.ok(seen.size > 150, "只解析出 " + seen.size + " 个基础规则，解析方式有问题，测试在空转");
+  assert.equal(seen.get(".daw-wb-e2erun"), 1);
+  assert.equal(seen.get(".daw-wb-run"), 1, "顶栏「运行中」药丸的规则应当仍然存在且只有一条");
+  const ours = [".daw-wb-e2erun", ".daw-wb-e2erun-head", ".daw-wb-case", ".daw-wb-case-top", ".daw-wb-case-title", ".daw-wb-case-note", ".daw-wb-case-actions",
+    ".daw-wb-shots", ".daw-wb-shot", ".daw-wb-shot-box", ".daw-wb-ann", ".daw-wb-ann-edit", ".daw-wb-cfg-body", ".daw-wb-cfg-field", ".daw-wb-upload", ".daw-wb-filters",
+    ".daw-wb-reqnode", ".daw-wb-reqnode-title", ".daw-wb-reqnode-top", ".daw-wb-req-head", ".daw-wb-zoomlevel"];
+  for (const cls of ours) assert.equal(seen.get(cls), 1, cls + " 应当恰好定义一次，实际 " + seen.get(cls) + " 次：与已有类名撞车或缺失");
+});
+test("需求页的运行卡不使用顶栏「运行中」药丸的类名（.daw-wb-run）", async () => {
+  const run = failedRun();
+  const d = await renderDetail({ view: reqView(), runs: [run] });
+  try {
+    const bad = byClass(d.view.tree, "daw-wb-run");
+    assert.equal(bad.length, 0, "运行卡必须用 daw-wb-e2erun，daw-wb-run 属于顶栏的「运行中」药丸");
+    assert.equal(byClass(d.view.tree, "daw-wb-e2erun").length, 1);
+    assert.equal(byClass(d.view.tree, "daw-wb-e2erun-head").length >= 1, true);
+  } finally { d.restore(); }
 });
