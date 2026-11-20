@@ -56,6 +56,8 @@ import "./requirements-page.test.mjs";
 import "./requirements-canvas.test.mjs";
 // 重新规划 R1：工具 17 → 12。
 import "./tools-slim.test.mjs";
+// 重新规划 R5a：设置 › 高级。
+import "./settings-advanced.test.mjs";
 // 需求主线 P4：E2E 协议与状态机。
 import "./e2e-protocol.test.mjs";
 import "./e2e-runs-http.test.mjs";
