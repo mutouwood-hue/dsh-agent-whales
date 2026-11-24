@@ -9,6 +9,10 @@ import { jsx, jsxs } from "react/jsx-runtime";
 import {
 	Button, Card, Checkbox, DataTable, FormField, InlineAlert, Input, Overlay, Section, Select, Sidebar, Switch, Tabs, Tag, Textarea, Topbar, Upload
 } from "@company/cds-react";
+// 组件工坊（设计方案 §7）：把 CDS 的**原始导出**整包交给沙箱，agent 的 TSX 里 `import { X } from "@cds"`
+// 就解析到这里。词表适配（components）与原始导出（raw）互不影响：旧画布仍走词表。
+// 注意：这里是 `export * as raw`，导出面等于 @company/cds-react 的全部导出（238 个组件 + 若干工具函数）。
+import * as raw from "@company/cds-react";
 
 const list = (value) => String(value || "").split(/[,，]/).map((s) => s.trim()).filter(Boolean);
 const Slot = (S) => (typeof S === "function" ? jsx(S, {}) : null);
@@ -59,3 +63,4 @@ export const components = {
 
 export const rootClass = "flex min-h-full flex-col gap-4 bg-background p-5 text-foreground";
 void Overlay;
+export { raw };

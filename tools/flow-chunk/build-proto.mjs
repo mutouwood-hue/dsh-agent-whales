@@ -9,9 +9,13 @@ import postcss from "postcss";
 import tailwindcss from "tailwindcss";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
+// 组件工坊（设计方案 §10）：Puck 里的项目组件要渲染成沙箱岛，srcdoc 必须与画布节点共用同一份实现。
+// 构建时把 lib/design/sandbox.js 的 sandboxSrcdoc 编译成文本注入（不把它整个打包进 chunk，避免把 Node 的 import 带进来）。
+const { sandboxSrcdoc } = await import(pathToFileURL(join(here, "..", "..", "lib", "design", "sandbox.js")).href);
 const pluginDir = join(here, "..", "..");
 const pkg = JSON.parse(readFileSync(join(pluginDir, "package.json"), "utf8"));
 const version = (name) => JSON.parse(readFileSync(join(here, "node_modules", ...name.split("/"), "package.json"), "utf8")).version;
@@ -54,8 +58,9 @@ async function chunk(entry, fileName, banner) {
 		jsx: "automatic",
 		external: ["react", "react-dom", "react/jsx-runtime", "react-dom/client"],
 		loader: { ".css": "text", ".jsx": "jsx" },
-		define: { "process.env.NODE_ENV": "\"production\"" },
-		nodePaths: [join(here, "node_modules")]
+		nodePaths: [join(here, "node_modules")],
+		// 组件工坊（设计方案 §10）：沙箱岛的 srcdoc 与画布节点共用同一份实现，构建时注入。
+		define: { "process.env.NODE_ENV": "\"production\"", "__WHALES_SANDBOX_SRCDOC__": JSON.stringify(sandboxSrcdoc({ title: "puck-island" })) }
 	});
 	const wrapped = banner
 		+ "window.__ModuleLoader__.load({ id: " + JSON.stringify(pkg.name) + ", chunk: " + JSON.stringify(fileName) + ", factory: function (require) {\n"

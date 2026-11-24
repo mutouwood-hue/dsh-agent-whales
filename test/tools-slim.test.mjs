@@ -2,6 +2,7 @@
 //   · 画布 5 → 1：只留只读 whales_canvas_inspect（projectId 缺省 = 调用者所在项目，替代被删的 list）
 //   · 串门 5 → 3：resume 并入 send（对方离线自动唤醒），trace 并入 read（trace: true）
 //   · 新增 whales_requirement（读 / 建 / 改需求；不能确认设计、设负责人、标可接受）
+// 组件工坊 P1：12 → 14，新增 whales_design_write / whales_design_read（写 / 读项目内组件与画板）。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -14,7 +15,7 @@ const plugin = await import("../lib/index.js");
 const here = dirname(fileURLToPath(import.meta.url));
 process.env.DSH_AGENT_WHALES_PRESET_DIR = mkdtempSync(join(tmpdir(), "aw-slim-presets-"));
 
-const WHALES_12 = ["whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_e2e_report", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_requirement", "whales_visit_list", "whales_visit_read", "whales_visit_send"];
+const WHALES_14 = ["whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_design_read", "whales_design_write", "whales_e2e_report", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_requirement", "whales_visit_list", "whales_visit_read", "whales_visit_send"];
 const REMOVED = ["whales_canvas_list", "whales_canvas_layout", "whales_canvas_link", "whales_canvas_unlink", "whales_visit_resume", "whales_visit_trace"];
 
 function assertLossless(value, label) {
@@ -97,10 +98,10 @@ async function withApp(options, run) {
 
 // ── 清单 ─────────────────────────────────────────────────────────────────────
 
-test("工具清单：恰好 12 个 whales_* 工具；被合并 / 删除的 6 个不再注册；每个工具都有 render 并返回 text block", async () => {
+test("工具清单：恰好 14 个 whales_* 工具；被合并 / 删除的 6 个不再注册；每个工具都有 render 并返回 text block", async () => {
   await withApp({}, async ({ app }) => {
     const names = Object.keys(app.tools).filter((n) => n.startsWith("whales_")).sort();
-    assert.deepEqual(names, WHALES_12);
+    assert.deepEqual(names, WHALES_14);
     for (const gone of REMOVED) assert.equal(app.tools[gone], undefined, gone + " 不应再注册");
     for (const name of names) {
       const blocks = app.tools[name].output.render({}, {});

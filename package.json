@@ -28,6 +28,7 @@
     "lib/view-host.js",
     "lib/view/*.js",
     "lib/view/LICENSE-deep-view",
+    "lib/design/*.js",
     "cordis.patch.yml",
     "presets/dsh-agent-whales-worker/preset.yml",
     "presets/dsh-agent-whales-worker/agent.cordis.yml",
@@ -39,8 +40,15 @@
     "assets/office/manifest.json",
     "assets/office/*.webp",
     "README.md",
-    "NOTICE.md"
+    "NOTICE.md",
+    "lib/client.design.js",
+    "lib/client.sandbox-runtime.js"
   ],
+  "dependencies": {
+    "@babel/parser": "^7.28.5",
+    "magic-string": "^0.30.21",
+    "sucrase": "^3.35.0"
+  },
   "engines": {
     "node": ">=20"
   },

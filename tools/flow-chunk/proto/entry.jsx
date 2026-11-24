@@ -12,7 +12,7 @@ import * as ReactDOM from "react-dom";
 import * as JSXRuntime from "react/jsx-runtime";
 import { jsx, jsxs } from "react/jsx-runtime";
 import { PROTOTYPE_VOCAB, PROTOTYPE_VOCAB_NAMES } from "../../../lib/prototype-vocab.js";
-import { shadcnComponents, shadcnRootClass } from "./shadcn-pack.jsx";
+import { shadcnComponents, shadcnRootClass, shadcnRaw } from "./shadcn-pack.jsx";
 import SHADCN_CSS from "./shadcn.generated.css";
 
 export const VOCAB_NAMES = PROTOTYPE_VOCAB_NAMES;
@@ -21,7 +21,8 @@ const { useEffect, useMemo, useRef, useState } = React;
 
 // ── 组件包 ────────────────────────────────────────────────────────────────
 
-const BUILTIN = { id: "shadcn", name: "shadcn/ui（内置）", builtin: true, components: shadcnComponents, css: SHADCN_CSS, rootClass: shadcnRootClass };
+// 组件工坊（设计方案 §7）：内置包也带 `raw`，保证没有本地组件包的机器上 `import { X } from "@cds"` 依然可用。
+const BUILTIN = { id: "shadcn", name: "shadcn/ui（内置）", builtin: true, components: shadcnComponents, raw: shadcnRaw, css: SHADCN_CSS, rootClass: shadcnRootClass };
 const packCache = new Map([["shadcn", Promise.resolve(BUILTIN)]]);
 const SHARED = { react: React, "react-dom": ReactDOM, "react/jsx-runtime": JSXRuntime };
 
@@ -38,7 +39,7 @@ function evalPack(meta, code, css) {
 	if (typeof out === "function") out = out(React);
 	const components = out && out.components ? out.components : out;
 	if (!components || typeof components !== "object") throw new Error("组件包 " + meta.id + " 没有导出组件表");
-	return { id: meta.id, name: meta.name || meta.id, builtin: false, components, css: css || "", rootClass: (out && out.rootClass) || meta.rootClass || "" };
+	return { id: meta.id, name: meta.name || meta.id, builtin: false, components, raw: (out && out.raw) || null, css: css || "", rootClass: (out && out.rootClass) || meta.rootClass || "" };
 }
 
 export function loadPack(meta) {
@@ -78,8 +79,92 @@ export function packCoverage(pack) {
 	return { covered: has.length, total: PROTOTYPE_VOCAB_NAMES.length, missing: PROTOTYPE_VOCAB_NAMES.filter((name) => has.indexOf(name) < 0) };
 }
 
+/**
+ * 沙箱岛（设计方案 §10）：项目组件在 Puck 里**不直接执行**。
+ *
+ * 为什么：Puck 画布本身就是同源 iframe，在里面执行 AI 写的代码等于把代码带进可信上下文——
+ * 一次提示注入就能拿到同源的 x-whales-token。所以项目组件在这里渲染成一个**自动撑高的小沙箱 iframe**，
+ * props 经 postMessage 传进去，与画布上的组件节点走同一套协议（P0 结论：origin=null + 一次性 nonce）。
+ *
+ * 单帧实例上限 30（方案 §6.5 的实测阈值）；超出的给占位提示，不静默丢。
+ */
+export const PROJECT_ISLAND_MAX = 30;
+
+function projectIslandPlaceholder(name, reason) {
+	return function ProjectIslandPlaceholder() {
+		return jsx("div", {
+			style: { border: "1px dashed #c4c4c4", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#888", background: "#fafafa" },
+			children: "（项目组件「" + name + "」" + (reason || "当前环境不支持沙箱渲染") + "）"
+		});
+	};
+}
+
+// 沙箱 iframe 的 srcdoc：由 build-proto.mjs 在构建时从 lib/design/sandbox.js 注入（虚拟模块 @whales/sandbox-srcdoc），
+// 保证 Puck 里的沙箱岛与画布节点用**同一份**协议实现。
+// 构建时由 esbuild 的 define 注入（__WHALES_SANDBOX_SRCDOC__）；单测环境没有这个值，退回最小壳。
+let sandboxSrcdocFn = function () {
+	const injected = typeof __WHALES_SANDBOX_SRCDOC__ === "string" ? __WHALES_SANDBOX_SRCDOC__ : "";
+	return injected !== "" ? injected : "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><div id=\"root\"></div></body></html>";
+};
+export function __setSandboxSrcdoc(fn) { if (typeof fn === "function") sandboxSrcdocFn = fn; }
+
+/**
+ * 一个项目组件的沙箱岛：iframe + 运行时 + 编译产物。
+ * @param {{ name: string, title?: string, code?: string, dependencies?: Array<{name:string,code:string}>, props?: object }} props
+ */
+export function ProjectIsland({ name, code, dependencies, props, title }) {
+	const frameRef = useRef(null);
+	const [state, setState] = useState({ status: "loading", error: "", height: 160 });
+	useEffect(() => {
+		const frame = frameRef.current;
+		if (!frame) return undefined;
+		let live = true;
+		const nonce = "island-" + Math.random().toString(16).slice(2) + "-" + Date.now();
+		const onMessage = (event) => {
+			// 沙箱是不透明源：只认 origin === "null" + nonce（P0 结论：不用 event.source）
+			if (event.origin !== "null") return;
+			const data = event.data || {};
+			if (data.type === "ready") {
+				if (data.nonce !== nonce) return;
+				frame.contentWindow.postMessage({ type: "render", nonce: nonce, runId: "island", name: name, code: code || "", props: props || {}, dependencies: dependencies || [] }, "*");
+				return;
+			}
+			if (data.nonce !== nonce) return;
+			if (data.type === "rendered") {
+				if (!live) return;
+				setState({ status: data.ok ? "ok" : "error", error: data.error || "", height: Math.max(80, Math.min(1200, (data.height || 0) + 8)) });
+				return;
+			}
+			if (data.type === "error" && live) setState({ status: "error", error: String(data.message || "") });
+		};
+		window.addEventListener("message", onMessage);
+		let cancelled = false;
+		(async () => {
+			try {
+				const response = await fetch("/agent-whales/api/design/runtime.js");
+				const runtime = response.ok ? await response.text() : "";
+				if (cancelled || !live) return;
+				frame.contentWindow.postMessage({ type: "init", nonce: nonce, runtime: runtime, packCode: "", styles: "" }, "*");
+			} catch (error) {
+				if (live) setState({ status: "error", error: String(error && error.message || error) });
+			}
+		})();
+		return () => { cancelled = true; live = false; window.removeEventListener("message", onMessage); };
+	}, [name, code, props]);
+	return jsxs("div", { style: { position: "relative", width: "100%", minHeight: 120 }, children: [
+		jsx("iframe", {
+			ref: frameRef,
+			title: title || name,
+			sandbox: "allow-scripts",
+			srcDoc: sandboxSrcdocFn({ title: title || name }),
+			style: { width: "100%", height: state.height, border: "0", display: "block" }
+		}),
+		state.status === "error" ? jsx("div", { style: { position: "absolute", inset: "auto 0 0 0", background: "#fef2f2", color: "#991b1b", border: "1px solid #dc2626", borderRadius: 6, padding: "4px 6px", fontSize: 11 } }, "项目组件渲染出错：" + String(state.error).slice(0, 200)) : null
+	] });
+}
+
 /** 词表 + 组件包 → Puck config。字段口径 = Puck 字段。 */
-export function buildPuckConfig(pack) {
+export function buildPuckConfig(pack, projectComponents) {
 	const components = {};
 	for (const name of PROTOTYPE_VOCAB_NAMES) {
 		const spec = PROTOTYPE_VOCAB[name];
@@ -92,6 +177,35 @@ export function buildPuckConfig(pack) {
 		}
 		const impl = pack && pack.components && typeof pack.components[name] === "function" ? pack.components[name] : missing(name);
 		components[name] = { label: spec.label + " · " + name, fields, defaultProps: spec.defaults, render: (props) => jsx(impl, props) };
+	}
+	// 组件工坊（设计方案 §10）：本项目的组件并进积木栏，label 前缀「项目 · 」，**渲染成沙箱岛**（不直接执行）。
+	if (projectComponents && typeof projectComponents === "object") {
+		let islandCount = 0;
+		for (const name of Object.keys(projectComponents)) {
+			const entry = projectComponents[name] || {};
+			const schema = entry.propsSchema && typeof entry.propsSchema === "object" ? entry.propsSchema : {};
+			const fields = {};
+			for (const key of Object.keys(schema)) {
+				const field = schema[key] || {};
+				if (field.type === "select" || field.type === "radio") {
+					const options = Array.isArray(field.options) ? field.options : [];
+					fields[key] = { type: field.type, label: field.label || key, options: options.map((value) => ({ label: value, value })) };
+				} else {
+					fields[key] = { type: field.type === "slot" ? "slot" : field.type || "text", label: field.label || key };
+				}
+			}
+			const defaults = Array.isArray(entry.examples) && entry.examples.length > 0 && entry.examples[0] && typeof entry.examples[0] === "object" ? entry.examples[0] : {};
+			const withinLimit = islandCount < PROJECT_ISLAND_MAX;
+			if (withinLimit) islandCount += 1;
+			components["project:" + name] = {
+				label: "项目 · " + (entry.title || name),
+				fields,
+				defaultProps: defaults,
+				render: withinLimit
+					? (props) => jsx(ProjectIsland, { name: name, title: entry.title, code: entry.compiled, dependencies: entry.dependencies, props: props })
+					: projectIslandPlaceholder(name, "超出单帧 " + PROJECT_ISLAND_MAX + " 个沙箱岛的上限")
+			};
+		}
 	}
 	return {
 		components,
@@ -227,10 +341,13 @@ export function LibraryNode(props) {
  * 全屏编辑浮层：Puck 编辑器（Puck 由 client.puck.js 按需加载后经 props.Puck 传进来）。
  * 组件包 CSS 经 overrides.iframe 只注入 Puck 自己的画布 iframe，不进 DSH 页面。
  */
-export function PrototypeEditor({ Puck, title, packMeta, data, labels, onSave, onClose }) {
+export function PrototypeEditor({ Puck, title, packMeta, projectComponents, data, labels, onSave, onClose }) {
 	const text = labels || {};
 	const { pack, error } = usePack(packMeta);
-	const config = useMemo(() => (pack ? buildPuckConfig(pack) : null), [pack]);
+	// 组件工坊（设计方案 §10）：本项目的组件并进积木栏（label 前缀「项目 · 」，渲染成沙箱岛）。
+	// projectComponents 由调用方从 /design/components + /design/source 取好传进来；为空就是只有词表。
+	const projectKey = projectComponents ? Object.keys(projectComponents).sort().join(",") : "";
+	const config = useMemo(() => (pack ? buildPuckConfig(pack, projectComponents) : null), [pack, projectKey]);
 	const overrides = useMemo(() => ({
 		iframe: ({ children, document }) => { injectCss(document, "whales-pack-css", pack && pack.css); return children; },
 		headerActions: ({ children }) => jsxs(React.Fragment, { children: [jsx("button", { type: "button", onClick: onClose, style: chrome.btn, children: text.close || "关闭" }), children] })

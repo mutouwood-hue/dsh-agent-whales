@@ -1,0 +1,79 @@
+{
+  "generatedAt": "2026-11-24T05:14:03.603Z",
+  "plugin": "0.25.0",
+  "findings": {
+    "#4 运行时体积": {
+      "version": "react 18.3.1 + react-dom 18.3.1",
+      "rawBytes": 142455,
+      "rawKB": 139.1,
+      "gzipKB": 44.8,
+      "note": "esbuild IIFE + minify + NODE_ENV=production；沙箱以文本传进 iframe"
+    },
+    "#5 sucrase __source": {
+      "productionFalse_hasLineNumber": true,
+      "productionFalse_hasColumnNumber": false,
+      "productionFalse_usesJsxDevRuntime": true,
+      "productionTrue_hasSourceInfo": false,
+      "productionTrue_usesJsxRuntime": true,
+      "reactProductionJsxDevIsStub": true,
+      "reactProductionJsxDevExcerpt": "/** * @license React * react-jsx-dev-runtime.production.min.js * * Copyright (c) Facebook, Inc. and its affiliates. * * This source code is licensed under the M",
+      "conclusion": "sucrase 的 __source 只有 lineNumber 没有 columnNumber，且 React 生产版 jsxDEV 是空桩 → 改用 babel 静态表 + magic-string 插 data-wsrc"
+    },
+    "#3 api.json 抽取": {
+      "skipped": true,
+      "reason": "没有 typescript（可选依赖，只用来生成 api.json）"
+    },
+    "#1 CDS 样式覆盖": {
+      "cssBytes": 139591,
+      "looksLikeTailwindV4": true,
+      "tokenVars": 634,
+      "present": [
+        "gap-4",
+        "gap-8",
+        "p-5",
+        "flex",
+        "flex-col",
+        "grid",
+        "grid-cols-2",
+        "mt-4",
+        "text-2xl",
+        "text-sm",
+        "font-semibold",
+        "bg-muted",
+        "text-muted-foreground",
+        "rounded-lg",
+        "shadow-lg",
+        "border-t",
+        "w-full",
+        "items-center",
+        "justify-end"
+      ],
+      "missing": [
+        "gap-7",
+        "grid-cols-[1fr_2fr]",
+        "col-span-2",
+        "max-w-lg",
+        "mt-7"
+      ],
+      "conclusion": "常用类基本齐全，但 5 个探针类无样式 → 缺口用宿主侧 Tailwind 3 补"
+    },
+    "#2 沙箱渲染 CDS": {
+      "browser": "not-run-here",
+      "how": "跑 tools 里的浏览器探针（见 README「组件工坊验证」），它会把 rendered 回报写进 render-log.json",
+      "note": "本脚本在 Node 里，不能验证异源 iframe 里的渲染"
+    },
+    "#7 沙箱岛性能": {
+      "browser": "not-run-here",
+      "how": "浏览器探针里的 islandBenchmark(N)，要记「创建前基线与结束后 gc 再读」两个点，不能跨轮相减",
+      "note": "P0 当时的数字是 30 个岛 1.6 s / +34 MB，但那次的测量没有留基线（审计 B3），本条按「未验证」对待"
+    },
+    "#2 组件包 raw 体积": {
+      "bundleBytes": 662249,
+      "bundleKB": 646.7,
+      "apiBytes": 175641,
+      "apiKB": 171.5,
+      "manifestRaw": true,
+      "note": "export * as raw 把 CDS 全部导出带进来，112KB → 646.7KB（5.8×）；渲染是否跑通见浏览器探针"
+    }
+  }
+}

@@ -71,3 +71,9 @@ import "./e2e-protocol.test.mjs";
 import "./e2e-runs-http.test.mjs";
 import "./e2e-reflow-http.test.mjs";
 import "./e2e-autorun-http.test.mjs";
+// 组件工坊 P1：宿主编译 / 定位表 / 落盘与锁 / 设计服务。
+import "./design-compile.test.mjs";
+import "./design-store.test.mjs";
+import "./design-service.test.mjs";
+import "./design-http.test.mjs";
+import "./design-style.test.mjs";

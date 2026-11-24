@@ -1772,7 +1772,7 @@ test("宿主 apply：服务重载（作用域释放 + 重新注入）不重复�
   host.apply(injectHost.ctx);
   flushInjected(injectHost);
   const toolCount = Object.keys(injectHost.state.tools).length;
-  assert.equal(toolCount, 13, "12 个 whales_* 工具（3 串门 + 提案 + 2 简报 + 2 流程图 + 原型 + 1 画布只读 + E2E 上报 + 需求）+ show_view");
+  assert.equal(toolCount, 15, "14 个 whales_* 工具（3 串门 + 提案 + 2 简报 + 2 流程图 + 原型 + 1 画布只读 + E2E 上报 + 需求 + 2 设计）+ show_view");
   assert.equal(injectHost.state.routes.length, 1);
 
   disposeInjected(injectHost);

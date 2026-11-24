@@ -965,7 +965,7 @@ test("串门：注册 list / send / read 三个工具（resume 已并入 send、
     effect: (run) => { run(); return () => {}; }
   });
 
-  assert.deepEqual(Object.keys(registered).sort(), ["show_view", "whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_e2e_report", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_requirement", "whales_visit_list", "whales_visit_read", "whales_visit_send"]);
+  assert.deepEqual(Object.keys(registered).sort(), ["show_view", "whales_brief_read", "whales_brief_write", "whales_canvas_inspect", "whales_design_read", "whales_design_write", "whales_e2e_report", "whales_flow_draw", "whales_flow_read", "whales_propose_tasks", "whales_prototype_draw", "whales_requirement", "whales_visit_list", "whales_visit_read", "whales_visit_send"]);
   assert.equal(typeof registered.whales_visit_send.output.render, "function", "工具必须带 output.render");
   // 网关按 OpenAI function calling 校验：parameters 必须是 { type: "object", properties } 的 JSON Schema。
   // 传「属性表」或空对象会让整轮请求 400（真实事故：whales_visit_list 变成 type: null）。

@@ -83,3 +83,73 @@ export const shadcnComponents = {
 
 /** 页面根：内边距 + 纵向间距（所有组件包共用；本地包可以在 manifest 里给 rootClass 覆盖）。 */
 export const shadcnRootClass = "flex min-h-full flex-col gap-4 bg-background p-5 text-foreground antialiased";
+
+/**
+ * 组件工坊（设计方案 §7）：内置包的**原始组件**（`import { Button } from "@cds"` 解析到这里）。
+ *
+ * 为什么要单独一份：词表里那 22 个是「按 Puck 字段渲染」的适配层（`shadcnComponents`），字段被词表钉死；
+ * agent 写 TSX 时需要能像用真组件库那样传 children / className / onClick / variant。
+ * 这里按 shadcn/ui（MIT）的类名与 CSS 变量给出**带 children 与常用 props** 的版本，保证没有 CDS 的机器也能用。
+ * 刻意保持轻量：不带 Radix（不做真弹层 / 键盘焦点管理），只是个够用的默认组件包。
+ */
+const buttonVariants = {
+	default: "bg-primary text-primary-foreground shadow hover:bg-primary/90",
+	primary: "bg-primary text-primary-foreground shadow hover:bg-primary/90",
+	secondary: "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
+	outline: "border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground",
+	ghost: "hover:bg-accent hover:text-accent-foreground",
+	destructive: "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90"
+};
+const cardCls = "rounded-lg border bg-background text-foreground shadow-sm";
+const Card = ({ className, children, header, footer, ...rest }) => jsxs("div", { className: cn(cardCls, className), ...rest, children: [
+	header ? jsx("div", { className: "flex flex-col gap-1 p-5 pb-2", children: header }) : null,
+	jsx("div", { className: "p-5", children }),
+	footer ? jsx("div", { className: "flex items-center p-5 pt-0", children: footer }) : null
+] });
+
+export const shadcnRaw = {
+	Button: ({ variant = "default", className, children, ...rest }) => jsx("button", { type: "button", className: cn("inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md px-4 py-2 text-sm font-medium transition-colors", buttonVariants[variant] || buttonVariants.default, className), ...rest, children }),
+	Input: ({ className, ...rest }) => jsx("input", { className: cn(field, className), ...rest }),
+	Textarea: ({ className, rows = 3, ...rest }) => jsx("textarea", { rows, className: cn(field, "min-h-[72px] h-auto py-2", className), ...rest }),
+	Select: ({ options, className, ...rest }) => {
+		const items = (Array.isArray(options) ? options : []).map((option) => {
+			const value = option && option.value !== undefined ? option.value : option;
+			const text = option && option.label !== undefined ? option.label : String(value);
+			return { value: String(value), text: String(text) };
+		});
+		return jsx("select", { className: cn(field, className), ...rest, children: items.map((item) => jsx("option", { value: item.value, children: item.text }, item.value)) });
+	},
+	Label: ({ className, children, ...rest }) => jsx("label", { className: cn(label, className), ...rest, children }),
+	Badge: ({ variant = "default", className, children, ...rest }) => jsx("span", { className: cn("inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold", BADGE[variant] || BADGE.default, className), ...rest, children }),
+	Card: Card,
+	CardHeader: ({ className, children }) => jsx("div", { className: cn("flex flex-col gap-1 p-5 pb-2", className), children }),
+	CardTitle: ({ className, children }) => jsx("div", { className: cn("text-lg font-semibold leading-none tracking-tight", className), children }),
+	CardDescription: ({ className, children }) => jsx("div", { className: cn("text-sm text-muted-foreground", className), children }),
+	CardContent: ({ className, children }) => jsx("div", { className: cn("p-5", className), children }),
+	Separator: ({ className }) => jsx("hr", { className: cn("my-2 border-border", className) }),
+	Alert: ({ tone = "info", title, children, className }) => jsxs("div", { role: "alert", className: cn("relative w-full rounded-lg border p-4 text-sm", ALERT[tone] || ALERT.info, className), children: [
+		title ? jsx("div", { className: "mb-1 font-medium", children: title }) : null,
+		children ? jsx("div", { children }) : null
+	] }),
+	Table: ({ columns, rows, rowKey }) => jsx("div", { className: "w-full overflow-auto rounded-lg border", children: jsxs("table", { className: "w-full caption-bottom text-sm", children: [
+		jsx("thead", { children: jsx("tr", { className: "border-b bg-muted/50", children: (columns || []).map((col) => jsx("th", { className: "h-10 px-3 text-left align-middle font-medium text-muted-foreground", children: col.header }, col.key)) }) }),
+		jsx("tbody", { children: (rows || []).map((row, index) => jsx("tr", { className: "border-b transition-colors hover:bg-muted/50", children: (columns || []).map((col) => jsx("td", { className: "p-3 align-middle", children: typeof col.render === "function" ? col.render(row) : String(row[col.key] === undefined ? "" : row[col.key]) }, col.key)) }, typeof rowKey === "function" ? rowKey(row, index) : index)) })
+	] }) }),
+	Tabs: ({ items, value, onChange }) => jsxs("div", { className: "flex flex-col gap-3", children: [
+		jsx("div", { className: "flex gap-1 border-b", children: (items || []).map((item) => jsx("button", { type: "button", onClick: () => { if (typeof onChange === "function") onChange(item.key); }, className: cn("px-3 py-2 text-sm font-medium", item.key === value ? "border-b-2 border-primary text-foreground" : "text-muted-foreground hover:text-foreground"), children: item.label }, item.key)) }),
+		jsx("div", { children: (items || []).filter((item) => item.key === value).map((item) => jsx("div", { children: item.content }, item.key)) })
+	] }),
+	Switch: ({ checked, onChange, className }) => jsx("button", { type: "button", role: "switch", "aria-checked": Boolean(checked), onClick: () => { if (typeof onChange === "function") onChange(!checked); }, className: cn("relative inline-flex h-5 w-9 items-center rounded-full transition-colors", checked ? "bg-primary" : "bg-input", className), children: jsx("span", { className: cn("block size-4 rounded-full bg-background shadow transition-transform", checked ? "translate-x-4" : "translate-x-0.5") }) }),
+	Checkbox: ({ checked, onChange, className, ...rest }) => jsx("input", { type: "checkbox", checked: Boolean(checked), onChange: (event) => { if (typeof onChange === "function") onChange(event.target.checked); }, className: cn("size-4 rounded border-input accent-primary", className), ...rest }),
+	EmptyState: ({ title = "还没有数据", hint, className }) => jsxs("div", { className: cn("flex flex-col items-center justify-center gap-1 rounded-lg border border-dashed p-8 text-center", className), children: [
+		jsx("div", { className: "text-sm font-medium text-foreground", children: title }),
+		hint ? jsx("div", { className: "text-xs text-muted-foreground", children: hint }) : null
+	] }),
+	Progress: ({ value = 0, className }) => jsx("div", { className: cn("h-2 w-full overflow-hidden rounded-full bg-muted", className), children: jsx("div", { className: "h-full bg-primary transition-all", style: { width: Math.max(0, Math.min(100, Number(value) || 0)) + "%" } }) }),
+	Avatar: ({ name = "", className }) => jsx("span", { className: cn("inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground", className), children: String(name).trim().slice(0, 1) || "?" }),
+	Title: ({ level = 2, className, children }) => jsx("h" + (Number(level) >= 1 && Number(level) <= 6 ? level : 2), { className: cn("font-semibold tracking-tight", className), children }),
+	Text: ({ tone = "default", className, children }) => jsx("p", { className: cn("text-sm leading-7", tone === "muted" ? "text-muted-foreground" : "text-foreground", className), children }),
+	Stack: ({ gap = 3, className, children }) => jsx("div", { className: cn("flex flex-col", gap === 1 ? "gap-1" : gap === 2 ? "gap-2" : gap === 4 ? "gap-4" : "gap-3", className), children }),
+	Row: ({ gap = 2, className, children }) => jsx("div", { className: cn("flex flex-row items-center", gap === 1 ? "gap-1" : gap === 3 ? "gap-3" : gap === 4 ? "gap-4" : "gap-2", className), children })
+};
+
