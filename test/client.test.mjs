@@ -191,8 +191,9 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
 
   plugin.apply(ctx);
 
-  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "whales.canvas.session", "sidebar.panellist", "conversation.input.dock"]);
-  assert.equal(registrations.length, 7);
+  // 2026-11-24 加 `sidebar.right.pane.tab`：右侧栏里那一页的正文（「在侧边打开画布」）
+    assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "whales.canvas.session", "sidebar.right.pane.tab", "sidebar.panellist", "conversation.input.dock"]);
+  assert.equal(registrations.length, 8, "7 条原有 + 右侧栏 tab body（2026-11-24）");
   for (const entry of registrations.slice(0, 2)) {
     assert.equal(entry.options.id, "agent-whales");
     assert.equal(typeof entry.component, "function");
@@ -225,14 +226,15 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
   assert.equal(sessionSeat.options.name, "whales.canvas.session");
   assert.equal(sessionSeat.options.key, undefined);
   assert.equal(typeof sessionSeat.component, "function");
-  const entrySeat = registrations[5];
-  assert.equal(entrySeat.options.name, "sidebar.panellist");
+  // 按名字找，不按索引：以后再加槽位不会把这里挤歪
+  const entrySeat = registrations.find((row) => row.options.name === "sidebar.panellist");
+  assert.ok(entrySeat, "必须注册 sidebar.panellist");
   assert.equal(entrySeat.options.id, "whales-canvas");
   assert.equal(typeof entrySeat.options.order, "number", "list 槽用 {id, order}");
   assert.equal(typeof entrySeat.component, "function");
   // W2/D2：目标条叠在 conversation.input.dock 上——**不影子**官方 composer（不设 priority）
-  const dockSeat = registrations[6];
-  assert.equal(dockSeat.options.name, "conversation.input.dock");
+  const dockSeat = registrations.find((row) => row.options.name === "conversation.input.dock");
+  assert.ok(dockSeat, "必须注册 conversation.input.dock");
   assert.equal(dockSeat.options.priority, undefined, "D2 硬约束：叠加上方目标条，不影子官方输入区");
   assert.equal(typeof dockSeat.component, "function");
   assert.equal(appended.length, 1, "样式标签注入一次");
