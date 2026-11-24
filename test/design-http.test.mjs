@@ -336,3 +336,20 @@ test("内置 shadcn 库节点下也能用 @cds（P3 真机抓到：曾误判成�
 	const back = await app.call("GET", `/design/source?projectId=${projectId}&kind=component&id=CardWithBadge`, undefined, token);
 	assert.equal(back.body.data.compiledCode.length > 0, true, "要能编译出产物");
 }));
+
+test("pack-api：内置 shadcn 包也要给组件清单（真机验证：agent 抱怨过「没有 api.json，只能猜 props」）", () => withApp(async ({ app, token, projectId }) => {
+	await app.call("POST", "/canvas/elements", { projectId, expectedRevision: 0, upsert: [{ id: "lib:shadcn", kind: "library", x: 0, y: 0, w: 200, h: 100, data: { packId: "shadcn" } }] }, token);
+	const got = await app.call("GET", `/design/pack-api?projectId=${projectId}`, undefined, token);
+	assert.equal(got.body.code, 200);
+	assert.equal(got.body.data.packId, "shadcn");
+	assert.ok(got.body.data.components !== null, "内置包必须给组件清单，不能是 null");
+	const names = Object.keys(got.body.data.components);
+	assert.ok(names.length >= 20, "清单要有全部原始组件，实际 " + names.length);
+	for (const must of ["Button", "Input", "Badge", "Table", "Stack", "Title", "Text"]) {
+		assert.ok(names.includes(must), "清单要包含 " + must);
+	}
+	// 每个组件要有 props 说明（agent 靠它写对 props，而不是猜）
+	const button = got.body.data.components.Button.props;
+	assert.ok(button && button.variant, "Button 要说明 variant");
+	assert.deepEqual(button.variant.values, ["default", "secondary", "outline", "ghost", "destructive"]);
+}));

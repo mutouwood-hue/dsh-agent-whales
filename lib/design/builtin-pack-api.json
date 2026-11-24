@@ -1,0 +1,149 @@
+{
+  "packId": "shadcn",
+  "version": "builtin",
+  "license": "MIT",
+  "raw": true,
+  "note": "内置 shadcn 风格组件包（词表 22 个组件的实现 + 这些原始组件）。`@cds` 指向的就是这个包。",
+  "components": {
+    "Button": {
+      "props": {
+        "variant": { "type": "enum", "values": ["default", "secondary", "outline", "ghost", "destructive"], "default": "default", "description": "按钮样式变体" },
+        "className": { "type": "string", "description": "追加的 token 类名" },
+        "children": { "type": "node", "required": true, "description": "按钮文字" }
+      }
+    },
+    "Input": {
+      "props": {
+        "className": { "type": "string", "description": "追加的 token 类名" },
+        "placeholder": { "type": "string" },
+        "value": { "type": "string" },
+        "onChange": { "type": "function" }
+      }
+    },
+    "Textarea": {
+      "props": {
+        "rows": { "type": "number", "default": 3 },
+        "className": { "type": "string" },
+        "placeholder": { "type": "string" }
+      }
+    },
+    "Select": {
+      "props": {
+        "options": { "type": "array", "items": "string | { value, label }", "required": true, "description": "选项；可以是字符串数组，也可以是 { value, label } 对象数组" },
+        "className": { "type": "string" },
+        "value": { "type": "string" },
+        "onChange": { "type": "function" }
+      }
+    },
+    "Label": {
+      "props": {
+        "className": { "type": "string" },
+        "children": { "type": "node", "required": true }
+      }
+    },
+    "Badge": {
+      "props": {
+        "variant": { "type": "enum", "values": ["default", "secondary", "outline", "destructive"], "default": "default" },
+        "className": { "type": "string" },
+        "children": { "type": "node", "required": true }
+      }
+    },
+    "Card": {
+      "props": {
+        "className": { "type": "string" },
+        "children": { "type": "node" }
+      }
+    },
+    "CardHeader": { "props": { "className": { "type": "string" }, "children": { "type": "node" } } },
+    "CardTitle": { "props": { "className": { "type": "string" }, "children": { "type": "node" } } },
+    "CardDescription": { "props": { "className": { "type": "string" }, "children": { "type": "node" } } },
+    "CardContent": { "props": { "className": { "type": "string" }, "children": { "type": "node" } } },
+    "Separator": { "props": { "className": { "type": "string" } } },
+    "Alert": {
+      "props": {
+        "tone": { "type": "enum", "values": ["info", "success", "warning", "danger"], "default": "info" },
+        "title": { "type": "string", "description": "标题（可选）" },
+        "className": { "type": "string" },
+        "children": { "type": "node" }
+      }
+    },
+    "Table": {
+      "props": {
+        "columns": { "type": "array", "items": "{ key, title, render? }", "required": true, "description": "列定义；render(cellValue, row) 返回节点" },
+        "rows": { "type": "array", "required": true, "description": "行数据" },
+        "empty": { "type": "string", "description": "空表文案" },
+        "className": { "type": "string" }
+      }
+    },
+    "Tabs": {
+      "props": {
+        "tabs": { "type": "array", "items": "{ key, label, content }", "required": true },
+        "value": { "type": "string" },
+        "onChange": { "type": "function" }
+      }
+    },
+    "Switch": {
+      "props": {
+        "checked": { "type": "boolean", "default": false },
+        "onChange": { "type": "function" },
+        "label": { "type": "string" },
+        "className": { "type": "string" }
+      }
+    },
+    "Checkbox": {
+      "props": {
+        "checked": { "type": "boolean", "default": false },
+        "onChange": { "type": "function" },
+        "label": { "type": "string" },
+        "className": { "type": "string" }
+      }
+    },
+    "EmptyState": {
+      "props": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "action": { "type": "node" }
+      }
+    },
+    "Progress": {
+      "props": {
+        "value": { "type": "number", "description": "0-100" },
+        "className": { "type": "string" }
+      }
+    },
+    "Avatar": {
+      "props": {
+        "name": { "type": "string", "description": "取首字做头像" },
+        "size": { "type": "enum", "values": ["sm", "md", "lg"], "default": "md" },
+        "className": { "type": "string" }
+      }
+    },
+    "Title": {
+      "props": {
+        "level": { "type": "number", "default": 2, "description": "1-4，对应字号" },
+        "children": { "type": "node", "required": true }
+      }
+    },
+    "Text": {
+      "props": {
+        "tone": { "type": "enum", "values": ["default", "muted", "danger"], "default": "default" },
+        "children": { "type": "node", "required": true }
+      }
+    },
+    "Stack": {
+      "props": {
+        "gap": { "type": "number", "default": 4, "description": "间距（token 尺度，如 1/2/3/4/6/8）" },
+        "className": { "type": "string" },
+        "children": { "type": "node" }
+      }
+    },
+    "Row": {
+      "props": {
+        "gap": { "type": "number", "default": 3 },
+        "align": { "type": "enum", "values": ["start", "center", "end", "between"], "default": "center" },
+        "className": { "type": "string" },
+        "children": { "type": "node" }
+      }
+    }
+  }
+}

@@ -42,7 +42,8 @@
     "README.md",
     "NOTICE.md",
     "lib/client.design.js",
-    "lib/client.sandbox-runtime.js"
+    "lib/client.sandbox-runtime.js",
+    "lib/design/*.json"
   ],
   "dependencies": {
     "@babel/parser": "^7.28.5",
