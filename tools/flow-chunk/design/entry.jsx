@@ -417,7 +417,23 @@ export function DesignComponentNode(props) {
 		return () => { live = false; };
 	}, [projectId, name]);
 	const examples = entity && entity.meta && Array.isArray(entity.meta.examples) ? entity.meta.examples : [];
-	const entry = { key: name + "-" + activeExample, props: examples[activeExample] || {} };
+	// tweaks（设计方案 §9.5）：组件声明 `export const tweaks = { gap: { type:"number", min, max, step, default },
+	// accent: { type:"select", options } }`，预览旁出滑杆 / 下拉；值以 props.__tweaks 传给组件（约定组件读 __tweaks）。
+	const tweakSpec = entity && entity.meta && entity.meta.tweaksSpec && typeof entity.meta.tweaksSpec === "object" ? entity.meta.tweaksSpec : {};
+	const tweakNames = Object.keys(tweakSpec);
+	const [tweakValues, setTweakValues] = useState({});
+	const effectiveTweaks = {};
+	for (const key of tweakNames) {
+		const spec = tweakSpec[key] || {};
+		if (tweakValues[key] !== undefined) { effectiveTweaks[key] = tweakValues[key]; continue; }
+		if (spec.default !== undefined) { effectiveTweaks[key] = spec.default; continue; }
+		effectiveTweaks[key] = spec.type === "number" ? (Number.isFinite(spec.min) ? spec.min : 0) : "";
+	}
+	const entry = {
+		// key 里带上 tweaks 的值：值一变就重新渲染沙箱（SandboxPreview 按 entry.key 判断要不要重跑）
+		key: name + "-" + activeExample + "-" + JSON.stringify(effectiveTweaks),
+		props: Object.assign({}, examples[activeExample] || {}, tweakNames.length > 0 ? { __tweaks: effectiveTweaks } : {})
+	};
 	return React.createElement("div", { style: chrome.card },
 		React.createElement("div", { style: chrome.head },
 			React.createElement("span", { style: { fontWeight: 600 } }, title || name),

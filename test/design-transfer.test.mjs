@@ -116,3 +116,39 @@ test("重名改名：保持 PascalCase，且不会撞到已有名字", () => {
 	assert.equal(uniqueImportName("bad-name!", []), "Badname", "非字母数字要去掉");
 	assert.equal(uniqueImportName("", []), "Component");
 });
+
+// ── P3 审计补的用例 ────────────────────────────────────────────────────────
+
+test("导出：有静态兜底块（没脚本也能看到「这是哪一版的什么设计」）", () => {
+	const html = buildExportHtml(baseInput());
+	assert.match(html, /id="whales-design-static"/, "要有静态块");
+	assert.match(html, /id="whales-design-root"/, "交互渲染要挂在专用挂载点上");
+	// 静态块里要能看到入口、组件名与导出版本
+	const staticPart = html.slice(html.indexOf('id="whales-design-static"'), html.indexOf('id="whales-design-root"'));
+	assert.match(staticPart, /审批时间线/);
+	assert.match(staticPart, /ApprovalTimeline/);
+	assert.match(staticPart, /组件 1 个/);
+});
+
+test("导出：静态块如实标出「受控包未内嵌代码」与许可证", () => {
+	const html = buildExportHtml(baseInput({ pack: { id: "cds", version: "3.0.8", license: "UNLICENSED", controlled: true, bundle: "SECRET", styles: "", includeCode: false } }));
+	const staticPart = html.slice(html.indexOf('id="whales-design-static"'), html.indexOf('id="whales-design-root"'));
+	assert.match(staticPart, /UNLICENSED/);
+	assert.match(staticPart, /未内嵌代码/);
+	assert.equal(html.includes("SECRET"), false, "受控代码绝不能出现在导出的任何地方");
+});
+
+test("导出：画板的 links 要带出去（否则导出的跳转必然失败）", () => {
+	const html = buildExportHtml(baseInput({ artboards: [{ artboardId: "b1", title: "审批页", width: "desktop", source: "y", links: ["b2", "b3"] }] }));
+	const parsed = parseExportHtml(html);
+	assert.deepEqual(parsed.payload.artboards[0].links, ["b2", "b3"]);
+});
+
+test("导入：条目的数量与格式做兜底（空 source / 超长名 都不炸）", () => {
+	const payload = { format: EXPORT_FORMAT, formatVersion: 1, components: [{ name: "OkCard", source: "" }, { name: "x".repeat(200), source: "y" }], artboards: [] };
+	const parsed = { ok: true, payload: payload };
+	const plan = planImport(parsed.payload, {});
+	// 只要求「不抛、能给出计划」，具体条目由 writeDesign 的校验兜
+	assert.ok(Array.isArray(plan.conflicts));
+	assert.ok(Array.isArray(plan.warnings));
+});

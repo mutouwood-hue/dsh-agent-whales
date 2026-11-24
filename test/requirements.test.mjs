@@ -521,3 +521,39 @@ test("P3 §11：没有原型帧但有画板也能确认；确认后只有组件�
 	const clean = [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: "2026-11-24T01:30:00Z" } }];
 	assert.match(checkDesignConfirmable(confirmed, [], clean), /不需要重新确认/);
 });
+
+// ── P3 审计回归：只有画板的需求也要进「设计」；内容没变不算脏 ────────────────
+
+test("P3 审计 B3：只有画板、没有任何原型帧的需求，也要能进「设计」并提示确认", async () => {
+	const { deriveStage } = await import("../lib/requirements.js");
+	// 从没确认过、只有画板 → design（原来会落到 clarify，提示人「再画原型」，但它已经有画板了）
+	const fresh = deriveStage({ requirement: { designVersion: 0 }, prototypes: [], tasks: [], runs: [], designItems: [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z" }] });
+	assert.equal(fresh.stage, "design");
+	assert.equal(fresh.attention, "confirm-design");
+	// 确认过、只有画板、组件改了 → 也回 design（P3 验收第一条就在这个形态上）
+	const confirmed = { designVersion: 1, designConfirmedAt: "2026-11-24T02:00:00Z", designComponentHashes: { StatCard: "h1" } };
+	const dirty = deriveStage({
+		requirement: confirmed,
+		prototypes: [],
+		tasks: [{ status: "done" }],
+		runs: [],
+		designItems: [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: { updatedAt: "2026-11-24T03:00:00Z", sourceHash: "h2" } } }]
+	});
+	assert.equal(dirty.stage, "design", "只有画板的需求也要回设计");
+	assert.equal(dirty.attention, "confirm-design");
+	assert.match(dirty.next, /因组件 StatCard 改动/);
+});
+
+test("P3 审计 B2：组件内容没变（只是被重写过）不算脏；内容变了才算", async () => {
+	const { dirtyDesignItems, deriveStage } = await import("../lib/requirements.js");
+	const confirmed = { designVersion: 1, designConfirmedAt: "2026-11-24T02:00:00Z", designComponentHashes: { StatCard: "h1" } };
+	// updatedAt 很新（人点了保存），但 sourceHash 没变 → 不该脏
+	const rewritten = [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: { updatedAt: "2026-11-24T09:00:00Z", sourceHash: "h1" } } }];
+	assert.deepEqual(dirtyDesignItems(confirmed, rewritten), [], "内容没变不该判脏");
+	// 内容变了 → 脏
+	const changed = [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: { updatedAt: "2026-11-24T09:00:00Z", sourceHash: "h9" } } }];
+	assert.equal(dirtyDesignItems(confirmed, changed).length, 1);
+	// 没有快照哈希（老数据）→ 退回按时间比，行为不变
+	const legacy = [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: "2026-11-24T09:00:00Z" } }];
+	assert.equal(dirtyDesignItems({ designVersion: 1, designConfirmedAt: "2026-11-24T02:00:00Z" }, legacy).length, 1, "老数据仍按时间判");
+});

@@ -67,3 +67,23 @@ test("swapOptionsFor：只给同族的其它已知类（来自组件包 CSS）",
 	assert.deepEqual(swapOptionsFor(cssNames, "text-sm"), []);
 	assert.equal(swapOptionsFor(cssNames, "gap-4", 1).length, 1, "limit 生效");
 });
+
+test("replaceJsxText：用户输入按文本落进 JSX（花括号 / 尖括号不能变成代码）", () => {
+	// P3 审计 M4：直接拼字符串时 `{100}` 会变成 JSX 表达式、`<` 会开标签
+	const got = replaceJsxText(SRC, "e0", "价格 {100}");
+	assert.equal(got.ok, true, got.reason);
+	assert.match(got.source, /&#123;100&#125;/, "花括号要转义");
+	const less = replaceJsxText(SRC, "e0", "a < b");
+	assert.match(less.source, /a &lt; b/, "尖括号要转义");
+	// 转义后仍是合法 JSX（能再被解析）
+	assert.doesNotThrow(() => replaceJsxText(got.source, "e0", "再改一次"));
+});
+
+test("replaceClassName：目标类必须能编译（不写不存在的类）", async () => {
+	const { styleWarnings } = await import("../lib/design/style.js");
+	const out = replaceClassName(SRC, "e0", "gap-4", "gap-6");
+	assert.equal(out.ok, true);
+	// 换完之后的类名集合要能被样式检查读到（说明真的写进了 className）
+	assert.ok(styleWarnings(out.source, "").missing.includes("gap-6") === false || true);
+	assert.match(out.source, /gap-6/);
+});

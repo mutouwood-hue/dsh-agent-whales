@@ -203,7 +203,7 @@ test("确认设计版本：只有人能确认；固化快照、版本递增；�
     // 没有原型帧：没东西可确认
     const none = await confirm(r.reqId, { expectedRevision: 1 });
     assert.equal(none.body.code, 40000);
-    assert.match(none.body.msg, /没有原型帧/);
+    assert.match(none.body.msg, /还没有原型帧或画板/);
 
     await putProto("proto:main", "第一版");
     // 越权 / 参数
