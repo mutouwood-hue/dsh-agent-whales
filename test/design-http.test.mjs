@@ -235,18 +235,16 @@ test("评论回传（设计方案 §9.3）：组件评论发给「最近写它�
 	const made = await app.call("POST", `/design/comments?projectId=${projectId}`, { target: "comp:ApprovalTimeline", wsrc: "e1", line: 3, column: 10, tag: "h2", body: "标题太大了" }, token);
 	assert.equal(made.body.code, 200);
 	assert.equal(made.body.data.comment.status, "open");
-	const delivered = made.body.data.delivered;
-	assert.ok(["sent", "unknown", "skipped", "failed"].includes(delivered), "delivered 要给明确状态，实际 " + delivered);
-
-	if (delivered === "sent") {
-		assert.equal(app.followups.length, 1, "要真的发一条消息出去");
-		const text = app.followups[0].text;
-		assert.match(text, /评论/);
-		assert.match(text, /ApprovalTimeline/);
-		assert.match(text, /标题太大了/);
-		assert.match(text, /第 3 行/, "消息里要带行列，agent 不用翻源码");
-		assert.match(text, /resolvesComments/, "要告诉 agent 改完怎么标记已处理");
-	}
+	// 这个 fixture 里 session-a（项目主对话）在线 → **必须真的送到**。
+	// （P2 审计 I10：原来写 `assert.ok([四种].includes(x))`，任何值都通过，等于什么都没验）
+	assert.equal(made.body.data.delivered, "sent", "评论要真的送到 agent，实际 " + made.body.data.delivered);
+	assert.equal(app.followups.length, 1, "要真的发一条消息出去");
+	const text = app.followups[0].text;
+	assert.match(text, /评论/);
+	assert.match(text, /ApprovalTimeline/);
+	assert.match(text, /标题太大了/);
+	assert.match(text, /第 3 行/, "消息里要带行列，agent 不用翻源码");
+	assert.match(text, /resolvesComments/, "要告诉 agent 改完怎么标记已处理");
 
 	// 评论无论如何都要落盘（送到与否不影响人写下的内容）
 	const list = await app.call("GET", `/design/comments?projectId=${projectId}`, undefined, token);
@@ -269,4 +267,61 @@ test("带 projectId 的越权：path 里的 projectId 只能是合法 id（不�
 	// 只认「被明确拒绝」的码：500 不算通过（那可能是崩了而不是挡住了）
 	assert.ok([40001, 40401, 40301].includes(bad.body.code), "非法 projectId 要给出明确拒绝码，实际 " + bad.body.code);
 	assert.equal(bad.body.data && bad.body.data.source, undefined, "绝不能返回任何源码内容");
+}));
+
+// ── P2 审计补的用例：compile / unlock / resolvesComments 闭环 ──────────────
+
+test("POST /design/compile：只编译不落盘（编辑器改源码时的实时反馈）", () => withApp(async ({ app, token, projectId }) => {
+	const ok = await app.call("POST", "/design/compile", { projectId, kind: "component", name: "Draft", source: SOURCE }, token);
+	assert.equal(ok.body.code, 200, JSON.stringify(ok.body).slice(0, 200));
+	assert.equal(ok.body.data.compile.ok, true);
+	assert.ok(ok.body.data.compiled.length > 0, "要给编译产物（编辑器预览用）");
+	// 不落盘：列表里不该出现 Draft
+	const list = await app.call("GET", `/design/components?projectId=${projectId}`, undefined, token);
+	assert.equal(list.body.data.components.some((row) => row.name === "Draft"), false, "compile 绝不能写盘");
+	// 语法错要带回行列
+	const bad = await app.call("POST", "/design/compile", { projectId, source: "export default function X() { return <div><span></div>; }" }, token);
+	// 编译失败回 200 + compile.ok=false + 带行列的错误（编辑器靠它显示错误条，不靠 HTTP 状态码）
+	assert.equal(bad.body.data.compile.ok, false, "语法错要如实回，实际 " + JSON.stringify(bad.body).slice(0, 160));
+	assert.match(bad.body.data.compile.errors[0].message, /第 \d+ 行/, "错误信息要带行列");
+	// 没 token 不许调（防止被当成跨项目探测工具）
+	const anon = await app.call("POST", "/design/compile", { projectId, source: SOURCE });
+	assert.equal(anon.body.code, 40301);
+}));
+
+test("POST /design/unlock：人显式解锁后 agent 能再写；解锁本身也要 token", () => withApp(async ({ app, token, projectId }) => {
+	await app.call("POST", "/design/source", { projectId, name: "ApprovalTimeline", source: SOURCE }, token);
+	const write = app.tools.whales_design_write;
+	const locked = await write.execute({ kind: "component", name: "ApprovalTimeline", source: SOURCE.replace("审批时间线", "改了"), sourceMessageIds: ["m1"] }, { agent: { id: "session-a" } });
+	assert.equal(locked.locked, true, "人保存过 → agent 被锁");
+
+	const anon = await app.call("POST", "/design/unlock", { projectId, name: "ApprovalTimeline" });
+	assert.equal(anon.body.code, 40301, "解锁只有人能点（要同源 token）");
+
+	const unlocked = await app.call("POST", "/design/unlock", { projectId, name: "ApprovalTimeline" }, token);
+	assert.equal(unlocked.body.code, 200, JSON.stringify(unlocked.body).slice(0, 200));
+	assert.equal(unlocked.body.data.unlocked, true);
+
+	const again = await write.execute({ kind: "component", name: "ApprovalTimeline", source: SOURCE.replace("审批时间线", "改了"), sourceMessageIds: ["m1"] }, { agent: { id: "session-a" } });
+	assert.equal(again.written, true, "解锁后 agent 应该能写，实际 " + JSON.stringify(again).slice(0, 160));
+}));
+
+test("评论闭环（§9.3）：agent 带 resolvesComments 改完 → 评论变 resolved，read 不再列它", () => withApp(async ({ app, token, projectId }) => {
+	const made = await app.call("POST", `/design/comments?projectId=${projectId}`, { target: "comp:ApprovalTimeline", wsrc: "e1", line: 3, body: "标题太大" }, token);
+	const commentId = made.body.data.comment.id;
+	assert.ok(commentId, "先有一条 open 评论");
+
+	const write = app.tools.whales_design_write;
+	const done = await write.execute({ kind: "component", name: "ApprovalTimeline", source: SOURCE, sourceMessageIds: ["m1"], resolvesComments: [commentId, "c-does-not-exist"] }, { agent: { id: "session-a" } });
+	assert.equal(done.written, true);
+	assert.deepEqual(done.resolvedComments, [commentId], "要标掉那条评论");
+	assert.deepEqual(done.resolvedMissing, ["c-does-not-exist"], "不存在的 id 要如实说，不能装没事");
+
+	const read = await app.tools.whales_design_read.execute({ what: "comments" }, { agent: { id: "session-a" } });
+	assert.equal(read.comments.length, 0, "resolved 的不再出现在未处理列表里");
+
+	// 人也能手动关
+	const second = await app.call("POST", `/design/comments?projectId=${projectId}`, { target: "comp:ApprovalTimeline", body: "再改一处" }, token);
+	const resolvedByUser = await app.call("POST", "/design/comments/resolve", { projectId, ids: [second.body.data.comment.id] }, token);
+	assert.equal(resolvedByUser.body.data.resolved.length, 1);
 }));

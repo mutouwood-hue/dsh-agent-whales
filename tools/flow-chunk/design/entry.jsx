@@ -406,7 +406,8 @@ export function DesignComponentNode(props) {
 	const data = (props.data && props.data.original) || {};
 	const name = typeof data.name === "string" ? data.name : "";
 	const title = typeof data.title === "string" ? data.title : name;
-	const projectId = props.projectId || "";
+	// 这些字段是 client.js 放进**节点 data** 的（React Flow 只把 data 放进 props.data）
+	const projectId = (props.data && props.data.projectId) || props.projectId || "";
 	const exampleCount = Number.isFinite(data.examplesCount) ? data.examplesCount : 0;
 	const [activeExample, setActiveExample] = useState(0);
 	const [entity, setEntity] = useState(null);
@@ -431,7 +432,7 @@ export function DesignComponentNode(props) {
 			) : null
 		),
 		React.createElement(SandboxPreview, {
-			projectId: projectId, kind: "component", id: name, title: title, packId: data.packId, token: props.token,
+			projectId: projectId, kind: "component", id: name, title: title, packId: data.packId, token: (props.data && props.data.token) || props.token,
 			entry: entry, exampleIndex: activeExample, sourceHash: data.sourceHash, width: "desktop", scale: props.scale || 0.42, maxHeight: props.maxHeight || 360
 		})
 	);
@@ -442,16 +443,25 @@ export function DesignArtboardNode(props) {
 	const data = (props.data && props.data.original) || {};
 	const artboardId = typeof data.artboardId === "string" ? data.artboardId : "";
 	const title = typeof data.title === "string" ? data.title : artboardId;
-	const projectId = props.projectId || "";
+	// 这些字段是 client.js 放进**节点 data** 的（React Flow 只把 data 放进 props.data）
+	const projectId = (props.data && props.data.projectId) || props.projectId || "";
 	const width = data.width === "mobile" ? "mobile" : "desktop";
 	// 画板跳转（设计方案 §9.1 / §6.4）：navigate 到同需求的另一个画板 → 这个节点就地切换预览，
 	// 并在卡头给一个「返回」把栈退回去。跳转不做页面导航（沙箱里也导航不了）。
 	const [trail, setTrail] = useState([artboardId]);
+	// 跳转失败时给一句提示（不打断预览）
+	const [navNote, setNavNote] = useState("");
 	const current = trail[trail.length - 1] || artboardId;
 	const goTo = useCallback((target) => {
 		if (typeof target !== "string" || target === "") return;
-		setTrail((prev) => (prev[prev.length - 1] === target ? prev : prev.concat([target])));
-	}, []);
+		// 只在 links 里声明过、且真的存在时才跳（P2 审计 I7：跳到不存在的画板会红框 + 标题变成 id）
+		const links = Array.isArray(data.links) ? data.links : [];
+		if (links.indexOf(target) < 0) { setNavNote("这个画板没有连到「" + target + "」"); return; }
+		loadEntity(projectId, "artboard", target).then((row) => {
+			if (row === null) { setNavNote("画板「" + target + "」不存在"); return; }
+			setTrail((prev) => (prev[prev.length - 1] === target ? prev : prev.concat([target])));
+		}, () => {});
+	}, [data.links, projectId]);
 	const back = useCallback(() => setTrail((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev)), []);
 	const [currentTitle, setCurrentTitle] = useState(title);
 	useEffect(() => {
@@ -469,10 +479,11 @@ export function DesignArtboardNode(props) {
 			React.createElement("span", { style: chrome.tag }, "AI · 画板"),
 			React.createElement("span", { style: chrome.muted }, width === "mobile" ? "手机" : "桌面"),
 			data.requirementId ? React.createElement("span", { style: chrome.muted }, "· 需求 " + String(data.requirementId).slice(0, 12)) : null,
+			navNote !== "" ? React.createElement("span", { style: { color: "#b45309", fontSize: 11 } }, navNote) : null,
 			trail.length > 1 ? React.createElement("button", { onClick: (event) => { event.stopPropagation(); back(); }, style: Object.assign({}, chrome.btn, { marginLeft: "auto" }), title: "回到上一个画板" }, "← 返回 (" + (trail.length - 1) + ")") : null
 		),
 		React.createElement(SandboxPreview, {
-			projectId: projectId, kind: "artboard", id: current, title: currentTitle, packId: data.packId, token: props.token,
+			projectId: projectId, kind: "artboard", id: current, title: currentTitle, packId: data.packId, token: (props.data && props.data.token) || props.token,
 			entry: { key: current + "-0", props: {} }, sourceHash: current === artboardId ? data.sourceHash : undefined, width: width, scale: props.scale || 0.42, maxHeight: props.maxHeight || 420,
 			onNavigate: goTo
 		})
@@ -715,6 +726,8 @@ export async function openSourceEditor(el) {
 			const body = await response.json();
 			if (body && body.code === 200 && body.data && body.data.written === true) {
 				statusEl.textContent = "已保存（agent 之后不能改这个了）";
+				// 人保存后立刻让缓存失效，画布上的预览才能拿到新内容（P2 审计 I4）
+				invalidateEntity(projectId, kind, id);
 				unlockBtn.style.display = "";
 			} else {
 				statusEl.textContent = "保存失败：" + String((body && body.msg) || "未知错误");

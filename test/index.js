@@ -79,3 +79,4 @@ import "./design-http.test.mjs";
 import "./design-style.test.mjs";
 import "./design-transfer.test.mjs";
 import "./design-edit.test.mjs";
+import "./design-build-sync.test.mjs";
