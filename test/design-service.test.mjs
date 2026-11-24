@@ -207,3 +207,30 @@ test("组件包判定：摆了组件库节点就用它，没有就是内置 shad
 	assert.equal(service.packIdOf("p1"), "cds");
 	assert.equal(service.packSupportsRaw("p1"), true, "摆了非内置组件库就认为支持 raw（真实 raw 由调用方从 manifest 传进来）");
 }));
+
+test("真模型验收抓到：项目没摆组件库节点时，组件元素也要记成内置包（否则画布不知道是哪个库）", async () => {
+	const { createDesignService } = await import("../lib/design/service.js");
+	const { mkdtempSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const root = mkdtempSync(join(tmpdir(), "aw-packid-"));
+	const pages = new Map();
+	const svc = createDesignService({
+		designRoot: () => root,
+		canvas: {
+			readPage: (p) => pages.get(p) || { rev: 0, elements: {} },
+			apply: async (p, change) => {
+				const page = pages.get(p) || { rev: 0, elements: {} };
+				const elements = Object.assign({}, page.elements);
+				for (const el of change.upsert || []) elements[el.id] = el;
+				pages.set(p, { rev: page.rev + 1, elements: elements });
+				return { rev: page.rev + 1, locked: [], rejected: [] };
+			}
+		}
+	});
+	// 项目里**没有** library 节点
+	assert.equal(svc.packIdOf("p1"), "");
+	await svc.writeDesign("p1", { kind: "component", name: "CardA", source: "export default function CardA(){ return <div />; }", by: "agent", sourceMessageIds: ["m1"], hasPack: true });
+	const element = pages.get("p1").elements["comp:CardA"];
+	assert.equal(element.data.packId, "shadcn", "没摆库时组件元素要标成内置包，而不是空字符串");
+});
