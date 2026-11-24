@@ -260,3 +260,17 @@ test("P0 审计 B5：react/jsx-dev-runtime 不放行（production:true 用不到
 	assert.equal(out.ok, false, "jsx-dev-runtime 不能进白名单");
 	assert.match(out.errors[0].message, /只能 import/);
 });
+
+test("P1 审计 B3 回归：projectId 校验——'.' / '..' / 含斜杠一律拒（designProjectDir 与 designEntityDir 同口径）", async () => {
+	const { designProjectDir } = await import("../lib/design/store.js");
+	const { mkdtempSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const root = mkdtempSync(join(tmpdir(), "aw-design-projdir-"));
+	try {
+		for (const bad of [".", "..", "../etc", "a/b", "", "..\\x", "x".repeat(70)]) {
+			assert.throws(() => designProjectDir(root, bad), /非法 projectId|路径越界/, "projectId " + JSON.stringify(bad));
+		}
+		assert.ok(designProjectDir(root, "proj-1").includes("proj-1"));
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});

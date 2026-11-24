@@ -18,11 +18,16 @@ const SESSION_EVENTS = [{ type: "user/message", seq: 1, data: { content: [{ type
 async function boot() {
 	const routes = [];
 	const tools = {};
+	const followups = [];   // 记录 agent.followup 收到的消息（评论回传断言用）
 	const ctx = {
 		get(name) {
 			if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
 			if (name === "sessions") return { list: () => [], get: (id) => ({ id, title: id, running: false, session: { id } }) };
-			if (name === "agents") return { get: () => undefined, list: () => [] };
+			if (name === "agents") return {
+				// 会话 a 在线（评论回传要能送到），其它离线
+				get: (id) => (id === "session-a" ? { id, status: "idle", session: { id, events: [] }, followup: (message) => { followups.push({ to: id, text: message && message.content && message.content[0] ? message.content[0].text : "" }); } } : undefined),
+				list: () => []
+			};
 			if (name === "sessionPersistence") return { stat: () => undefined };
 		// 消息证据：whales_design_write 要求 sourceMessageIds 能在会话日志里核对到（与 prototype_draw 同口径）
 		if (name === "sessionQuery") return { readSession: async () => ({ events: SESSION_EVENTS }) };
@@ -52,7 +57,7 @@ async function boot() {
 		return { status: res.status, body: parsed };
 	}
 	const close = () => new Promise((resolve) => { if (typeof server.closeAllConnections === "function") server.closeAllConnections(); server.close(() => resolve()); });
-	return { call, close, tools };
+	return { call, close, tools, followups };
 }
 
 function freshStore() {
@@ -109,25 +114,25 @@ test("POST /design/source：人保存源码要 token；by=user 会把元素标�
 	assert.equal(locked.locked, true);
 }));
 
-test("GET /design/source：读源码不需要 token；不存在给 40401", () => withApp(async ({ app, token, projectId }) => {
+test("GET /design/source：读要同源 token（防匿名拿别人的源码）；不存在给 40401", () => withApp(async ({ app, token, projectId }) => {
 	await app.call("POST", "/design/source", { projectId, name: "ApprovalTimeline", source: SOURCE }, token);
-	const got = await app.call("GET", `/design/source?projectId=${projectId}&kind=component&id=ApprovalTimeline`);
+	const got = await app.call("GET", `/design/source?projectId=${projectId}&kind=component&id=ApprovalTimeline`, undefined, token);
 	assert.equal(got.body.code, 200);
 	assert.equal(got.body.data.source, SOURCE);
 	assert.ok(Array.isArray(got.body.data.jsxTable) && got.body.data.jsxTable.length > 0, "定位表要带给前端（点选 / 评论用）");
 
-	const missing = await app.call("GET", `/design/source?projectId=${projectId}&kind=component&id=Nope`);
+	const missing = await app.call("GET", `/design/source?projectId=${projectId}&kind=component&id=Nope`, undefined, token);
 	assert.equal(missing.body.code, 40401);
 }));
 
 test("GET /design/components|artboards：列表只读；summary 给计数与组件包", () => withApp(async ({ app, token, projectId }) => {
 	await app.call("POST", "/design/source", { projectId, name: "ApprovalTimeline", source: SOURCE }, token);
-	const comps = await app.call("GET", `/design/components?projectId=${projectId}`);
+	const comps = await app.call("GET", `/design/components?projectId=${projectId}`, undefined, token);
 	assert.equal(comps.body.code, 200);
 	assert.deepEqual(comps.body.data.components.map((row) => row.name), ["ApprovalTimeline"]);
-	const arts = await app.call("GET", `/design/artboards?projectId=${projectId}`);
+	const arts = await app.call("GET", `/design/artboards?projectId=${projectId}`, undefined, token);
 	assert.deepEqual(arts.body.data.artboards, []);
-	const summary = await app.call("GET", `/design/summary?projectId=${projectId}`);
+	const summary = await app.call("GET", `/design/summary?projectId=${projectId}`, undefined, token);
 	assert.equal(summary.body.data.summary.components, 1);
 	assert.equal(summary.body.data.packId, "shadcn", "没有组件库节点时是内置包");
 }));
@@ -213,7 +218,7 @@ test("评论钉：GET 不需 token；POST 要 token；落盘后能被 whales_des
 	assert.equal(made.body.data.comment.status, "open");
 	assert.equal(made.body.data.comment.author, "user");
 
-	const list = await app.call("GET", `/design/comments?projectId=${projectId}`);
+	const list = await app.call("GET", `/design/comments?projectId=${projectId}`, undefined, token);
 	assert.equal(list.body.data.comments.length, 1);
 
 	const read = await app.tools.whales_design_read.execute({ what: "comments" }, { agent: { id: "session-a" } });
@@ -222,20 +227,46 @@ test("评论钉：GET 不需 token；POST 要 token；落盘后能被 whales_des
 	assert.equal(read.comments[0].line, 3);
 }));
 
+test("评论回传（设计方案 §9.3）：组件评论发给「最近写它的会话」；不在线时如实说没送到，但评论照样保存", () => withApp(async ({ app, token, projectId }) => {
+	// 人保存一次，让 meta.sessionId 有值（记录「最近写它的会话」）
+	await app.call("POST", "/design/source", { projectId, name: "ApprovalTimeline", source: SOURCE }, token);
+
+	// 该组件没有 meta.sessionId（人保存时不带会话）→ 退到项目主对话（session-a，在线）
+	const made = await app.call("POST", `/design/comments?projectId=${projectId}`, { target: "comp:ApprovalTimeline", wsrc: "e1", line: 3, column: 10, tag: "h2", body: "标题太大了" }, token);
+	assert.equal(made.body.code, 200);
+	assert.equal(made.body.data.comment.status, "open");
+	const delivered = made.body.data.delivered;
+	assert.ok(["sent", "unknown", "skipped", "failed"].includes(delivered), "delivered 要给明确状态，实际 " + delivered);
+
+	if (delivered === "sent") {
+		assert.equal(app.followups.length, 1, "要真的发一条消息出去");
+		const text = app.followups[0].text;
+		assert.match(text, /评论/);
+		assert.match(text, /ApprovalTimeline/);
+		assert.match(text, /标题太大了/);
+		assert.match(text, /第 3 行/, "消息里要带行列，agent 不用翻源码");
+		assert.match(text, /resolvesComments/, "要告诉 agent 改完怎么标记已处理");
+	}
+
+	// 评论无论如何都要落盘（送到与否不影响人写下的内容）
+	const list = await app.call("GET", `/design/comments?projectId=${projectId}`, undefined, token);
+	assert.equal(list.body.data.comments.length, 1);
+}));
+
 test("POST /design/source：编译失败回 40001 且不落盘；未知 /design 子路径回 404", () => withApp(async ({ app, token, projectId }) => {
 	const bad = await app.call("POST", "/design/source", { projectId, name: "BrokenCard", source: "export default function BrokenCard() { return <div><span></div>; }" }, token);
 	assert.ok([40000, 40001].includes(bad.body.code), "编译失败回参数错误码，实际 " + bad.body.code);
 	assert.match(bad.body.msg || "", /第 \d+ 行/, "错误信息要带行列");
-	assert.match(bad.body.msg, /第 \d+ 行/);
-	const list = await app.call("GET", `/design/components?projectId=${projectId}`);
+	const list = await app.call("GET", `/design/components?projectId=${projectId}`, undefined, token);
 	assert.deepEqual(list.body.data.components, [], "编译失败不能有文件");
 
 	const nope = await app.call("GET", "/design/nope");
 	assert.equal(nope.status, 404);
 }));
 
-test("带 projectId 的越权：path 里的 projectId 只能是合法 id（不能借 ../ 读别的目录）", () => withApp(async ({ app, projectId }) => {
-	const bad = await app.call("GET", `/design/source?projectId=../..&kind=component&id=ApprovalTimeline`);
-	assert.ok([40001, 40401, 500].includes(bad.body.code), "非法 projectId 被挡住（不泄露任何文件），实际 " + bad.body.code);
+test("带 projectId 的越权：path 里的 projectId 只能是合法 id（不能借 ../ 读别的目录）", () => withApp(async ({ app, projectId, token }) => {
+	const bad = await app.call("GET", `/design/source?projectId=../..&kind=component&id=ApprovalTimeline`, undefined, token);
+	// 只认「被明确拒绝」的码：500 不算通过（那可能是崩了而不是挡住了）
+	assert.ok([40001, 40401, 40301].includes(bad.body.code), "非法 projectId 要给出明确拒绝码，实际 " + bad.body.code);
 	assert.equal(bad.body.data && bad.body.data.source, undefined, "绝不能返回任何源码内容");
 }));

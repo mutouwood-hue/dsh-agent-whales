@@ -188,17 +188,31 @@ function createSandboxHost(frame, options) {
 // ── 拉一个设计实体的源码 / 编译产物 ─────────────────────────────────────────
 
 const entityCache = new Map();
+/**
+ * 拉一个设计实体（带短 TTL 缓存）。
+ *
+ * 为什么要 TTL：agent 改完组件后，画布预览与编辑浮层必须能拿到新源码——
+ * 没有过期机制的缓存会让它们一直显示旧内容，必须整页刷新（P1 审计指出的真实问题）。
+ * 20 秒是折中：够挡住一轮渲染里的重复请求，又不至于让人等太久。
+ */
+const ENTITY_TTL_MS = 20 * 1000;
 function loadEntity(projectId, kind, id) {
 	const key = projectId + "|" + kind + "|" + id;
-	if (entityCache.has(key)) return entityCache.get(key);
+	const cached = entityCache.get(key);
+	if (cached !== undefined && Date.now() - cached.at < ENTITY_TTL_MS) return cached.pending;
 	const query = "?projectId=" + encodeURIComponent(projectId) + "&kind=" + kind + "&id=" + encodeURIComponent(id);
 	const pending = fetch(API + "/design/source" + query).then((response) => (response.ok ? response.json() : null)).then((body) => {
 		if (!body || body.code !== 200) return null;
 		return body.data;
 	});
-	entityCache.set(key, pending);
-	pending.catch(() => entityCache.delete(key));
+	entityCache.set(key, { at: Date.now(), pending: pending });
+	pending.catch(() => { const row = entityCache.get(key); if (row !== undefined && row.pending === pending) entityCache.delete(key); });
 	return pending;
+}
+
+/** 让某个实体的缓存立即失效（人保存源码 / agent 写完之后调用）。 */
+export function invalidateEntity(projectId, kind, id) {
+	entityCache.delete(projectId + "|" + kind + "|" + id);
 }
 
 /** 取编译产物：依赖（@project/*）要先各自编译好一起传进沙箱。 */
@@ -235,7 +249,7 @@ const PAGE_WIDTH = { mobile: 390, desktop: 1024 };
  * 组件节点和画板节点共用它，区别只在 spec（组件 vs 画板入口）。
  */
 function SandboxPreview(props) {
-	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate } = props;
+	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate, sourceHash } = props;
 	const frameRef = useRef(null);
 	const hostRef = useRef(null);
 	const [state, setState] = useState({ status: "loading", error: "", info: null });
@@ -276,7 +290,7 @@ function SandboxPreview(props) {
 		})();
 		return () => { live = false; if (hostRef.current) hostRef.current.destroy(); };
 		// entry 变化（切 examples）要重渲染：用 entryKey 而不是对象（对象每次都是新的）
-	}, [projectId, kind, id, packId, entry && entry.key, exampleIndex]);
+	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex]);
 
 	const height = Math.min(maxHeight || 640, Math.max(120, (state.info && state.info.height) || 260));
 	return React.createElement("div", { style: { position: "relative", width: Math.ceil(pageWidth * (scale || 1)), height: height, overflow: "hidden", background: "#fff" } },
@@ -321,7 +335,7 @@ export function DesignComponentNode(props) {
 		),
 		React.createElement(SandboxPreview, {
 			projectId: projectId, kind: "component", id: name, title: title, packId: data.packId,
-			entry: entry, exampleIndex: activeExample, width: "desktop", scale: props.scale || 0.42, maxHeight: props.maxHeight || 360
+			entry: entry, exampleIndex: activeExample, sourceHash: data.sourceHash, width: "desktop", scale: props.scale || 0.42, maxHeight: props.maxHeight || 360
 		})
 	);
 }
@@ -362,7 +376,7 @@ export function DesignArtboardNode(props) {
 		),
 		React.createElement(SandboxPreview, {
 			projectId: projectId, kind: "artboard", id: current, title: currentTitle, packId: data.packId,
-			entry: { key: current + "-0", props: {} }, width: width, scale: props.scale || 0.42, maxHeight: props.maxHeight || 420,
+			entry: { key: current + "-0", props: {} }, sourceHash: current === artboardId ? data.sourceHash : undefined, width: width, scale: props.scale || 0.42, maxHeight: props.maxHeight || 420,
 			onNavigate: goTo
 		})
 	);
