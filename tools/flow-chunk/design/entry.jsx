@@ -249,17 +249,86 @@ const PAGE_WIDTH = { mobile: 390, desktop: 1024 };
  * 组件节点和画板节点共用它，区别只在 spec（组件 vs 画板入口）。
  */
 function SandboxPreview(props) {
-	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate, sourceHash } = props;
+	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate, sourceHash, token } = props;
 	const frameRef = useRef(null);
 	const hostRef = useRef(null);
 	const [state, setState] = useState({ status: "loading", error: "", info: null });
+	// 评论模式（设计方案 §9.3）：开着时 iframe 接鼠标，点中元素弹输入框，POST /design/comments
+	const [pickMode, setPickMode] = useState(false);
+	const [pendingPick, setPendingPick] = useState(null);
+	const [commentText, setCommentText] = useState("");
+	const [commentNote, setCommentNote] = useState("");
 	const pageWidth = PAGE_WIDTH[width === "mobile" ? "mobile" : "desktop"];
+
+	useEffect(() => {
+		const host = hostRef.current;
+		if (host !== null && typeof host.setPickMode === "function") host.setPickMode(pickMode);
+	}, [pickMode, state.status]);
+
+	const submitComment = useCallback(async () => {
+		if (pendingPick === null) return;
+		const body = String(commentText || "").trim();
+		if (body === "") return;
+		setCommentNote("提交中…");
+		try {
+			const response = await fetch(API + "/design/comments?projectId=" + encodeURIComponent(projectId), {
+				method: "POST",
+				headers: { "content-type": "application/json", "x-whales-token": token || "" },
+				body: JSON.stringify({
+					target: (kind === "artboard" ? "board:" : "comp:") + id,
+					wsrc: pendingPick.wsrc,
+					line: pendingPick.line,
+					column: pendingPick.column,
+					tag: pendingPick.tag,
+					nth: pendingPick.nth,
+					count: pendingPick.count,
+					body: body,
+					sourceSnippet: pendingPick.sourceSnippet
+				})
+			});
+			const payload = await response.json();
+			if (payload && payload.code === 200) {
+				setCommentNote(payload.data && payload.data.delivered === "sent" ? "已提交，已发给 agent" : "已提交（agent 未在线，它下次读 comments 能看到）");
+				setPendingPick(null);
+				setCommentText("");
+			} else {
+				setCommentNote("失败：" + String((payload && payload.msg) || "未知错误"));
+			}
+		} catch (error) {
+			setCommentNote("失败：" + String(error && error.message || error));
+		}
+	}, [pendingPick, commentText, projectId, kind, id, token]);
 
 	useEffect(() => {
 		let live = true;
 		const frame = frameRef.current;
 		if (!frame) return undefined;
-		const host = createSandboxHost(frame, { title: title, onError: () => {}, onNavigate: onNavigate });
+		const host = createSandboxHost(frame, {
+			title: title,
+			onError: () => {},
+			onNavigate: onNavigate,
+			// 点选（设计方案 §9.3）：沙箱只回 wsrc + 标签 + nth，行列由宿主用静态表换（前端不重复存一份表）
+			onPick: (pick) => {
+				if (!live || !pick || !pick.wsrc) return;
+				// wsrc → 行列：拿实体的 jsxTable 换
+				loadEntity(projectId, kind, id).then((row) => {
+					if (!live) return;
+					const table = row && Array.isArray(row.jsxTable) ? row.jsxTable : [];
+					const hit = table.filter((item) => item && item.wsrc === pick.wsrc)[0];
+					setPendingPick({
+						wsrc: pick.wsrc,
+						line: hit ? hit.line : 0,
+						column: hit ? hit.column : 0,
+						tag: pick.tag || (hit && hit.tag) || "",
+						nth: pick.nth || 0,
+						count: pick.count || 1,
+						text: pick.text || "",
+						sourceSnippet: hit ? hit.snippet || "" : ""
+					});
+					setCommentNote("");
+				}, () => {});
+			}
+		});
 		hostRef.current = host;
 		(async () => {
 			try {
@@ -293,14 +362,42 @@ function SandboxPreview(props) {
 	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex]);
 
 	const height = Math.min(maxHeight || 640, Math.max(120, (state.info && state.info.height) || 260));
+	const api = (typeof API === "string" ? API : "/agent-whales/api");
 	return React.createElement("div", { style: { position: "relative", width: Math.ceil(pageWidth * (scale || 1)), height: height, overflow: "hidden", background: "#fff" } },
 		React.createElement("iframe", {
 			ref: frameRef,
 			title: title || id,
-			style: { border: 0, width: pageWidth, height: Math.max(120, (state.info && state.info.height) || 480), transform: "scale(" + (scale || 1) + ")", transformOrigin: "0 0", pointerEvents: "none", display: "block" }
+			// 评论模式时 iframe 要吃鼠标（否则点不到里面的元素）；平时 pointerEvents:none 让节点能被拖动
+			style: { border: 0, width: pageWidth, height: Math.max(120, (state.info && state.info.height) || 480), transform: "scale(" + (scale || 1) + ")", transformOrigin: "0 0", pointerEvents: pickMode ? "auto" : "none", display: "block" }
 		}),
 		state.status === "loading" ? React.createElement("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "#8a93a6", background: "rgba(255,255,255,.6)" } }, "沙箱渲染中…") : null,
-		state.status === "error" ? React.createElement("div", { style: { position: "absolute", left: 8, right: 8, bottom: 8, border: "1px solid #dc2626", background: "#fef2f2", color: "#991b1b", borderRadius: 8, padding: "6px 8px", fontSize: 11, fontFamily: "ui-monospace, Consolas, monospace", maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap" } }, "渲染出错：" + String(state.error).slice(0, 400)) : null
+		state.status === "error" ? React.createElement("div", { style: { position: "absolute", left: 8, right: 8, bottom: 8, border: "1px solid #dc2626", background: "#fef2f2", color: "#991b1b", borderRadius: 8, padding: "6px 8px", fontSize: 11, fontFamily: "ui-monospace, Consolas, monospace", maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap" } }, "渲染出错：" + String(state.error).slice(0, 400)) : null,
+		React.createElement("button", {
+			type: "button",
+			title: pickMode ? "退出评论模式" : "评论：点页面上的元素留意见",
+			onClick: (event) => { event.stopPropagation(); setPickMode(!pickMode); if (pickMode) { setPendingPick(null); setCommentNote(""); } },
+			style: { position: "absolute", right: 6, top: 6, zIndex: 2, font: "11px system-ui", padding: "2px 7px", borderRadius: 999, border: "1px solid " + (pickMode ? "#2563eb" : "#dce2ee"), background: pickMode ? "#2563eb" : "rgba(255,255,255,.92)", color: pickMode ? "#fff" : "#5b6577", cursor: "pointer" }
+		}, pickMode ? "评论中…" : "💬 评论"),
+		pendingPick !== null ? React.createElement("div", {
+			style: { position: "absolute", left: 8, right: 8, bottom: 8, zIndex: 3, background: "#fff", border: "1px solid #2563eb", borderRadius: 8, padding: "8px 10px", boxShadow: "0 8px 24px rgba(15,23,42,.18)", font: "12px system-ui" }
+		},
+			React.createElement("div", { style: { color: "#5b6577", marginBottom: 4 } },
+				(String(pendingPick.tag || "元素")) + (pendingPick.line ? " · 第 " + pendingPick.line + " 行" : "") +
+				(Number(pendingPick.count) > 1 ? " · 同款第 " + (Number(pendingPick.nth) + 1) + " 个" : "")
+			),
+			React.createElement("textarea", {
+				autoFocus: true,
+				value: commentText,
+				placeholder: "这里要怎么改？（例如：标题太大 / 换个颜色）",
+				onChange: (event) => setCommentText(event.target.value),
+				style: { width: "100%", boxSizing: "border-box", height: 56, resize: "vertical", font: "12px system-ui", padding: 6, borderRadius: 6, border: "1px solid #dce2ee" }
+			}),
+			React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 6, alignItems: "center" } },
+				React.createElement("button", { type: "button", onClick: submitComment, disabled: String(commentText || "").trim() === "", style: { font: "12px system-ui", padding: "3px 12px", borderRadius: 6, border: "1px solid #2563eb", background: String(commentText || "").trim() === "" ? "#c7d2fe" : "#2563eb", color: "#fff", cursor: String(commentText || "").trim() === "" ? "default" : "pointer" } }, "提交"),
+				React.createElement("button", { type: "button", onClick: () => { setPendingPick(null); setCommentText(""); setCommentNote(""); }, style: { font: "12px system-ui", padding: "3px 10px", borderRadius: 6, border: "1px solid #dce2ee", background: "#fff", cursor: "pointer" } }, "取消"),
+				React.createElement("span", { style: { color: "#5b6577", marginLeft: "auto" } }, commentNote)
+			)
+		) : null
 	);
 }
 
@@ -334,7 +431,7 @@ export function DesignComponentNode(props) {
 			) : null
 		),
 		React.createElement(SandboxPreview, {
-			projectId: projectId, kind: "component", id: name, title: title, packId: data.packId,
+			projectId: projectId, kind: "component", id: name, title: title, packId: data.packId, token: props.token,
 			entry: entry, exampleIndex: activeExample, sourceHash: data.sourceHash, width: "desktop", scale: props.scale || 0.42, maxHeight: props.maxHeight || 360
 		})
 	);
@@ -375,7 +472,7 @@ export function DesignArtboardNode(props) {
 			trail.length > 1 ? React.createElement("button", { onClick: (event) => { event.stopPropagation(); back(); }, style: Object.assign({}, chrome.btn, { marginLeft: "auto" }), title: "回到上一个画板" }, "← 返回 (" + (trail.length - 1) + ")") : null
 		),
 		React.createElement(SandboxPreview, {
-			projectId: projectId, kind: "artboard", id: current, title: currentTitle, packId: data.packId,
+			projectId: projectId, kind: "artboard", id: current, title: currentTitle, packId: data.packId, token: props.token,
 			entry: { key: current + "-0", props: {} }, sourceHash: current === artboardId ? data.sourceHash : undefined, width: width, scale: props.scale || 0.42, maxHeight: props.maxHeight || 420,
 			onNavigate: goTo
 		})

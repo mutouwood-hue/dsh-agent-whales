@@ -230,7 +230,7 @@ test("确认设计版本：只有人能确认；固化快照、版本递增；�
     assert.equal(stale.body.data.latestRevision, 2);
     const noChange = await confirm(r.reqId, { expectedRevision: 2 });
     assert.equal(noChange.body.code, 40000);
-    assert.match(noChange.body.msg, /v1 以来原型没有改动/);
+    assert.match(noChange.body.msg, /v1 以来设计没有改动/);
 
     // 确认后建的任务带版本号；确认前（没有版本）建的不带
     const t1 = await first.call("POST", "/tasks", { projectId, subject: "T1 导入接口", requirementId: r.reqId }, token);

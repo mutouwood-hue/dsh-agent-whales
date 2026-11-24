@@ -358,7 +358,7 @@ test("buildDesignSnapshot：只取本需求的原型帧与流程图内容，不�
   assert.deepEqual(Object.keys(snap.flows), ["flow:main"]);
   assert.deepEqual(snap.flows["flow:main"].nodes.map((n) => n.key), ["a", "b"], "节点按 key 排序，和画布上的创建顺序无关");
   assert.deepEqual(snap.flows["flow:main"].edges, [{ from: "a", to: "b", label: "是" }]);
-  assert.deepEqual(buildDesignSnapshot(null, "r1"), { prototypes: {}, flows: {} });
+  assert.deepEqual(buildDesignSnapshot(null, "r1"), { prototypes: {}, flows: {}, artboards: {}, components: {} });
 });
 
 test("designSnapshotHash：内容相同哈希相同（键序、位置无关），内容变了哈希就变", () => {
@@ -377,7 +377,7 @@ test("checkDesignConfirmable：没有原型不能确认；首次可确认；确�
   assert.match(checkDesignConfirmable(req(), []), /没有原型帧/);
   assert.equal(checkDesignConfirmable(req(), protos), undefined);
   const confirmed = req({ designVersion: 1, designConfirmedAt: T1 });
-  assert.match(checkDesignConfirmable(confirmed, protos), /v1 以来原型没有改动/);
+  assert.match(checkDesignConfirmable(confirmed, protos), /v1 以来设计没有改动/);
   assert.equal(checkDesignConfirmable(confirmed, [{ id: "p", updatedAt: T2 }]), undefined);
   assert.deepEqual(dirtyPrototypeIds(confirmed, [{ id: "old", updatedAt: T0 }, { id: "new", updatedAt: T2 }]), ["new"]);
   assert.deepEqual(dirtyPrototypeIds(req(), [{ id: "p", updatedAt: T0 }]), ["p"], "从没确认过：全部算待确认");
@@ -463,4 +463,61 @@ test("pickRequirementRecipient：负责人（仍是成员）> Composer > 主对�
   assert.deepEqual(pickRequirementRecipient(req({ ownerSessionId: "owner" }), { mainSessionId: "main", members: [] }), { sessionId: "main", role: "main" }, "成员表为空也不炸");
   assert.deepEqual(pickRequirementRecipient(null, project), { sessionId: "main", role: "main" });
   assert.deepEqual(pickRequirementRecipient(req({ ownerSessionId: "owner" }), null), { sessionId: "", role: "none" }, "没有项目就没有收件人");
+});
+
+// ── 组件工坊（设计方案 §11）：画板纳入快照 / 脏判定 / 确认设计 ──────────────
+
+test("P3 §11：快照收画板（标题/宽度/源码哈希/跳转关系/用到的组件），**不收源码全文**", async () => {
+	const { buildDesignSnapshot, artboardsOfRequirement } = await import("../lib/requirements.js");
+	const elements = [
+		{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", data: { artboardId: "a", title: "导入页", width: "mobile", sourceHash: "h1", links: ["b", "c"], uses: ["StatCard"], requirementId: "r1" } },
+		{ id: "board:b", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", data: { artboardId: "b", title: "别的需求的", width: "desktop", sourceHash: "h2", requirementId: "r2" } },
+		{ id: "proto:p", kind: "prototype", updatedAt: "2026-11-24T01:00:00Z", data: { title: "原型", width: "desktop", puck: { content: [{ type: "project:ApprovalTimeline", props: {} }] }, requirementId: "r1" } }
+	];
+	assert.deepEqual(artboardsOfRequirement(elements, "r1").map((el) => el.id), ["board:a"], "只收本需求的画板");
+	const snapshot = buildDesignSnapshot(elements, "r1");
+	assert.deepEqual(snapshot.artboards["board:a"], { title: "导入页", width: "mobile", sourceHash: "h1", links: ["b", "c"], uses: ["StatCard"] });
+	assert.equal(snapshot.artboards["board:b"], undefined, "别的需求的画板不进快照");
+	assert.equal("source" in snapshot.artboards["board:a"], false, "快照不存源码全文（只存哈希）");
+	// 原型帧通过 Puck 的 project:* 用到的组件也要收（§10）
+	assert.ok("ApprovalTimeline" in snapshot.components, "原型里用到的项目组件要进 components");
+	assert.ok("StatCard" in snapshot.components, "画板用到的组件要进 components");
+});
+
+test("P3 §11：组件改了 → 用到它的画板变脏，并且能说清「因组件 X 改动」", async () => {
+	const { dirtyDesignItems, dirtyDesignReasonText } = await import("../lib/requirements.js");
+	const requirement = { designVersion: 1, designConfirmedAt: "2026-11-24T02:00:00Z" };
+	const items = [
+		// 画板自己没动，但它用的 StatCard 在确认之后被改了
+		{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: "2026-11-24T03:00:00Z" } },
+		// 画板自己动过
+		{ id: "board:b", kind: "artboard", updatedAt: "2026-11-24T03:30:00Z" },
+		// 什么都没动
+		{ id: "board:c", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: "2026-11-24T01:30:00Z" } }
+	];
+	const dirty = dirtyDesignItems(requirement, items);
+	assert.deepEqual(dirty.map((row) => [row.id, row.reason, row.cause || ""]), [
+		["board:a", "component", "StatCard"],
+		["board:b", "self", ""]
+	]);
+	assert.match(dirtyDesignReasonText(dirty), /因组件 StatCard 改动/);
+	assert.equal(dirtyDesignItems(requirement, []).length, 0);
+
+	// 从没确认过：全部算脏（designVersion=0）
+	const fresh = dirtyDesignItems({ designVersion: 0 }, [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z" }]);
+	assert.deepEqual(fresh.map((row) => row.id), ["board:a"]);
+});
+
+test("P3 §11：没有原型帧但有画板也能确认；确认后只有组件改动也要重新确认", async () => {
+	const { checkDesignConfirmable } = await import("../lib/requirements.js");
+	// 只有画板、没有原型帧 → 可以确认（原来会报「没有原型帧」）
+	assert.equal(checkDesignConfirmable({}, [], [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z" }]), undefined);
+	// 什么都没有 → 不能确认
+	assert.match(checkDesignConfirmable({}, []), /还没有原型帧或画板/);
+	// 确认过、画板没动、但组件动了 → 要重新确认
+	const confirmed = { designVersion: 1, designConfirmedAt: "2026-11-24T02:00:00Z" };
+	const dirty = [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: "2026-11-24T03:00:00Z" } }];
+	assert.equal(checkDesignConfirmable(confirmed, [], dirty), undefined, "组件改了要能再确认");
+	const clean = [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: "2026-11-24T01:30:00Z" } }];
+	assert.match(checkDesignConfirmable(confirmed, [], clean), /不需要重新确认/);
 });

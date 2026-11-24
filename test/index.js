@@ -77,3 +77,5 @@ import "./design-store.test.mjs";
 import "./design-service.test.mjs";
 import "./design-http.test.mjs";
 import "./design-style.test.mjs";
+import "./design-transfer.test.mjs";
+import "./design-edit.test.mjs";
