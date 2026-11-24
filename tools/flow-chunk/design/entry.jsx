@@ -431,6 +431,36 @@ export function DesignComponentNode(props) {
 				}, "例子 " + (index + 1)))
 			) : null
 		),
+		// tweaks 控件（§9.5）：number 出滑杆、select 出下拉；值即 __tweaks 传给组件
+		tweakNames.length > 0 ? React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--daw-border, #dce2ee)", fontSize: 11 } },
+			tweakNames.slice(0, 8).map((key) => {
+				const spec = tweakSpec[key] || {};
+				const value = effectiveTweaks[key];
+				if (spec.type === "select") {
+					const options = Array.isArray(spec.options) ? spec.options : [];
+					return React.createElement("label", { key: key, style: { display: "flex", alignItems: "center", gap: 4 } },
+						React.createElement("span", { style: chrome.muted }, key),
+						React.createElement("select", {
+							value: String(value),
+							onChange: (event) => setTweakValues((prev) => Object.assign({}, prev, { [key]: event.target.value })),
+							style: Object.assign({}, chrome.btn, { padding: "1px 4px" })
+						}, options.map((option) => React.createElement("option", { key: String(option), value: String(option) }, String(option))))
+					);
+				}
+				const min = Number.isFinite(spec.min) ? spec.min : 0;
+				const max = Number.isFinite(spec.max) ? spec.max : 64;
+				const step = Number.isFinite(spec.step) ? spec.step : 1;
+				return React.createElement("label", { key: key, style: { display: "flex", alignItems: "center", gap: 4 } },
+					React.createElement("span", { style: chrome.muted }, key),
+					React.createElement("input", {
+						type: "range", min: min, max: max, step: step, value: Number(value) || min,
+						onChange: (event) => setTweakValues((prev) => Object.assign({}, prev, { [key]: Number(event.target.value) })),
+						style: { width: 80 }
+					}),
+					React.createElement("span", null, String(value))
+				);
+			})
+		) : null,
 		React.createElement(SandboxPreview, {
 			projectId: projectId, kind: "component", id: name, title: title, packId: data.packId, token: (props.data && props.data.token) || props.token,
 			entry: entry, exampleIndex: activeExample, sourceHash: data.sourceHash, width: "desktop", scale: props.scale || 0.42, maxHeight: props.maxHeight || 360
