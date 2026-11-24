@@ -3998,9 +3998,21 @@ describe("v2.2 波次 5：whales_flow_read / whales_flow_draw", () => {
     assert.equal(thin.reason, "暂不足以生成流程图");
 
     await draw(h, flow);
+    // 同一份内容重画 → 不重画（这才是「太吵」该拦的情况）
     const throttled = await draw(h, flow);
     assert.equal(throttled.drawn, false);
-    assert.match(throttled.reason, /节流/);
+    assert.match(throttled.reason, /完全一样|没有重画的必要/);
+
+    // 用户反馈修：**内容变了就该画**，不再按「说了几句」卡住。
+    // （真机场景：agent 一轮里先画主流程、再补一条分支，第二次曾被节流拦掉）
+    const withBranch = await draw(h, {
+      title: "表单导入",
+      nodes: flow.nodes.concat([{ key: "manual", shape: "step", text: "人工复核", sourceMessageIds: ["m1"] }]),
+      edges: flow.edges.concat([{ from: "map", to: "manual", label: "例外" }])
+    });
+    assert.equal(withBranch.drawn, true, "内容变了就必须画，不能被「用户没说两句」拦住：" + JSON.stringify(withBranch));
+    // flow.nodes 里有 5 个，但 ghost（m99 假证据）和 dup（空证据）会被丢掉 → 实际画出 3 个
+    assert.equal(withBranch.nodes, 3 + 1, "画出的节点数 = 有效节点 + 新增的人工复核，实际 " + withBranch.nodes);
 
     // 人改了「映射建议」节点的文字 → 锁定
     const canvas = await h.call("GET", `/agent-whales/api/canvas?projectId=${projectId}`);
