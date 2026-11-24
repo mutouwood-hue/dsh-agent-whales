@@ -325,3 +325,14 @@ test("评论闭环（§9.3）：agent 带 resolvesComments 改完 → 评论变 
 	const resolvedByUser = await app.call("POST", "/design/comments/resolve", { projectId, ids: [second.body.data.comment.id] }, token);
 	assert.equal(resolvedByUser.body.data.resolved.length, 1);
 }));
+
+test("内置 shadcn 库节点下也能用 @cds（P3 真机抓到：曾误判成「不支持 raw」）", () => withApp(async ({ app, token, projectId }) => {
+	// 画布上摆一个内置 shadcn 库节点
+	await app.call("POST", "/canvas/elements", { projectId, upsert: [{ id: "lib:shadcn", kind: "library", x: 0, y: 0, w: 200, h: 100, data: { packId: "shadcn" } }] }, token);
+	const src = 'import { Badge } from "@cds";\nexport default function CardWithBadge() { return <div className="p-4"><Badge>x</Badge></div>; }';
+	const written = await app.call("POST", "/design/source", { projectId, name: "CardWithBadge", source: src }, token);
+	assert.equal(written.body.code, 200, "内置包应该支持 @cds，实际：" + JSON.stringify(written.body).slice(0, 200));
+	assert.equal(written.body.data.written, true);
+	const back = await app.call("GET", `/design/source?projectId=${projectId}&kind=component&id=CardWithBadge`, undefined, token);
+	assert.equal(back.body.data.compiledCode.length > 0, true, "要能编译出产物");
+}));

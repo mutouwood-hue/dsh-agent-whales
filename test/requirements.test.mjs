@@ -557,3 +557,22 @@ test("P3 审计 B2：组件内容没变（只是被重写过）不算脏；内�
 	const legacy = [{ id: "board:a", kind: "artboard", updatedAt: "2026-11-24T01:00:00Z", byComponent: { StatCard: "2026-11-24T09:00:00Z" } }];
 	assert.equal(dirtyDesignItems({ designVersion: 1, designConfirmedAt: "2026-11-24T02:00:00Z" }, legacy).length, 1, "老数据仍按时间判");
 });
+
+test("P3 真机抓到：normalizeRequirement 必须保留 designComponentHashes（否则脏判定只能按时间比）", async () => {
+	const { normalizeRequirement, buildRequirementViews } = await import("../lib/requirements.js");
+	const raw = { reqId: "r1", projectId: "p1", designVersion: 1, designConfirmedAt: 1000, designComponentHashes: { CardA: "h-old" } };
+	const norm = normalizeRequirement(raw);
+	assert.deepEqual(norm.designComponentHashes, { CardA: "h-old" }, "确认时记下的哈希不能被规范化丢掉");
+	// 端到端：内容变了 → 需求回「设计」（这正是 P3 验收第一条）
+	const views = buildRequirementViews({
+		projectId: "p1",
+		requirements: [raw],
+		tasks: [{ taskId: "t1", projectId: "p1", requirementId: "r1", status: "completed" }],
+		elements: [{ id: "board:b", kind: "artboard", updatedAt: 500, data: { artboardId: "b", title: "画板", uses: ["CardA"], requirementId: "r1" } }],
+		runs: [],
+		componentHashes: { CardA: "h-new" }
+	});
+	const view = views.find((row) => row.reqId === "r1");
+	assert.equal(view.stage, "design", "组件内容变了，需求要回设计");
+	assert.match(String(view.evidence.dirtyReason || ""), /因组件 CardA 改动/);
+});
