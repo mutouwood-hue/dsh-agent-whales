@@ -30,10 +30,10 @@ function t(key, vars) {
 }
 
 // ── 最小 Markdown（刻意只做这些，且不渲染任何 raw HTML——文本都走 React 节点，天然转义）──
-// 支持：段落、`-`/`*`/`1.` 列表、``` 围栏代码、行内 `code` / **粗体** / *斜体*。不支持链接与图片。
-function inline(text, keyPrefix) {
+// 支持标题、段落、列表、代码与强调，PRD 额外支持表格和 HTTP(S) 链接。
+function inline(text, keyPrefix, allowLinks) {
 	const out = [];
-	const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*)/g;
+	const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g;
 	let last = 0;
 	let match;
 	let i = 0;
@@ -43,21 +43,58 @@ function inline(text, keyPrefix) {
 		const key = keyPrefix + "-" + (i += 1);
 		if (token[0] === "`") out.push(jsx("code", { children: token.slice(1, -1) }, key));
 		else if (token.startsWith("**")) out.push(jsx("strong", { children: token.slice(2, -2) }, key));
-		else out.push(jsx("em", { children: token.slice(1, -1) }, key));
+		else if (token[0] === "*") out.push(jsx("em", { children: token.slice(1, -1) }, key));
+		else if (allowLinks && text[match.index - 1] !== "!") {
+			const boundary = token.lastIndexOf("](");
+			out.push(jsx("a", { href: token.slice(boundary + 2, -1), target: "_blank", rel: "noopener noreferrer", children: token.slice(1, boundary) }, key));
+		} else out.push(token);
 		last = match.index + token.length;
 	}
 	if (last < text.length) out.push(text.slice(last));
 	return out;
 }
 
-export function MiniMarkdown({ text }) {
+export function MiniMarkdown({ text, allowLinks }) {
 	const source = String(text == null ? "" : text).replace(/\r\n/g, "\n");
 	const blocks = [];
 	const lines = source.split("\n");
 	let index = 0;
 	let key = 0;
+	const heading = /^(#{1,6})[ \t]+(.+)$/;
+	const cells = (line) => line.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, "|"));
+	function tableHeader(at) {
+		if (!allowLinks || !lines[at]?.includes("|") || !lines[at + 1]?.includes("|")) return null;
+		const header = cells(lines[at]);
+		const divider = cells(lines[at + 1]);
+		return divider.length === header.length && divider.every((cell) => /^:?-{3,}:?$/.test(cell)) ? header : null;
+	}
 	while (index < lines.length) {
 		const line = lines[index];
+		const title = heading.exec(line);
+		if (title) {
+			blocks.push(jsx("h" + Math.min(title[1].length + 1, 6), { children: inline(title[2], "h" + key, allowLinks) }, "b" + (key += 1)));
+			index += 1;
+			continue;
+		}
+		const headers = tableHeader(index);
+		if (headers) {
+			index += 2;
+			const rows = [];
+			while (lines[index]?.includes("|")) {
+				const row = cells(lines[index]);
+				if (row.length !== headers.length) break;
+				rows.push(row);
+				index += 1;
+			}
+			const renderRow = (row, tag, rowKey) => jsx("tr", {
+				children: row.map((cell, column) => jsx(tag, { children: inline(cell, "t" + column, allowLinks) }, column))
+			}, rowKey);
+			blocks.push(jsx("table", { children: [
+				jsx("thead", { children: renderRow(headers, "th", "header") }, "head"),
+				jsx("tbody", { children: rows.map((row, n) => renderRow(row, "td", n)) }, "body")
+			] }, "b" + (key += 1)));
+			continue;
+		}
 		if (/^```/.test(line)) {
 			const code = [];
 			index += 1;
@@ -70,15 +107,15 @@ export function MiniMarkdown({ text }) {
 			const ordered = /^\s*\d+\./.test(line);
 			const items = [];
 			while (index < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[index])) { items.push(lines[index].replace(/^\s*([-*]|\d+\.)\s+/, "")); index += 1; }
-			const children = items.map((item, n) => jsx("li", { children: inline(item, "li" + n) }, n));
+			const children = items.map((item, n) => jsx("li", { children: inline(item, "li" + n, allowLinks) }, n));
 			blocks.push(jsx(ordered ? "ol" : "ul", { style: { margin: "4px 0", paddingLeft: 20 }, children }, "b" + (key += 1)));
 			continue;
 		}
 		if (line.trim() === "") { index += 1; continue; }
 		const para = [];
-		while (index < lines.length && lines[index].trim() !== "" && !/^```/.test(lines[index]) && !/^\s*([-*]|\d+\.)\s+/.test(lines[index])) { para.push(lines[index]); index += 1; }
+		while (index < lines.length && lines[index].trim() !== "" && !/^```/.test(lines[index]) && !heading.test(lines[index]) && !tableHeader(index) && !/^\s*([-*]|\d+\.)\s+/.test(lines[index])) { para.push(lines[index]); index += 1; }
 		const children = [];
-		para.forEach((row, n) => { if (n > 0) children.push(jsx("br", {}, "br" + n)); children.push(...inline(row, "p" + n)); });
+		para.forEach((row, n) => { if (n > 0) children.push(jsx("br", {}, "br" + n)); children.push(...inline(row, "p" + n, allowLinks)); });
 		blocks.push(jsx("p", { style: { margin: "4px 0", lineHeight: 1.55 }, children }, "b" + (key += 1)));
 	}
 	return jsx("div", { className: "daw-md", style: { wordBreak: "break-word" }, children: blocks });

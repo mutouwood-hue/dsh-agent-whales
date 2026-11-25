@@ -137,4 +137,13 @@ test("MiniMarkdown：不渲染 raw HTML / 链接 / 图片；列表、围栏代�
 	assert.ok(rich.indexOf("<ul") >= 0 && rich.indexOf("<ol") >= 0 && rich.indexOf("<pre") >= 0);
 	assert.ok(rich.indexOf("1 &lt; 2") >= 0, "代码块里的 < 也被转义");
 	assert.equal(md(""), '<div class="daw-md" style="word-break:break-word"></div>');
+	const prd = server.renderToStaticMarkup(React.createElement(lib.MiniMarkdown, {
+		allowLinks: true,
+		text: "# 范围\n[Notion](https://example.notion.site/recap)\n[坏链接](javascript:alert(1)) ![图片](https://example.org/x.png)\n\n| 功能 | 优先级 |\n| --- | --- |\n| 热力图 | 高 |"
+	}));
+	assert.match(prd, /<h2>范围<\/h2>/);
+	assert.match(prd, /href="https:\/\/example\.notion\.site\/recap"/);
+	assert.equal((prd.match(/<a /g) || []).length, 1);
+	assert.doesNotMatch(prd, /<img/);
+	assert.match(prd, /<td>热力图<\/td>/);
 });

@@ -12,7 +12,7 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 import { normalizeLandingPath, canonicalLandingPath } from "../lib/index.js";
 import * as host from "../lib/index.js";
@@ -88,7 +88,7 @@ describe("canonicalLandingPath：realpath 只在路径已存在时生效", () =>
 
 	test("目录不存在：回落词法结果，不抛（工单先建、落点后建是常态）", () => {
 		const missing = join(tmpdir(), "aw-landing-no-such-dir-" + Math.random().toString(36).slice(2), "work");
-		assert.equal(canonicalLandingPath(missing + "\\"), normalizeLandingPath(missing));
+		assert.equal(canonicalLandingPath(missing + sep), normalizeLandingPath(missing));
 	});
 
 	test("realpath 抛错（权限/IO）：同样回落词法结果", () => {

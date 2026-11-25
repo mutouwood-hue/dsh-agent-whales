@@ -293,7 +293,7 @@ test("工作台外壳：默认渲染项目列表侧栏与顶栏，主题跟着�
   // 默认落点是项目列表（D10：首次不默认进画布）
   assert.ok(findByClass(tree, "daw-wb-stats").length >= 1, "默认应该是项目列表页（统计条）");
   const root = findByClass(tree, "daw-wb")[0];
-  assert.equal(root.props["data-wb-theme"], "light", "默认浅色");
+  assert.equal(root.props["data-wb-theme"], "system", "默认跟随系统主题");
 });
 
 /** 在渲染树里找「文案等于 text 且带 onClick」的按钮，返回它的 props。 */

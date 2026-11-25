@@ -18,8 +18,9 @@ function rebuild() {
 	const buildDir = join(flowDir, "node_modules", "esbuild");
 	if (!existsSync(buildDir)) return { skipped: true, reason: "没装 flow-chunk 的构建依赖（esbuild）" };
 	try {
-		execFileSync(process.execPath, [join(flowDir, "build-design.mjs")], { cwd: flowDir, stdio: "pipe", timeout: 240000 });
+		// build-proto 先生成 build-design 共用的 shadcn CSS。
 		execFileSync(process.execPath, [join(flowDir, "build-proto.mjs")], { cwd: flowDir, stdio: "pipe", timeout: 240000 });
+		execFileSync(process.execPath, [join(flowDir, "build-design.mjs")], { cwd: flowDir, stdio: "pipe", timeout: 240000 });
 		return { skipped: false };
 	} catch (error) {
 		return { skipped: false, error: String(error && (error.stderr ? error.stderr.toString() : error.message)).slice(0, 600) };

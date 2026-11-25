@@ -15,7 +15,7 @@ process.env.DSH_AGENT_WHALES_PRESET_DIR = mkdtempSync(join(tmpdir(), "aw-design-
 /** 假会话日志：一条用户消息（折叠成 m1），供 sourceMessageIds 核对。 */
 const SESSION_EVENTS = [{ type: "user/message", seq: 1, data: { content: [{ type: "text", text: "做一个审批时间线组件" }] } }];
 
-async function boot() {
+async function boot(workspacePath, sessionEvents) {
 	const routes = [];
 	const disposers = [];
 	const tools = {};
@@ -31,7 +31,8 @@ async function boot() {
 			};
 			if (name === "sessionPersistence") return { stat: () => undefined };
 		// 消息证据：whales_design_write 要求 sourceMessageIds 能在会话日志里核对到（与 prototype_draw 同口径）
-		if (name === "sessionQuery") return { readSession: async () => ({ events: SESSION_EVENTS }) };
+			if (name === "sessionQuery") return { readSession: async () => ({ events: sessionEvents }) };
+			if (name === "workspaceRegistry") return { list: () => [{ path: workspacePath, sessionIds: ["session-a"] }] };
 			if (name === "tools") return { register: (tool) => { tools[tool.name] = tool; return () => {}; }, schemas: () => [] };
 			return undefined;
 		},
@@ -80,15 +81,112 @@ export default function ApprovalTimeline({ label }: { label?: string }) {
 }
 `;
 
-async function withApp(run) {
+async function withApp(run, sessionEvents = SESSION_EVENTS) {
 	const dir = freshStore();
-	const app = await boot();
+	const app = await boot(dir, sessionEvents);
 	try {
 		const token = (await app.call("GET", "/activity")).body.controlToken;
 		const projectId = (await app.call("POST", "/projects", { name: "设计项目", mainSessionId: "session-a" }, token)).body.data.project.projectId;
 		return await run({ app, token, projectId, dir });
 	} finally { app.dispose(); await app.close(); rmSync(dir, { recursive: true, force: true }); }
 }
+
+test("对话画板保存本次交付版本，读取项目 CSS，并接受纯图片消息作为出处", () => withApp(async ({ app, token, projectId, dir }) => {
+	const write = app.tools.whales_design_write;
+	const agent = { id: "session-a" };
+	const notes = await app.tools.whales_flow_read.execute({}, { agent });
+	assert.ok(JSON.stringify(notes).includes("用户附图"));
+	writeFileSync(join(dir, "theme.css"), ":root { --accent: #694bd6; }");
+	const component = { kind: "component", name: "PeriodSwitch", sourceMessageIds: ["m1"], source: 'export default function PeriodSwitch(){ return <button>月</button>; }' };
+	assert.equal((await write.execute(component, { agent })).written, true);
+	const artboard = {
+		kind: "artboard", artboardId: "recap", width: "mobile", styleFiles: ["theme.css"], sourceMessageIds: ["m1"],
+		source: 'import PeriodSwitch from "@project/PeriodSwitch"; export const css = ".recap{border-radius:20px;color:var(--accent)}"; export default function Recap(){return <main className="recap">旧版 <PeriodSwitch /></main>;}'
+	};
+	const first = await write.execute(artboard, { agent, callId: "call-first" });
+	assert.equal(first.chatPreview, true);
+	const url = "/design/delivery?sessionId=session-a&callId=call-first";
+	assert.equal((await app.call("GET", url)).status, 403);
+	const saved = (await app.call("GET", url, undefined, token)).body.data;
+	assert.equal(saved.projectId, projectId);
+	assert.equal(saved.entryId, "recap");
+	assert.match(saved.boards[0].code, /旧版/);
+	assert.match(saved.boards[0].code, /--accent: #694bd6/);
+	assert.match(saved.modules.PeriodSwitch, /月/);
+
+	writeFileSync(join(dir, "theme.css"), ":root { --accent: #123456; }");
+	await write.execute({ ...component, source: component.source.replace("月", "年") }, { agent });
+	const newer = await write.execute({ ...artboard, source: artboard.source.replace("旧版", "新版") }, { agent, callId: "call-new" });
+	assert.equal(newer.chatPreview, true);
+	assert.deepEqual((await app.call("GET", url, undefined, token)).body.data, saved);
+	const current = (await app.call("GET", "/design/delivery?sessionId=session-a&callId=call-new", undefined, token)).body.data;
+	assert.match(current.boards[0].code, /新版/);
+	assert.match(current.boards[0].code, /--accent: #123456/);
+	assert.match(current.modules.PeriodSwitch, /年/);
+	assert.equal((await app.call("GET", "/design/delivery?sessionId=session-other&callId=call-first", undefined, token)).body.data, null);
+	await assert.rejects(write.execute({ ...artboard, styleFiles: ["../outside.css"] }, { agent }), /无法读取项目样式/);
+}, [{ type: "user/message", seq: 1, data: { source: { kind: "user" }, content: [{ type: "image", id: "ref-1" }] } }]));
+
+test("PRD 的 Markdown、工作区文件与 Notion 来源共用需求，旧回复保留已发布版本", () => withApp(async ({ app, token, projectId, dir }) => {
+	const tool = app.tools.whales_requirement;
+	const agent = { id: "session-a" };
+	const created = await tool.execute({
+		action: "create", title: "时间回顾", acceptance: ["点榜单能定位到地图"],
+		prd: { markdown: "## 热力图\n隐藏家和公司" }
+	}, { agent, callId: "prd-v1" });
+	assert.equal(created.chatPreview, true);
+	const id = created.requirement.reqId;
+	const base = "/projects/" + projectId + "/requirements";
+	const getSnapshot = async (callId) => (await app.call("GET", "/design/delivery?sessionId=session-a&callId=" + callId, undefined, token)).body.data;
+	const first = await getSnapshot("prd-v1");
+	assert.equal(first.type, "prd");
+	assert.equal(first.reqId, id);
+	assert.equal(first.version, 1);
+	assert.match(first.prd.markdown, /热力图/);
+
+	const board = await app.tools.whales_design_write.execute({
+		kind: "artboard", artboardId: "recap-prd", title: "时间回顾", sourceMessageIds: ["m1"],
+		source: "export default function Board(){return <main>到访热力图</main>;}"
+	}, { agent, callId: "board-prd" });
+	assert.equal(board.requirementId, id);
+
+	const file = join(dir, "recap.md");
+	writeFileSync(file, "# 文件版本\n从工作区读到的正文");
+	const fromFile = await tool.execute({ action: "update", reqId: id, expectedRevision: created.requirement.revision,
+		prd: { file } }, { agent, callId: "prd-v2" });
+	assert.equal(fromFile.requirement.prdRevision, 2);
+	assert.equal(fromFile.requirement.prd.file, "recap.md");
+	writeFileSync(file, "# 文件已更改\n刷新后读取");
+	const refreshed = (await app.call("PATCH", base + "/" + id, {
+		expectedRevision: fromFile.requirement.revision, prd: { file: "recap.md" }
+	}, token)).body.data.requirement;
+	assert.equal(refreshed.prdRevision, 3);
+	assert.match(refreshed.prd.markdown, /刷新后读取/);
+	assert.match((await getSnapshot("prd-v2")).prd.markdown, /工作区读到/);
+	assert.deepEqual(await getSnapshot("prd-v1"), first);
+
+	const url = "https://example.notion.site/recap";
+	const linked = await tool.execute({ action: "update", reqId: id, expectedRevision: refreshed.revision,
+		prd: { url, markdown: "## 当前摘要\n以 Notion 中的范围为准" } }, { agent, callId: "prd-notion" });
+	assert.equal(linked.requirement.prdRevision, 4);
+	assert.equal((await getSnapshot("prd-notion")).prd.url, url);
+	assert.equal((await app.call("GET", base + "/" + id)).body.data.requirement.prd.url, url);
+	const listed = (await app.call("GET", base)).body.data.requirements.find((row) => row.reqId === id);
+	assert.equal(listed.prd, undefined);
+	assert.equal(listed.prdRevision, 4);
+	await assert.rejects(tool.execute({ action: "update", reqId: id, prd: { url: "javascript:alert(1)" } }, { agent }), /HTTP\(S\)/);
+	await assert.rejects(tool.execute({ action: "update", reqId: id, prd: { file: "../private.md" } }, { agent }), /无法读取 PRD 文件/);
+}));
+
+test("普通对话首次发布 PRD 时就地建立项目", () => withApp(async ({ app, projectId }) => {
+	const agent = { id: "new-prd-conversation" };
+	const first = await app.tools.whales_requirement.execute({
+		action: "create", title: "新项目 PRD", prd: { markdown: "## 范围\n首轮需求" }
+	}, { agent, callId: "first-prd" });
+	assert.equal(first.chatPreview, true);
+	assert.notEqual(first.projectId, projectId);
+	assert.equal(first.requirement.composerSessionId, agent.id);
+}));
 
 test("文件变更流：SSE 连接先发 ready，并在文件变化时发定向通知", () => withApp(async ({ app, projectId, dir }) => {
 	const headers = {};
@@ -393,3 +491,21 @@ test("pack-api：内置 shadcn 包也要给组件清单（真机验证：agent �
 	assert.ok(button && button.variant, "Button 要说明 variant");
 	assert.deepEqual(button.variant.values, ["default", "secondary", "outline", "ghost", "destructive"]);
 }));
+
+test("高保真设计指南能在会话创建项目之前读取，并进入工具的文本输出", async () => {
+	const dir = freshStore();
+	const app = await boot(dir, SESSION_EVENTS);
+	try {
+		const designRead = app.tools.whales_design_read;
+		const args = { what: "design-guide" };
+		const guide = await designRead.execute(args, { agent: { id: "session-without-project" } });
+		assert.match(guide.guide, /当前项目/);
+		assert.match(guide.guide, /参考图/);
+		assert.match(guide.guide, /先验看/);
+		assert.match(designRead.output.render(args, guide)[0].text, /画板设计指南/);
+	} finally {
+		app.dispose();
+		await app.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

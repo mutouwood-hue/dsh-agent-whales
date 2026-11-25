@@ -41,12 +41,15 @@ description: dsh-agent-whales 的项目协作协议手册——在一个鲸鱼�
 - 「已产出 ≠ 已送达」：做完了不等于对方知道了；要通报就走串门（§4），别假设。
 - 任务板与画布是**派生视图**：真相在 `projects.json` 的任务表里。
 
+收到「已确认的前端设计」后，用 `whales_requirement` 的 `handoff_get` 加任务 ID 读取确认稿、源码目录和当前版本。看到 `reviewPending`，或 `currentVersion` 已高于交接的 `version` 时，先在回复里说明版本变动，按用户新确认的交接继续。用 `handoff_report` 提交 `taskId`、`expectedRevision` 和 `report`。进度用 `draft`，完工用 `done`，在 `artifacts` 附文件路径或预览链接。
+
 ## 3. 画布：只读
 
 `whales_canvas_inspect` 看位置 / 关联线 / 成员（省略 `projectId` = 你所在的项目）。**你不能改画布**：
 节点位置由人在画布上拖，**会话关联线由系统建**——成员加入项目时自动与主对话连一条线；
 两个普通成员之间要通话，得**让用户在画布上把它们连起来**（或通过主对话转达）。
-需求（标题 / 目标 / 验收点）用 `whales_requirement` 读写，但负责人、返工上限、确认设计、标可接受**只有人能做**。
+需求（标题 / 目标 / 验收点 / PRD）用 `whales_requirement` 读写。改同一个需求时保留 `reqId`，用 `expectedRevision` 防止覆盖。PRD 可写 Markdown 正文，也可引用工作区 Markdown 文件或已有 Notion / 网页链接。画板与流程图使用同一 `requirementId`。
+负责人、返工上限、确认设计、标可接受**只有人能做**。
 
 - **没有 `node_add` / `node_delete`**：节点是派生的——上下文节点来自任务落点
   （`worktree` / `execRoot`，入库前已做路径归一，同一目录只出一个节点）、Agent 节点来自项目成员、
@@ -56,13 +59,15 @@ description: dsh-agent-whales 的项目协作协议手册——在一个鲸鱼�
 
 ## 3.1 组件工坊：拼不出来的形状才写 TSX
 
-22 个通用词表组件能拼出来的，用 `whales_prototype_draw`；**拼不出来、或者需要真交互 / 跳转的整页**
-（审批时间线、多步表单向导这类），才用 `whales_design_write` 写 TSX 组件 / 画板。
+轻量线框可用 `whales_prototype_draw`。完整设计、高保真页面和可交互原型用 `whales_design_write` 写 TSX 画板；同一轮回复里会附上写入成功的画板。
+
+高保真设计、参考图设计和按批注改稿，先用 `whales_design_read` 的 `what:"design-guide"` 取设计指南，再按用户的任务和项目现有风格构图、编写交互和检查渲染。
 
 - **先读再写**：`whales_design_read` 的 `what:"list"` 看本项目已有哪些组件（能复用就复用，不重复造），
   `what:"pack-api"` 看当前组件库有哪些组件与 props——别凭记忆写 props 名。
-- **只能 import** `react` / `@cds`（当前组件库的原始组件）/ `@project/<本项目组件名>`。样式只用 token 类名，
-  不写十六进制色值和魔法数；缺的类会在返回的 `styleWarnings` 里指出来（那些类不会生效）。
+- **用当前项目的风格**：先看工作区已有界面、组件与 token。用 `styleFiles` 加载工作区的标准 CSS（相对路径，按顺序应用），需要自由布局时直接写 TSX、内联 `style` 或 `export const css`。`@cds` 和 `@project/<组件名>` 都是可选的复用入口。
+- **用户有参考图时按图设计**：保留图里的布局、字体、颜色和操作方式，在 `sourceMessageIds` 里引用提供图片的消息。
+- **交付到对话**：`chatPreview: true` 表示画板已为本轮回复保存。正文说清这次改了什么，让用户直接试。
 - **编译失败不写盘**：按返回的 `compile.errors`（行列 + 摘录）自己修，修完再写。
 - **`render.status` 是 `unverified` 表示还没在浏览器里验过**——照实说还没验，**不要说「已验证效果」**。
 - **新组件只属于当前项目**：不要对用户说「已加入 CDS」，也不要建议自动提交到 CDS；进不进设计系统由业务定。

@@ -74,7 +74,7 @@ describe("createBundledSkillProvider", () => {
 	/** 造一个临时 skills 根，写若干个 <name>/SKILL.md。 */
 	function withSkillsRoot(files) {
 		const dir = mkdtempSync(join(tmpdir(), "aw-skill-root-"));
-		const root = pathToFileURL(join(dir, "skills") + "\\");
+		const root = pathToFileURL(join(dir, "skills"));
 		for (const [name, text] of Object.entries(files)) {
 			mkdirSync(join(dir, "skills", name), { recursive: true });
 			writeFileSync(join(dir, "skills", name, "SKILL.md"), text, "utf8");
@@ -146,9 +146,9 @@ describe("createBundledSkillProvider", () => {
 		assert.ok((effortParsed.data.description || "").length > 0, "deep-effort 的 description 不能空");
 		assert.ok(effortParsed.body.includes("先取证"), "deep-effort 正文不能空（四条硬要求之一要在）");
 		// provider 直接读仓库副本也要能发现（等于验证 files 白名单漏项时的症状）
-		const provider = createBundledSkillProvider({ skillsRoot: pathToFileURL(join(pluginDir, "skills") + "\\"), providerName: "dsh-agent-whales" });
+		const provider = createBundledSkillProvider({ skillsRoot: pathToFileURL(join(pluginDir, "skills")), providerName: "dsh-agent-whales" });
 		const names = (await provider.list()).map((candidate) => candidate.name).sort();
-		assert.deepEqual(names, ["deep-effort", "whales-e2e-executor", "whales-project-playbook"]);
+		assert.deepEqual(names, ["deep-effort", "whales-e2e-executor", "whales-frontend-design", "whales-project-playbook"]);
 	});
 });
 
@@ -179,7 +179,7 @@ describe("随包 skill 注册进宿主", () => {
 		const provider = registered[0];
 		assert.equal(provider.name, "dsh-agent-whales", "provider 名 = 包名（用户对得上来源）");
 		const candidates = await provider.list();
-		assert.deepEqual(candidates.map((candidate) => candidate.name).sort(), ["deep-effort", "whales-e2e-executor", "whales-project-playbook"], "协议层 + deep-effort + E2E 执行器三个随包 skill 都要能发现");
+		assert.deepEqual(candidates.map((candidate) => candidate.name).sort(), ["deep-effort", "whales-e2e-executor", "whales-frontend-design", "whales-project-playbook"], "随包 skill 都要能发现");
 		// 卸载真的会发生：清理函数倒序跑（后注册的先清理）
 		assert.ok(cleanups.length > 0, "必须把 disposer 挂到 ctx.effect，否则热重载会重复注册");
 		for (const cleanup of cleanups.slice().reverse()) cleanup();
@@ -273,8 +273,8 @@ describe("随包 skill 注册进宿主", () => {
 		// 目录展示路径（无 signal）与工具路径（有 signal）都要通
 		const noSignal = await service.list({});
 		const withSignal = await service.list(options);
-		assert.deepEqual([...noSignal.keys()].sort(), ["deep-effort", "whales-e2e-executor", "whales-project-playbook"]);
-		assert.deepEqual([...withSignal.keys()].sort(), ["deep-effort", "whales-e2e-executor", "whales-project-playbook"], "带 signal 时也要能发现——这是 skill 工具的路径；warnings: " + warnings.join(" | "));
+		assert.deepEqual([...noSignal.keys()].sort(), ["deep-effort", "whales-e2e-executor", "whales-frontend-design", "whales-project-playbook"]);
+		assert.deepEqual([...withSignal.keys()].sort(), ["deep-effort", "whales-e2e-executor", "whales-frontend-design", "whales-project-playbook"], "带 signal 时也要能发现——这是 skill 工具的路径；warnings: " + warnings.join(" | "));
 		for (const name of ["whales-e2e-executor", "deep-effort", "whales-project-playbook"]) {
 			const def = await service.get(name, options);
 			assert.ok(def, name + " 必须能被加载（skill 工具返回 unknown or no longer available 就是这里 undefined）；warnings: " + warnings.join(" | "));
@@ -294,7 +294,7 @@ describe("随包 skill 注册进宿主", () => {
 		assert.equal(registered.length, 1);
 		const provider = registered[0];
 		assert.equal(provider.name, "dsh-agent-whales", "旧宿主直接读 .name");
-		assert.deepEqual((await provider.list()).map((c) => c.name).sort(), ["deep-effort", "whales-e2e-executor", "whales-project-playbook"], "await 对同步 / 异步返回都成立");
+		assert.deepEqual((await provider.list()).map((c) => c.name).sort(), ["deep-effort", "whales-e2e-executor", "whales-frontend-design", "whales-project-playbook"], "await 对同步 / 异步返回都成立");
 		assert.equal(typeof provider.get, "function");
 	});
 	test("宿主没有 skills 服务 / registerProvider 不是函数 / 它抛错：都不抛", () => {

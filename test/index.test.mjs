@@ -705,28 +705,34 @@ test("宿主工具：所有注册的工具 render(args, value) 都返回 text bl
   }
 });
 
-test("宿主工具：whales_visit_send 真的等到回话时，reply.text 是字符串且 lossless", async () => {
+test("宿主工具：串门排队时跳过上一轮的回复，等本条消息被处理后才返回", async () => {
   let reads = 0;
   const baseline = [
-    { seq: 1, type: "user/message", data: { source: { kind: "user" }, content: [{ type: "text", text: "在吗" }] } }
+    { seq: 1, type: "turn/start", data: { turn: 1 } }
   ];
+  const previousTurn = baseline.concat([
+    { seq: 2, type: "assistant/message", data: { message: { content: [{ type: "text", text: "上一轮的收尾" }] } } },
+    { seq: 3, type: "turn/end", data: { turn: 1 } }
+  ]);
+  const followups = [];
   const session = {
     snapshotEvents() {
       reads += 1;
       if (reads === 1) return baseline;
-      return baseline.concat([
-        { seq: 2, type: "assistant/message", data: { message: { content: [{ type: "text", text: "在的" }] } } }
+      if (reads === 2) return previousTurn;
+      return previousTurn.concat([
+        { seq: 4, type: "turn/start", data: { turn: 2 } },
+        { seq: 5, type: "user/message", data: followups[0] },
+        { seq: 6, type: "assistant/message", data: { message: { content: [{ type: "text", text: "在的" }] } } }
       ]);
     }
   };
-  const followups = [];
-  const agent = { id: "s-reply", status: "idle", session, followup: (message) => followups.push(message), steer() {} };
+  const agent = { id: "s-reply", status: "running", session, followup: (message) => followups.push(message), steer() {} };
   const tools = captureToolsWithServices({
     agents: { get: (id) => (id === "s-reply" ? agent : undefined), list: () => [agent] }
   });
 
   const sent = await tools.whales_visit_send.execute(
-    // 默认已是插话；这条用例要验的是「等回话」，显式走 queue 保持原语义
     { sessionId: "s-reply", message: "来串门", mode: "queue", waitForReply: true, timeoutMs: 2000 },
     VISIT_EXEC
   );
@@ -735,6 +741,27 @@ test("宿主工具：whales_visit_send 真的等到回话时，reply.text 是字
   assert.equal(sent.reply.text, "在的", "等到回话必须把文本带回来");
   assert.ok(Number.isFinite(sent.reply.waitedMs) && sent.reply.waitedMs >= 0);
   assertLossless(sent, "whales_visit_send 等到回话");
+});
+
+test("waitForReply：按消息 ID 匹配插话，忽略之后其他回合的回复", async () => {
+  const matched = { seq: 4, type: "user/message", data: { id: "visit" } };
+  const reply = (seq, text) => ({ seq, type: "assistant/message", data: { message: { content: [{ type: "text", text }] } } });
+  const events = [
+    { seq: 1, type: "turn/start", data: { turn: 1 } },
+    { seq: 2, type: "user/message", data: { id: "unrelated" } },
+    reply(3, "插话被接纳前的输出"),
+    matched
+  ];
+  const ended = { seq: 6, type: "turn/end", data: { turn: 1 } };
+  const next = { seq: 7, type: "turn/start", data: { turn: 2 } };
+  const otherReply = reply(8, "下一轮的回复");
+
+  const result = await host.waitForReply({ events: [...events, reply(5, "串门回复"), ended, next, otherReply] }, 1, 0, undefined, "visit");
+  assert.equal(result.text, "串门回复");
+
+  const empty = await host.waitForReply({ events: [...events, ended, next, otherReply] }, 1, 0, undefined, "visit");
+  assert.equal(empty.timedOut, true);
+  assert.equal(Object.hasOwn(empty, "text"), false);
 });
 
 test("宿主工具：whales_visit_read 的 limit 夹到 1..100，默认 20，total 是全部行数", async () => {

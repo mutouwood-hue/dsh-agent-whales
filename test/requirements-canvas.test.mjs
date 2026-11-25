@@ -159,7 +159,7 @@ test("画布接线：点需求卡 / 点工具条入口都在画布内开审查�
     assert.equal(c.t.wbRoute.get().tab, "canvas", "点卡不离开画布");
     let dialogs = []; collect(c.view.tree, dialogs, (n) => n.props && n.props.role === "dialog");
     assert.equal(dialogs.length, 1, "在画布上打开需求审查面板：" + texts(c.view.tree).slice(-500));
-    const close = []; collect(c.view.tree, close, (n) => n.type === "button" && (texts(n) === "取消" || texts(n) === "[common.cancel]"));
+    const close = []; collect(c.view.tree, close, (n) => n.type === "button" && n.props["aria-label"] === "[common.close]");
     close[0].props.onClick(); c.view.rerender();
     const buttons = [];
     collect(c.view.tree, buttons, (n) => n.type === "button" && n.props.title === "[canvas.req.title]");

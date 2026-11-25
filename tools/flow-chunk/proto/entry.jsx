@@ -255,11 +255,11 @@ export function PuckData({ config, data }) {
 const PAGE_WIDTH = { mobile: 390, desktop: 1024 };
 
 /** iframe 里用 createPortal 渲染 Puck <Render>；内容高度回报给外面（按缩放后的高度）。 */
-export function PrototypeFrame({ pack, data, width, scale, maxHeight }) {
+export function PrototypeFrame({ pack, data, width, scale, maxHeight, projectComponents }) {
 	const frameRef = useRef(null);
 	const [body, setBody] = useState(null);
 	const [height, setHeight] = useState(240);
-	const config = useMemo(() => buildPuckConfig(pack), [pack]);
+	const config = useMemo(() => buildPuckConfig(pack, projectComponents), [pack, projectComponents]);
 	const pageWidth = PAGE_WIDTH[width] || PAGE_WIDTH.desktop;
 	useEffect(() => {
 		const frame = frameRef.current;
@@ -297,17 +297,30 @@ export function PrototypeNode(props) {
 	const d = (props && props.data) || {};
 	const labels = d.labels || {};
 	const { pack, error } = usePack(d.packMeta);
-	const scale = d.width === "mobile" ? 0.62 : 0.42;
+	const viewport = useRef(null);
+	const [availableWidth, setAvailableWidth] = useState(420);
+	useEffect(() => {
+		const box = viewport.current;
+		if (!box) return undefined;
+		function resize() { if (box.clientWidth > 0) setAvailableWidth(box.clientWidth); }
+		resize();
+		if (typeof ResizeObserver === "undefined") return undefined;
+		const observer = new ResizeObserver(resize);
+		observer.observe(box);
+		return () => observer.disconnect();
+	}, [props?.fit, pack]);
+	const scale = props?.fit ? Math.min(1, availableWidth / (PAGE_WIDTH[d.width] || PAGE_WIDTH.desktop)) : d.width === "mobile" ? 0.62 : 0.42;
 	return jsxs("div", { className: "daw-proto-node", style: chrome.card, children: [
 		jsxs("div", { className: "daw-proto-head", style: chrome.head, children: [
 			jsx("span", { children: "▣" }),
 			jsx("b", { style: { overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }, children: d.title || "原型" }),
 			d.ai ? jsx("span", { style: chrome.tag, children: "AI" }) : null,
 			jsx("span", { style: Object.assign({ flex: 1 }, chrome.muted), children: (d.packMeta && d.packMeta.name) || "" }),
-			jsx("button", { type: "button", className: "nodrag", style: chrome.btn, onClick: () => d.onEdit && d.onEdit(), children: labels.edit || "编辑" })
+			props?.readOnly ? null : jsx("button", { type: "button", className: "nodrag", style: chrome.btn, onClick: () => d.onEdit && d.onEdit(), children: labels.edit || "编辑" })
 		] }),
 		pack
-			? jsx(PrototypeFrame, { pack, data: d.puck, width: d.width, scale })
+			? jsx("div", { ref: props?.fit ? viewport : undefined, style: props?.fit ? { display: "grid", justifyItems: "center", minWidth: 0, overflow: "hidden" } : undefined,
+				children: jsx(PrototypeFrame, { pack, data: d.puck, width: d.width, scale, projectComponents: d.projectComponents }) })
 			: jsx("div", { style: Object.assign({ padding: 16, fontSize: 12 }, chrome.muted), children: error ? (labels.packFailed || "组件包加载失败：") + error : (labels.loading || "组件包加载中…") })
 	] });
 }

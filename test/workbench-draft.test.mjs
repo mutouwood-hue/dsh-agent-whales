@@ -518,8 +518,8 @@ test("apply：注册 conversation.input.dock 目标条座位，且没有 priorit
   const ctx = {
     effect(run) { return run(); },
     slots: {
-      inject(key, register) { injections.push(key); registrations.push(register()); return () => {}; },
-      register(options, component) { return { options, component }; }
+      inject(key, register) { injections.push(key); return register(); },
+      register(options, component) { registrations.push({ options, component }); return () => {}; }
     },
     sessions: { binding: () => undefined },
     locale: { register() { return () => {}; } }
