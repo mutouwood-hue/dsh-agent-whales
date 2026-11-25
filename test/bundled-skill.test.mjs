@@ -74,7 +74,7 @@ describe("createBundledSkillProvider", () => {
 	/** 造一个临时 skills 根，写若干个 <name>/SKILL.md。 */
 	function withSkillsRoot(files) {
 		const dir = mkdtempSync(join(tmpdir(), "aw-skill-root-"));
-		const root = pathToFileURL(join(dir, "skills") + "\\");
+		const root = pathToFileURL(join(dir, "skills"));
 		for (const [name, text] of Object.entries(files)) {
 			mkdirSync(join(dir, "skills", name), { recursive: true });
 			writeFileSync(join(dir, "skills", name, "SKILL.md"), text, "utf8");
@@ -146,7 +146,7 @@ describe("createBundledSkillProvider", () => {
 		assert.ok((effortParsed.data.description || "").length > 0, "deep-effort 的 description 不能空");
 		assert.ok(effortParsed.body.includes("先取证"), "deep-effort 正文不能空（四条硬要求之一要在）");
 		// provider 直接读仓库副本也要能发现（等于验证 files 白名单漏项时的症状）
-		const provider = createBundledSkillProvider({ skillsRoot: pathToFileURL(join(pluginDir, "skills") + "\\"), providerName: "dsh-agent-whales" });
+		const provider = createBundledSkillProvider({ skillsRoot: pathToFileURL(join(pluginDir, "skills")), providerName: "dsh-agent-whales" });
 		const names = (await provider.list()).map((candidate) => candidate.name).sort();
 		assert.deepEqual(names, ["deep-effort", "whales-e2e-executor", "whales-project-playbook"]);
 	});

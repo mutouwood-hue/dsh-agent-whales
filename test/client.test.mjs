@@ -172,6 +172,7 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
   const registrations = [];
   const dictionaries = [];
   const effects = [];
+  const definitions = [];
 
   const ctx = {
     effect(run, name) {
@@ -179,9 +180,10 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
       return run();
     },
     slots: {
-      inject(key, register) { injections.push(key); registrations.push(register()); return () => {}; },
-      register(options, component) { return { options, component }; }
+      inject(key, register) { injections.push(key); return register(); },
+      register(options, component) { registrations.push({ options, component }); return () => {}; }
     },
+    uiConversation: { events: { register(definition) { definitions.push(definition); return () => {}; } } },
     sessions: { binding: () => undefined },
     locale: {
       // 装饰层与工作台各注册一个命名空间；测试要把两份都收下来，不能只留最后一个。
@@ -192,8 +194,26 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
   plugin.apply(ctx);
 
   // DSH 右侧栏画布保留；画布内容内部侧栏由 narrow 模式去掉。
-  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "whales.canvas.session", "sidebar.right.pane.tab", "sidebar.panellist", "conversation.input.dock"]);
-  assert.equal(registrations.length, 8);
+  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "whales.canvas.session", "sidebar.right.pane.tab", "conversation.chat.turnTail", "sidebar.panellist", "conversation.input.dock"]);
+  assert.equal(registrations.length, 9);
+  const tail = registrations.find((entry) => entry.options.name === "conversation.chat.turnTail");
+  assert.equal(typeof tail.component, "function");
+  assert.equal(definitions.length, 1);
+  const definition = definitions[0];
+  const start = { type: "turn/start", data: { turn: 4 } };
+  const call = { type: "tool/call", data: { turn: 4, callId: "board-call", name: "whales_design_write", arguments: '{"kind":"artboard"}' } };
+  const component = { type: "tool/call", data: { ...call.data, arguments: '{"kind":"component"}' } };
+  assert.equal(definition.match(component), null);
+  assert.equal(definition.match(call).id, "4");
+  const prdCall = { type: "tool/call", data: { ...call.data, name: "whales_requirement", arguments: '{"action":"update","prd":{"markdown":"# 范围"}}' } };
+  assert.equal(definition.match(prdCall).id, "4");
+  assert.equal(definition.match({ ...prdCall, data: { ...prdCall.data, arguments: '{"action":"get"}' } }), null);
+  const pinned = definition.update({ state: definition.start({}, { event: start }) }, { event: call });
+  const result = { type: "tool/result", data: { turn: 4, message: { source: { callId: "board-call" }, isError: true } } };
+  assert.equal(definition.update({ state: pinned }, { event: result }), pinned);
+  result.data.message.isError = false;
+  const saved = definition.update({ state: pinned }, { event: result });
+  assert.equal(definition.buildLocationData({ state: saved }, "turn").value.join(","), "board-call");
   for (const entry of registrations.slice(0, 2)) {
     assert.equal(entry.options.id, "agent-whales");
     assert.equal(typeof entry.component, "function");

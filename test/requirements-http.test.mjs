@@ -8,8 +8,9 @@ import { join } from "node:path";
 
 const plugin = await import("../lib/index.js");
 
-async function boot() {
+async function boot(onDispatch) {
   const routes = [];
+  const tools = new Map();
   const ctx = {
     get(name) {
       if (name === "webServer") return { register: (route) => { routes.push(route); return () => {}; } };
@@ -17,9 +18,9 @@ async function boot() {
         list: () => [],
         get: (id) => (["session-a", "session-b", "session-out"].includes(id) ? { id, title: id, running: true, session: { id } } : undefined)
       };
-      if (name === "agents") return { get: (id) => ({ id, status: "running", session: { id } }), list: () => [] };
+      if (name === "agents") return { get: (id) => ({ id, status: "running", session: { id }, followup: (message) => onDispatch?.(id, message) }), list: () => [] };
       if (name === "sessionPersistence") return { stat: () => undefined };
-      if (name === "tools") return { register: () => () => {}, schemas: () => [] };
+      if (name === "tools") return { register: (tool) => { tools.set(tool.name, tool); return () => {}; }, schemas: () => [] };
       return undefined;
     },
     effect(run) { return run(); },
@@ -48,7 +49,7 @@ async function boot() {
     return { status: res.status, body: parsed };
   }
   const close = () => new Promise((resolve) => { if (typeof server.closeAllConnections === "function") server.closeAllConnections(); server.close(() => resolve()); });
-  return { call, close };
+  return { call, close, tools };
 }
 
 function freshStore() {
@@ -222,7 +223,7 @@ test("确认设计版本：只有人能确认；固化快照、版本递增；�
     assert.equal(view1.stage, "develop", "确认后设计阶段结束、还没任务 → 开发");
     assert.equal(view1.attention, null);
     assert.equal(view1.designVersions.length, 1);
-    assert.deepEqual(view1.designVersions[0], { v: 1, at: view1.designVersions[0].at, by: "user", hash: view1.designVersions[0].hash, prototypeCount: 1, flowCount: 0, note: "产品看过了", hasSnapshot: true });
+    assert.deepEqual(view1.designVersions[0], { v: 1, at: view1.designVersions[0].at, by: "user", hash: view1.designVersions[0].hash, prototypeCount: 1, flowCount: 0, note: "产品看过了", hasSnapshot: true, hasHandoff: true, prdRevision: 0, commentCount: 0 });
 
     // 过期 revision 不覆盖；没有改动不必重确认
     const stale = await confirm(r.reqId, { expectedRevision: 1 });
@@ -273,6 +274,72 @@ test("确认设计版本：只有人能确认；固化快照、版本递增；�
     assert.equal((await second.call("GET", `${base}/${r.reqId}/design/1`)).body.data.snapshot.prototypes["proto:main"].puck.content[0].props.text, "第一版");
   } finally {
     for (const close of closers) { try { await close(); } catch (error) { /* 已关 */ } }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("前端交接固定版本，重复请求只派一次，接手方可查看更新并回报", async () => {
+  const dir = freshStore();
+  const delivered = [];
+  const host = await boot((id, message) => { if (id === "session-b") delivered.push({ id, message }); });
+  try {
+    const token = (await host.call("GET", "/activity")).body.controlToken;
+    const write = async (path, body, method = "POST") => (await host.call(method, path, body, token)).body;
+    const project = (await write("/projects", { name: "足迹热力图", mainSessionId: "session-a" })).data.project;
+    const projectPath = `/projects/${project.projectId}`;
+    assert.equal((await write(projectPath + "/members", { sessionId: "session-b" })).code, 200);
+    const requirement = (await write(projectPath + "/requirements", {
+      title: "足迹热力图", acceptance: ["点榜单定位"], prd: { markdown: "# 范围\n排除家和公司" }
+    })).data.requirement;
+    const path = projectPath + "/requirements/" + requirement.reqId;
+    const canvas = (await host.call("GET", "/canvas?projectId=" + project.projectId)).body.data;
+    assert.equal((await write("/canvas/elements", { projectId: project.projectId, expectedRevision: canvas.rev, upsert: [
+      { id: "proto:map", kind: "prototype", data: { title: "热力图", requirementId: requirement.reqId, puck: { content: [] } } }
+    ] })).code, 200);
+    assert.equal((await write("/design/comments?projectId=" + project.projectId, { target: "proto:proto:map", body: "保留图例" })).code, 200);
+    const confirmed = (await write(path + "/confirm-design", { expectedRevision: requirement.revision })).data.requirement;
+    assert.equal(confirmed.designVersion, 1);
+    assert.equal((await host.call("GET", path + "/handoff/1")).status, 403);
+    const readFrozen = async () => (await host.call("GET", path + "/handoff/1", undefined, token)).body.data.bundle;
+    const frozen = await readFrozen();
+    assert.equal(frozen.prdRevision, 1);
+    assert.equal(frozen.comments[0].body, "保留图例");
+    assert.deepEqual(frozen.acceptance, ["点榜单定位"]);
+    assert.equal((await write(path + "/handoff", { sessionId: "session-out", version: 1 })).code, 40711);
+
+    const payload = { sessionId: "session-b", version: 1 };
+    const [first, second] = await Promise.all([write(path + "/handoff", payload), write(path + "/handoff", payload)]);
+    assert.equal(first.code, 200);
+    assert.equal(second.code, 200);
+    const taskId = first.data.task.taskId;
+    assert.equal(second.data.task.taskId, taskId);
+    assert.equal(delivered.length, 1);
+    assert.equal(delivered[0].id, "session-b");
+    assert.match(delivered[0].message.content[0].text, /PRD v1/);
+
+    const workerTool = host.tools.get("whales_requirement");
+    const read = { action: "handoff_get", taskId };
+    await assert.rejects(workerTool.execute(read, { agent: { id: "session-a" } }), /40301/);
+    const worker = { agent: { id: "session-b" } };
+    const task = await workerTool.execute(read, worker);
+    const updated = (await write(path, { expectedRevision: confirmed.revision, prd: { markdown: "# 范围\n加入外地榜单" } }, "PATCH")).data.requirement;
+    assert.equal(updated.evidence.reviewPending, true);
+    assert.equal((await workerTool.execute(read, worker)).reviewPending, true);
+    assert.equal((await readFrozen()).prd.markdown, "# 范围\n排除家和公司");
+
+    const reported = await workerTool.execute({ action: "handoff_report", taskId, expectedRevision: task.revision,
+      report: { status: "done", summary: "已实现热力图", artifacts: [{ kind: "file", ref: "src/Map.tsx" }] } }, worker);
+    assert.equal(reported.report.bySessionId, "session-b");
+    const view = (await host.call("GET", path)).body.data.requirement;
+    assert.equal(view.designHandoffs[0].report.artifacts[0].ref, "src/Map.tsx");
+    assert.deepEqual((await host.call("GET", path + "/e2e")).body.data.runs, []);
+    const next = (await write(path + "/confirm-design", { expectedRevision: updated.revision })).data.requirement;
+    assert.equal(next.designVersion, 2);
+    assert.equal(next.evidence.taskTotal, 0, "上一版的完工记录不计入新版本");
+    assert.equal((await workerTool.execute(read, worker)).currentVersion, 2);
+    assert.equal(delivered.length, 1);
+  } finally {
+    await host.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

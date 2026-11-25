@@ -161,7 +161,8 @@ function createSandboxHost(frame, options) {
 				name: spec.name,
 				code: spec.code,
 				props: spec.props || {},
-				dependencies: spec.dependencies || []
+				dependencies: spec.dependencies || [],
+				isBoard: spec.isBoard === true
 			}, "*");
 			setTimeout(() => {
 				if (renderWaiter === resolve) { renderWaiter = null; resolve({ ok: false, error: "渲染超时（8 秒）" }); }
@@ -251,7 +252,7 @@ const PAGE_WIDTH = { mobile: 390, desktop: 1024 };
  * 组件节点和画板节点共用它，区别只在 spec（组件 vs 画板入口）。
  */
 function SandboxPreview(props) {
-	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate, sourceHash, token, mode, onChanged } = props;
+	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate, sourceHash, token, mode, onChanged, snapshot, interactive } = props;
 	const frameRef = useRef(null);
 	const hostRef = useRef(null);
 	const [state, setState] = useState({ status: "loading", error: "", info: null });
@@ -376,7 +377,7 @@ function SandboxPreview(props) {
 				const info = await host.init({ runtime: runtime, styles: pack.styles, bundle: pack.bundle });
 				if (!live) return;
 				if (info && info.timeout) { setState({ status: "error", error: "沙箱初始化超时", info: null }); return; }
-				const compiled = await loadCompiled(projectId, kind, id, 0, token);
+				const compiled = snapshot || await loadCompiled(projectId, kind, id, 0, token);
 				if (!live) return;
 				if (compiled === null || compiled.code === "") {
 					setState({ status: "error", error: "拿不到编译产物（源码可能还没保存）", info: info });
@@ -399,16 +400,20 @@ function SandboxPreview(props) {
 		})();
 		return () => { live = false; if (hostRef.current) hostRef.current.destroy(); };
 		// entry 变化（切 examples）要重渲染：用 entryKey 而不是对象（对象每次都是新的）
-	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex, localRev, interaction]);
+	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex, localRev, interaction, snapshot]);
 
-	const height = Math.min(maxHeight || 640, Math.max(120, (state.info && state.info.height) || 260));
+	const shownScale = scale || 1;
+	const contentHeight = Math.max(120, (state.info && state.info.height) || 480);
+	const height = interactive
+		? Math.min(maxHeight || 640, Math.max(120, Math.ceil(contentHeight * shownScale)))
+		: Math.min(maxHeight || 640, Math.max(120, (state.info && state.info.height) || 260));
+	const viewportHeight = interactive ? Math.ceil(height / shownScale) : contentHeight;
 	const api = (typeof API === "string" ? API : "/agent-whales/api");
 	return React.createElement("div", { style: { position: "relative", width: Math.ceil(pageWidth * (scale || 1)), height: height, overflow: "hidden", background: "#fff" } },
 		React.createElement("iframe", {
 			ref: frameRef,
 			title: title || id,
-			// 评论模式时 iframe 要吃鼠标（否则点不到里面的元素）；平时 pointerEvents:none 让节点能被拖动
-			style: { border: 0, width: pageWidth, height: Math.max(120, (state.info && state.info.height) || 480), transform: "scale(" + (scale || 1) + ")", transformOrigin: "0 0", pointerEvents: interaction !== "view" ? "auto" : "none", display: "block" }
+			style: { border: 0, width: pageWidth, height: viewportHeight, transform: "scale(" + shownScale + ")", transformOrigin: "0 0", pointerEvents: interactive || interaction !== "view" ? "auto" : "none", display: "block" }
 		}),
 		state.status === "loading" ? React.createElement("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "#8a93a6", background: "rgba(255,255,255,.6)" } }, "沙箱渲染中…") : null,
 		state.status === "error" ? React.createElement("div", { style: { position: "absolute", left: 8, right: 8, bottom: 8, border: "1px solid #dc2626", background: "#fef2f2", color: "#991b1b", borderRadius: 8, padding: "6px 8px", fontSize: 11, fontFamily: "ui-monospace, Consolas, monospace", maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap" } }, "渲染出错：" + String(state.error).slice(0, 400)) : null,
@@ -592,8 +597,49 @@ export function DesignArtboardNode(props) {
 			projectId: projectId, kind: "artboard", id: current, title: currentTitle, packId: data.packId, token: (props.data && props.data.token) || props.token,
 			entry: { key: current + "-0", props: {} }, sourceHash: current === artboardId ? data.sourceHash : undefined, width: width, scale: props.scale || 0.42, maxHeight: props.maxHeight || 420,
 			onNavigate: goTo,
+			interactive: true,
 			mode: mode,
 			onChanged: data.onDesignChanged
+		})
+	);
+}
+
+/** 聊天回合引用交付时保存的代码与依赖，实时画布继续使用当前版本。 */
+export function DesignChatPreview(props) {
+	const delivery = props.delivery;
+	const viewport = useRef(null);
+	const [availableWidth, setAvailableWidth] = useState(560);
+	const [trail, setTrail] = useState([delivery.entryId]);
+	const board = delivery.boards.find((item) => item.id === trail[trail.length - 1]);
+	const snapshot = useMemo(() => board && ({
+		code: board.code,
+		deps: board.dependencies.map((name) => ({ name, code: delivery.modules[name] }))
+	}), [board, delivery]);
+	useEffect(() => {
+		const box = viewport.current;
+		if (!box) return undefined;
+		function resize() { if (box.clientWidth > 0) setAvailableWidth(box.clientWidth); }
+		resize();
+		if (typeof ResizeObserver === "undefined") return undefined;
+		const observer = new ResizeObserver(resize);
+		observer.observe(box);
+		return () => observer.disconnect();
+	}, []);
+	if (!board) return null;
+	const scale = Math.min(1, availableWidth / PAGE_WIDTH[board.width === "mobile" ? "mobile" : "desktop"]);
+	return React.createElement("div", { ref: viewport, style: { display: "grid", justifyItems: "center", minWidth: 0, overflow: "hidden" } },
+		trail.length > 1 ? React.createElement("button", {
+			type: "button", className: "daw-wb-btn", "data-variant": "ghost",
+			onClick: () => setTrail((previous) => previous.slice(0, -1))
+		}, props.backLabel || "返回上一屏") : null,
+		React.createElement(SandboxPreview, {
+			projectId: delivery.projectId, kind: "artboard", id: board.id, title: board.title,
+			packId: delivery.packId, width: board.width, scale, maxHeight: 640, interactive: true, snapshot,
+			onNavigate: (target) => {
+				if (target !== board.id && board.links.includes(target) && delivery.boards.some((item) => item.id === target)) {
+					setTrail((previous) => [...previous, target]);
+				}
+			}
 		})
 	);
 }
