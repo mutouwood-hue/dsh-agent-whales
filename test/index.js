@@ -19,6 +19,10 @@ import "./snapshot-export.test.mjs";
 import "./client-robustness.test.mjs";
 import "./meta.test.mjs";
 import "./workbench.test.mjs";
+// 右侧栏画布按当前会话隔离（2026-11-25 真机反馈）。
+import "./sidebar-session.test.mjs";
+// 画布内需求审查、窄侧栏与无干扰刷新。
+import "./canvas-review-refresh.test.mjs";
 import "./workbench-draft.test.mjs";
 import "./workbench-replay.test.mjs";
 import "./workbench-canvas.test.mjs";

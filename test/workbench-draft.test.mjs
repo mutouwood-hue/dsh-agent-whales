@@ -342,7 +342,7 @@ test("目标条：对话已属于某个项目（含对话内画图自动建的�
     assert.ok(texts.join("|").includes("素材替换方案"));
     const buttons = buttonsOf(tree);
     assert.equal(buttons.length, 1);
-    // 文案改成「在侧边打开画布」（用户反馈：要能一眼看出是在侧栏开，不是切走页面）
+    // 保留 DSH 右侧栏入口，只去掉画布内容内部侧栏。
     assert.equal(buttons[0].props.children, "在侧边打开画布");
     buttons[0].props.onClick();
     assert.deepEqual(api.wbRoute.get(), { kind: "workbench", projectId: "proj-chat", tab: "canvas" });

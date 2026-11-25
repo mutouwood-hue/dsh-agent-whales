@@ -52,13 +52,12 @@ async function mountPage(name, props) {
   return { t, view, restore: () => { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; } };
 }
 
-test("项目内页签条只剩四个：画布 · 需求 · 表格 · 办公室；表格带「待办 + 在跑」数字，需求带「需要你处理」数字；没有任务 / 简报 / 执行", async () => {
+test("项目内页签条只剩三个：画布 · 表格 · 办公室；需求与待办收进画布，不再有独立需求页", async () => {
   const c = await mountPage("WbTabs", { route: { kind: "workbench", projectId: "p1", tab: "canvas" }, reqAttention: 2, openTasks: 3, runningTasks: 4 });
   try {
     const tabs = byClass(c.view.tree, "daw-wb-tab");
-    assert.deepEqual(tabs.map((n) => texts(n).replace(/\d+$/, "")), [KEY("tab.canvas"), KEY("tab.reqs"), KEY("tab.table"), KEY("tab.office")]);
-    assert.equal(texts(tabs[1]), KEY("tab.reqs") + "2", "需求页签角标 = 需要你处理的需求数");
-    assert.equal(texts(tabs[2]), KEY("tab.table") + "7", "表格页签角标 = 待办任务 + 在跑任务");
+    assert.deepEqual(tabs.map((n) => texts(n).replace(/\d+$/, "")), [KEY("tab.canvas"), KEY("tab.table"), KEY("tab.office")]);
+    assert.equal(texts(tabs[1]), KEY("tab.table") + "7", "表格页签角标 = 待办任务 + 在跑任务");
     assert.doesNotMatch(texts(c.view.tree), /tab\.(tasks|brief|exec)\b/);
   } finally { c.restore(); }
 });
@@ -97,7 +96,8 @@ test("页签文案：新增 table 键中英都有；tab.tasks / tab.brief / tab.
   assert.equal(typeof t.wbTabOf, "function");
   assert.equal(t.wbTabOf("tasks"), "table");
   assert.equal(t.wbTabOf("exec"), "table");
-  assert.equal(t.wbTabOf("brief"), "reqs");
+  assert.equal(t.wbTabOf("brief"), "canvas");
+  assert.equal(t.wbTabOf("reqs"), "canvas");
   assert.equal(t.wbTabOf(undefined), "canvas");
   assert.equal(t.wbTabOf("toString"), "canvas", "Object.prototype 上的名字不是页签");
 });
@@ -124,7 +124,7 @@ test("「需要我处理」里点任务类待办 → 去「表格」页签（不
   } finally { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; }
 });
 
-test("外壳按页签选页面：table → 表格页、reqs → 需求页、office → 办公室页、canvas → 画布页；没有任何分支再指向已删除的页面", async () => {
+test("外壳按页签选页面：table → 表格页、office → 办公室页、canvas → 画布页；旧 reqs/brief 回画布", async () => {
   installDocumentStub();
   const loaded = loadPlugin({ react: createReactShim() });
   const api = loaded.plugin.__test;
@@ -133,20 +133,21 @@ test("外壳按页签选页面：table → 表格页、reqs → 需求页、offi
   try {
     for (const url of ["/projects/p1", "/tasks?projectId=p1", "/sessions", "/projects/p1/requirements", "/inbox", "/projects"]) await api.wbCache.read(url).catch(() => {});
     const find = (tree, type) => { const out = []; collect(tree, out, (n) => n.type === type); return out; };
-    const expected = { table: "WbTablePage", reqs: "WbReqsPage", office: "WbOfficePage", canvas: "WbCanvasPage" };
-    const wanted = (tab) => ({ WbTablePage: api.WbTablePage, WbReqsPage: api.WbReqsPage, WbCanvasPage: api.WbCanvasPage }[expected[tab]]);
-    for (const tab of ["table", "reqs", "canvas"]) {
+    const expected = { table: "WbTablePage", office: "WbOfficePage", canvas: "WbCanvasPage" };
+    const wanted = (tab) => ({ WbTablePage: api.WbTablePage, WbOfficePage: api.WbOfficePage, WbCanvasPage: api.WbCanvasPage }[expected[tab]]);
+    for (const tab of ["table", "canvas"]) {
       api.wbRoute.set({ kind: "workbench", projectId: "p1", tab });
       const tree = api.WhaleWorkbench({});
       assert.equal(find(tree, wanted(tab)).length, 1, tab + " 页签要渲染 " + expected[tab]);
-      for (const other of ["table", "reqs", "canvas"].filter((x) => x !== tab)) assert.equal(find(tree, wanted(other)).length, 0, tab + " 页签不该同时渲染 " + expected[other]);
+      for (const other of ["table", "canvas"].filter((x) => x !== tab)) assert.equal(find(tree, wanted(other)).length, 0, tab + " 页签不该同时渲染 " + expected[other]);
     }
+    assert.equal(find(api.WhaleWorkbench({}), api.WbReqsPage).length, 0, "不再渲染独立需求页");
     // 旧页签经路由归一后各落到新页面
-    for (const [oldTab, name] of [["tasks", "WbTablePage"], ["exec", "WbTablePage"], ["brief", "WbReqsPage"]]) {
+    for (const [oldTab, name] of [["tasks", "WbTablePage"], ["exec", "WbTablePage"], ["brief", "WbCanvasPage"], ["reqs", "WbCanvasPage"]]) {
       api.wbRoute.set({ kind: "workbench", projectId: "p1", tab: api.wbTabOf(oldTab) });
       assert.equal(find(api.WhaleWorkbench({}), api[name]).length, 1, "旧页签 " + oldTab + " → " + name);
     }
-    // 外壳的页签条也只有 4 个
+    // 外壳的页签条也只有 3 个
     api.wbRoute.set({ kind: "workbench", projectId: "p1", tab: "canvas" });
     const tabsEl = find(api.WhaleWorkbench({}), api.WbTabs);
     assert.equal(tabsEl.length, 1);

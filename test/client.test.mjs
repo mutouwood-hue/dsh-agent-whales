@@ -191,9 +191,9 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
 
   plugin.apply(ctx);
 
-  // 2026-11-24 加 `sidebar.right.pane.tab`：右侧栏里那一页的正文（「在侧边打开画布」）
-    assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "whales.canvas.session", "sidebar.right.pane.tab", "sidebar.panellist", "conversation.input.dock"]);
-  assert.equal(registrations.length, 8, "7 条原有 + 右侧栏 tab body（2026-11-24）");
+  // DSH 右侧栏画布保留；画布内容内部侧栏由 narrow 模式去掉。
+  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "whales.canvas.session", "sidebar.right.pane.tab", "sidebar.panellist", "conversation.input.dock"]);
+  assert.equal(registrations.length, 8);
   for (const entry of registrations.slice(0, 2)) {
     assert.equal(entry.options.id, "agent-whales");
     assert.equal(typeof entry.component, "function");
@@ -678,6 +678,9 @@ test("宿主半边：注册团队协作策略，拿不到 systemPrompt 或注册
     assert.ok(flow && flow.text.includes("whales_flow_draw") && flow.text.includes("sourceMessageIds"), "流程图段必须点名 flow 工具与证据要求（四层机制第 2 层）");
     assert.equal(flow.text.includes("当前对话属于某个鲸鱼项目"), false, "不能再把「已在项目里」当画图前提：对话内直接激活");
     assert.ok(flow.text.includes("projectCreated"), "要告诉模型首次画图会自动建项目、并转述给用户");
+    assert.ok(flow.text.includes("生成设计图") && flow.text.includes("必须主动使用本插件的画布能力"), "用户要设计图时必须主动用插件，不能等点名");
+    assert.ok(flow.text.includes("不要自己写 HTML / React 文件"), "必须禁止用自写页面替代插件设计能力");
+    assert.ok(flow.text.includes("kind=artboard") && flow.text.includes("whales_design_write"), "整页设计要明确路由到 whales_design_write");
     const byName = new Map(sections.map((section) => [section.name, section]));
     assert.ok(byName.has("agent-whales/team-policy"), "团队策略段必须在");
     assert.ok(byName.has("agent-whales/ultra"), "ultra 段必须在");

@@ -148,19 +148,26 @@ test("画布接线：需求卡作为节点出现（未归类除外），按需�
   } finally { c.restore(); }
 });
 
-test("画布接线：点需求卡 / 点工具条入口都会跳到需求页；拖动需求卡后位置真的存到宿主（PUT /canvas，带 req: 前缀的 id）", async () => {
+test("画布接线：点需求卡 / 点工具条入口都在画布内开审查面板；拖动需求卡后位置真的存到宿主（PUT /canvas，带 req: 前缀的 id）", async () => {
   const state = { puts: [], rows: [row({ reqId: "r1" })] };
   const c = await renderCanvas(state);
   try {
     c.t.wbRoute.set({ kind: "workbench", projectId: "p1", tab: "canvas" });
     const node = c.flow().nodes.find((n) => n.id === "req:r1");
     node.data.el.props.onClick();
-    assert.deepEqual(c.t.wbRoute.get(), { kind: "workbench", projectId: "p1", tab: "reqs" }, "点卡进需求页");
-    c.t.wbRoute.set({ kind: "workbench", projectId: "p1", tab: "canvas" });
+    c.view.rerender();
+    assert.equal(c.t.wbRoute.get().tab, "canvas", "点卡不离开画布");
+    let dialogs = []; collect(c.view.tree, dialogs, (n) => n.props && n.props.role === "dialog");
+    assert.equal(dialogs.length, 1, "在画布上打开需求审查面板：" + texts(c.view.tree).slice(-500));
+    const close = []; collect(c.view.tree, close, (n) => n.type === "button" && (texts(n) === "取消" || texts(n) === "[common.cancel]"));
+    close[0].props.onClick(); c.view.rerender();
     const buttons = [];
     collect(c.view.tree, buttons, (n) => n.type === "button" && n.props.title === "[canvas.req.title]");
     buttons[0].props.onClick();
-    assert.equal(c.t.wbRoute.get().tab, "reqs", "工具条入口进需求页");
+    c.view.rerender();
+    dialogs = []; collect(c.view.tree, dialogs, (n) => n.props && n.props.role === "dialog");
+    assert.equal(dialogs.length, 1, "工具条入口在画布内打开需求列表");
+    assert.equal(c.t.wbRoute.get().tab, "canvas");
     // 拖动
     c.flow().onNodeDragStop({}, { id: "req:r1", position: { x: -120.4, y: 333.6 } });
     await new Promise((resolve) => setTimeout(resolve, 600));
@@ -235,7 +242,7 @@ async function renderUnavailable(state) {
   return { t, view, restore: () => { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; } };
 }
 
-test("旧宿主（不支持按需分包）：画布给一块明确的「需要更新 DSH」说明，不再退回第二套画布；需求入口仍在、能跳到需求页；不画任何节点", async () => {
+test("旧宿主（不支持按需分包）：画布给一块明确的「需要更新 DSH」说明，不再退回第二套画布；需求入口仍在、能在画布内打开；不画任何节点", async () => {
   const c = await renderUnavailable({ puts: [], rows: [row({ reqId: "r1" }), row({ reqId: "r2", title: "批量审批" })] });
   try {
     const fallback = [];
@@ -249,10 +256,13 @@ test("旧宿主（不支持按需分包）：画布给一块明确的「需要�
     assert.equal(stage.length, 0, "经典舞台 / 小地图 / 缩放条都已删除");
     // 需求入口仍在，且能用
     const entry = []; collect(c.view.tree, entry, (n) => n.type === "button" && n.props.title === "[canvas.req.title]");
-    assert.equal(entry.length, 1, "画布降级时，去需求页的入口仍在");
+    assert.equal(entry.length, 1, "画布降级时，画布内需求入口仍在");
     c.t.wbRoute.set({ kind: "workbench", projectId: "p1", tab: "canvas" });
     entry[0].props.onClick();
-    assert.equal(c.t.wbRoute.get().tab, "reqs");
+    c.view.rerender();
+    assert.equal(c.t.wbRoute.get().tab, "canvas");
+    const dialogs = []; collect(c.view.tree, dialogs, (n) => n.props && n.props.role === "dialog");
+    assert.equal(dialogs.length, 1, "降级时也在画布内打开需求列表");
   } finally { c.restore(); }
   for (const state of [{ puts: [], rows: [] }, { puts: [], rows: [], noRequirementsRoute: true }]) {
     const none = await renderUnavailable(state);

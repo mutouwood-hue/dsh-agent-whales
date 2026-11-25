@@ -16,6 +16,8 @@ import { sandboxSrcdoc, SANDBOX_CSP } from "../../../lib/design/sandbox.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 const API = "/agent-whales/api";
+const BUILTIN_BUNDLE = typeof __WHALES_SHADCN_BUNDLE__ === "string" ? __WHALES_SHADCN_BUNDLE__ : "";
+const BUILTIN_CSS = typeof __WHALES_SHADCN_CSS__ === "string" ? __WHALES_SHADCN_CSS__ : "";
 
 // ── 运行时与组件包文本（Chunk 级缓存，避免每个沙箱岛重复拉取）─────────────────
 const runtimeCache = new Map(); // "" -> Promise<string>
@@ -42,10 +44,8 @@ function loadPackText(packId) {
 	const base = API + "/component-packs/" + encodeURIComponent(id);
 	const pending = (async () => {
 		if (id === "shadcn") {
-			// 内置包：bundle/raw 已经打进 client.proto.js，沙箱里用内置包要另走一条路（见 sandboxHost 的 injectedPack）
-			let api = null;
-			try { const r = await fetch(API + "/design/pack-api?projectId="); api = await r.json(); } catch (error) { api = null; }
-			return { bundle: "", styles: "", api: api, builtin: true };
+			// 内置包由构建期转成 CommonJS 文本送进沙箱；函数对象不能 postMessage。
+			return { bundle: BUILTIN_BUNDLE, styles: BUILTIN_CSS, api: null, builtin: true };
 		}
 		const [bundle, styles] = await Promise.all([
 			fetch(base + "/bundle.js").then((r) => (r.ok ? r.text() : "")),
@@ -196,12 +196,13 @@ const entityCache = new Map();
  * 20 秒是折中：够挡住一轮渲染里的重复请求，又不至于让人等太久。
  */
 const ENTITY_TTL_MS = 20 * 1000;
-function loadEntity(projectId, kind, id) {
-	const key = projectId + "|" + kind + "|" + id;
+function loadEntity(projectId, kind, id, token) {
+	const key = projectId + "|" + kind + "|" + id + "|" + (typeof token === "string" ? token : "");
 	const cached = entityCache.get(key);
 	if (cached !== undefined && Date.now() - cached.at < ENTITY_TTL_MS) return cached.pending;
 	const query = "?projectId=" + encodeURIComponent(projectId) + "&kind=" + kind + "&id=" + encodeURIComponent(id);
-	const pending = fetch(API + "/design/source" + query).then((response) => (response.ok ? response.json() : null)).then((body) => {
+	const headers = typeof token === "string" && token !== "" ? { "x-whales-token": token } : {};
+	const pending = fetch(API + "/design/source" + query, { headers }).then((response) => (response.ok ? response.json() : null)).then((body) => {
 		if (!body || body.code !== 200) return null;
 		return body.data;
 	});
@@ -212,18 +213,20 @@ function loadEntity(projectId, kind, id) {
 
 /** 让某个实体的缓存立即失效（人保存源码 / agent 写完之后调用）。 */
 export function invalidateEntity(projectId, kind, id) {
-	entityCache.delete(projectId + "|" + kind + "|" + id);
+	for (const key of Array.from(entityCache.keys())) {
+		if (key.indexOf(projectId + "|" + kind + "|" + id + "|") === 0) entityCache.delete(key);
+	}
 }
 
 /** 取编译产物：依赖（@project/*）要先各自编译好一起传进沙箱。 */
-async function loadCompiled(projectId, kind, id, depth) {
-	const entity = await loadEntity(projectId, kind, id);
+async function loadCompiled(projectId, kind, id, depth, token) {
+	const entity = await loadEntity(projectId, kind, id, token);
 	if (entity === null) return null;
 	const deps = [];
 	const imports = entity.meta && Array.isArray(entity.meta.imports) ? entity.meta.imports : [];
 	if (depth < 4) {
 		for (const name of imports) {
-			const dep = await loadCompiled(projectId, "component", name, depth + 1);
+			const dep = await loadCompiled(projectId, "component", name, depth + 1, token);
 			if (dep !== null) deps.push(dep);
 		}
 	}
@@ -238,7 +241,6 @@ const chrome = {
 	card: { background: "var(--daw-surface, #fff)", border: "1px solid var(--daw-border, #dce2ee)", borderRadius: 12, boxShadow: "0 6px 18px rgba(0,0,0,.06)", overflow: "hidden" },
 	head: { display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderBottom: "1px solid var(--daw-border, #dce2ee)", fontSize: 12, cursor: "grab", whiteSpace: "nowrap" },
 	tag: { fontSize: 10, padding: "2px 6px", borderRadius: 999, background: "var(--daw-accent-bg, #f9effa)", color: "var(--daw-accent, #c05bd0)", fontWeight: 600 },
-	btn: { fontSize: 11, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--daw-border, #dce2ee)", background: "var(--daw-surface, #fff)", cursor: "pointer" },
 	muted: { color: "var(--daw-text-muted, #8a93a6)" }
 };
 
@@ -249,21 +251,29 @@ const PAGE_WIDTH = { mobile: 390, desktop: 1024 };
  * 组件节点和画板节点共用它，区别只在 spec（组件 vs 画板入口）。
  */
 function SandboxPreview(props) {
-	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate, sourceHash, token } = props;
+	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate, sourceHash, token, mode, onChanged } = props;
 	const frameRef = useRef(null);
 	const hostRef = useRef(null);
 	const [state, setState] = useState({ status: "loading", error: "", info: null });
-	// 评论模式（设计方案 §9.3）：开着时 iframe 接鼠标，点中元素弹输入框，POST /design/comments
-	const [pickMode, setPickMode] = useState(false);
+	// 画布内两种直接操作：标注（发对话）与直接改（文本 / token 类）。
+	const interaction = mode === "edit" || mode === "annotate" ? mode : "view";
 	const [pendingPick, setPendingPick] = useState(null);
 	const [commentText, setCommentText] = useState("");
 	const [commentNote, setCommentNote] = useState("");
+	const [editInfo, setEditInfo] = useState(null);
+	const [editText, setEditText] = useState("");
+	const [editNote, setEditNote] = useState("");
+	const [localRev, setLocalRev] = useState(0);
 	const pageWidth = PAGE_WIDTH[width === "mobile" ? "mobile" : "desktop"];
 
 	useEffect(() => {
 		const host = hostRef.current;
-		if (host !== null && typeof host.setPickMode === "function") host.setPickMode(pickMode);
-	}, [pickMode, state.status]);
+		if (host !== null && typeof host.setPickMode === "function") host.setPickMode(interaction !== "view");
+		setPendingPick(null);
+		setEditInfo(null);
+		setCommentNote("");
+		setEditNote("");
+	}, [interaction, state.status]);
 
 	const submitComment = useCallback(async () => {
 		if (pendingPick === null) return;
@@ -299,6 +309,25 @@ function SandboxPreview(props) {
 		}
 	}, [pendingPick, commentText, projectId, kind, id, token]);
 
+	const saveEdit = useCallback(async (patch) => {
+		if (pendingPick === null || !pendingPick.wsrc) { setEditNote("这个元素没有源码锚点，请用标注让 AI 改"); return; }
+		setEditNote("保存中…");
+		try {
+			const response = await fetch(API + "/design/edit?projectId=" + encodeURIComponent(projectId), {
+				method: "POST",
+				headers: { "content-type": "application/json", "x-whales-token": token || "" },
+				body: JSON.stringify(Object.assign({ kind: kind, name: kind === "component" ? id : undefined, artboardId: kind === "artboard" ? id : undefined, wsrc: pendingPick.wsrc }, patch))
+			});
+			const payload = await response.json();
+			if (payload && payload.code === 200) {
+				setEditNote("已保存并重新渲染");
+				invalidateEntity(projectId, kind, id);
+				setLocalRev((value) => value + 1);
+				if (typeof onChanged === "function") onChanged();
+			} else setEditNote("保存失败：" + String((payload && payload.msg) || "未知错误"));
+		} catch (error) { setEditNote("保存失败：" + String(error && error.message || error)); }
+	}, [pendingPick, projectId, kind, id, token, onChanged]);
+
 	useEffect(() => {
 		let live = true;
 		const frame = frameRef.current;
@@ -309,14 +338,14 @@ function SandboxPreview(props) {
 			onNavigate: onNavigate,
 			// 点选（设计方案 §9.3）：沙箱只回 wsrc + 标签 + nth，行列由宿主用静态表换（前端不重复存一份表）
 			onPick: (pick) => {
-				if (!live || !pick || !pick.wsrc) return;
+				if (!live || !pick) return;
 				// wsrc → 行列：拿实体的 jsxTable 换
-				loadEntity(projectId, kind, id).then((row) => {
+				loadEntity(projectId, kind, id, token).then((row) => {
 					if (!live) return;
 					const table = row && Array.isArray(row.jsxTable) ? row.jsxTable : [];
 					const hit = table.filter((item) => item && item.wsrc === pick.wsrc)[0];
-					setPendingPick({
-						wsrc: pick.wsrc,
+					const selected = {
+						wsrc: pick.wsrc || "",
 						line: hit ? hit.line : 0,
 						column: hit ? hit.column : 0,
 						tag: pick.tag || (hit && hit.tag) || "",
@@ -324,8 +353,19 @@ function SandboxPreview(props) {
 						count: pick.count || 1,
 						text: pick.text || "",
 						sourceSnippet: hit ? hit.snippet || "" : ""
-					});
+					};
+					setPendingPick(selected);
 					setCommentNote("");
+					setEditNote("");
+					if (interaction === "edit") {
+						setEditText(selected.text || "");
+						setEditInfo(null);
+						if (!selected.wsrc) { setEditNote("这个元素没有源码锚点，请用标注让 AI 改"); return; }
+						fetch(API + "/design/classes?projectId=" + encodeURIComponent(projectId) + "&kind=" + kind + "&id=" + encodeURIComponent(id) + "&wsrc=" + encodeURIComponent(selected.wsrc), { headers: { "x-whales-token": token || "" } })
+							.then((response) => response.json())
+							.then((body) => { if (live) setEditInfo(body && body.code === 200 ? body.data : { error: body && body.msg || "读取元素失败" }); })
+							.catch((error) => { if (live) setEditNote(String(error && error.message || error)); });
+					}
 				}, () => {});
 			}
 		});
@@ -336,7 +376,7 @@ function SandboxPreview(props) {
 				const info = await host.init({ runtime: runtime, styles: pack.styles, bundle: pack.bundle });
 				if (!live) return;
 				if (info && info.timeout) { setState({ status: "error", error: "沙箱初始化超时", info: null }); return; }
-				const compiled = await loadCompiled(projectId, kind, id, 0);
+				const compiled = await loadCompiled(projectId, kind, id, 0, token);
 				if (!live) return;
 				if (compiled === null || compiled.code === "") {
 					setState({ status: "error", error: "拿不到编译产物（源码可能还没保存）", info: info });
@@ -359,7 +399,7 @@ function SandboxPreview(props) {
 		})();
 		return () => { live = false; if (hostRef.current) hostRef.current.destroy(); };
 		// entry 变化（切 examples）要重渲染：用 entryKey 而不是对象（对象每次都是新的）
-	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex]);
+	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex, localRev, interaction]);
 
 	const height = Math.min(maxHeight || 640, Math.max(120, (state.info && state.info.height) || 260));
 	const api = (typeof API === "string" ? API : "/agent-whales/api");
@@ -368,17 +408,12 @@ function SandboxPreview(props) {
 			ref: frameRef,
 			title: title || id,
 			// 评论模式时 iframe 要吃鼠标（否则点不到里面的元素）；平时 pointerEvents:none 让节点能被拖动
-			style: { border: 0, width: pageWidth, height: Math.max(120, (state.info && state.info.height) || 480), transform: "scale(" + (scale || 1) + ")", transformOrigin: "0 0", pointerEvents: pickMode ? "auto" : "none", display: "block" }
+			style: { border: 0, width: pageWidth, height: Math.max(120, (state.info && state.info.height) || 480), transform: "scale(" + (scale || 1) + ")", transformOrigin: "0 0", pointerEvents: interaction !== "view" ? "auto" : "none", display: "block" }
 		}),
 		state.status === "loading" ? React.createElement("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "#8a93a6", background: "rgba(255,255,255,.6)" } }, "沙箱渲染中…") : null,
 		state.status === "error" ? React.createElement("div", { style: { position: "absolute", left: 8, right: 8, bottom: 8, border: "1px solid #dc2626", background: "#fef2f2", color: "#991b1b", borderRadius: 8, padding: "6px 8px", fontSize: 11, fontFamily: "ui-monospace, Consolas, monospace", maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap" } }, "渲染出错：" + String(state.error).slice(0, 400)) : null,
-		React.createElement("button", {
-			type: "button",
-			title: pickMode ? "退出评论模式" : "评论：点页面上的元素留意见",
-			onClick: (event) => { event.stopPropagation(); setPickMode(!pickMode); if (pickMode) { setPendingPick(null); setCommentNote(""); } },
-			style: { position: "absolute", right: 6, top: 6, zIndex: 2, font: "11px system-ui", padding: "2px 7px", borderRadius: 999, border: "1px solid " + (pickMode ? "#2563eb" : "#dce2ee"), background: pickMode ? "#2563eb" : "rgba(255,255,255,.92)", color: pickMode ? "#fff" : "#5b6577", cursor: "pointer" }
-		}, pickMode ? "评论中…" : "💬 评论"),
-		pendingPick !== null ? React.createElement("div", {
+		interaction !== "view" ? React.createElement("div", { style: { position: "absolute", left: 8, top: 6, zIndex: 2, font: "11px system-ui", padding: "3px 8px", borderRadius: 999, background: "#2563eb", color: "#fff" } }, interaction === "edit" ? "直接改：点选元素" : "标注：点选元素") : null,
+		pendingPick !== null && interaction === "annotate" ? React.createElement("div", {
 			style: { position: "absolute", left: 8, right: 8, bottom: 8, zIndex: 3, background: "#fff", border: "1px solid #2563eb", borderRadius: 8, padding: "8px 10px", boxShadow: "0 8px 24px rgba(15,23,42,.18)", font: "12px system-ui" }
 		},
 			React.createElement("div", { style: { color: "#5b6577", marginBottom: 4 } },
@@ -393,10 +428,26 @@ function SandboxPreview(props) {
 				style: { width: "100%", boxSizing: "border-box", height: 56, resize: "vertical", font: "12px system-ui", padding: 6, borderRadius: 6, border: "1px solid #dce2ee" }
 			}),
 			React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 6, alignItems: "center" } },
-				React.createElement("button", { type: "button", onClick: submitComment, disabled: String(commentText || "").trim() === "", style: { font: "12px system-ui", padding: "3px 12px", borderRadius: 6, border: "1px solid #2563eb", background: String(commentText || "").trim() === "" ? "#c7d2fe" : "#2563eb", color: "#fff", cursor: String(commentText || "").trim() === "" ? "default" : "pointer" } }, "提交"),
-				React.createElement("button", { type: "button", onClick: () => { setPendingPick(null); setCommentText(""); setCommentNote(""); }, style: { font: "12px system-ui", padding: "3px 10px", borderRadius: 6, border: "1px solid #dce2ee", background: "#fff", cursor: "pointer" } }, "取消"),
+				React.createElement("button", { type: "button", className: "daw-wb-btn", onClick: submitComment, disabled: String(commentText || "").trim() === "" }, "提交"),
+				React.createElement("button", { type: "button", className: "daw-wb-btn", "data-variant": "ghost", onClick: () => { setPendingPick(null); setCommentText(""); setCommentNote(""); } }, "取消"),
 				React.createElement("span", { style: { color: "#5b6577", marginLeft: "auto" } }, commentNote)
 			)
+		) : null,
+		pendingPick !== null && interaction === "edit" ? React.createElement("div", {
+			style: { position: "absolute", left: 8, right: 8, bottom: 8, zIndex: 3, background: "#fff", border: "1px solid #2563eb", borderRadius: 8, padding: "8px 10px", boxShadow: "0 8px 24px rgba(15,23,42,.18)", font: "12px system-ui", maxHeight: "80%", overflow: "auto" }
+		},
+			React.createElement("div", { style: { color: "#5b6577", marginBottom: 4 } }, "直接改 · " + (pendingPick.tag || "元素") + (pendingPick.line ? " · L" + pendingPick.line : "")),
+			React.createElement("textarea", { value: editText, onChange: (event) => setEditText(event.target.value), placeholder: "修改这个元素的文字", style: { width: "100%", boxSizing: "border-box", height: 42, resize: "vertical", font: "12px system-ui", padding: 6, borderRadius: 6, border: "1px solid #dce2ee" } }),
+			React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 6 } },
+				React.createElement("button", { type: "button", className: "daw-wb-btn", onClick: () => saveEdit({ text: editText }) }, "保存文字"),
+				React.createElement("button", { type: "button", className: "daw-wb-btn", "data-variant": "ghost", onClick: () => { setPendingPick(null); setEditInfo(null); setEditNote(""); } }, "取消")),
+			editInfo && editInfo.error ? React.createElement("div", { style: { color: "#b45309", marginTop: 6 } }, editInfo.error) : null,
+			editInfo && Array.isArray(editInfo.classes) ? editInfo.classes.map((row) => React.createElement("label", { key: row.name, style: { display: "flex", alignItems: "center", gap: 6, marginTop: 6 } },
+				React.createElement("span", { style: { color: "#5b6577", minWidth: 70 } }, row.family),
+				React.createElement("select", { value: row.name, onChange: (event) => saveEdit({ fromClass: row.name, toClass: event.target.value }), style: { font: "12px system-ui", padding: 4, borderRadius: 6, border: "1px solid #dce2ee", maxWidth: "100%" } },
+					[row.name].concat((editInfo.options && editInfo.options[row.name]) || []).map((name) => React.createElement("option", { key: name, value: name }, name))))
+			) : null,
+			React.createElement("div", { style: { color: "#5b6577", marginTop: 6 } }, editNote)
 		) : null
 	);
 }
@@ -410,10 +461,11 @@ export function DesignComponentNode(props) {
 	const projectId = (props.data && props.data.projectId) || props.projectId || "";
 	const exampleCount = Number.isFinite(data.examplesCount) ? data.examplesCount : 0;
 	const [activeExample, setActiveExample] = useState(0);
+	const [mode, setMode] = useState("view");
 	const [entity, setEntity] = useState(null);
 	useEffect(() => {
 		let live = true;
-		loadEntity(projectId, "component", name).then((row) => { if (live) setEntity(row); }, () => {});
+		loadEntity(projectId, "component", name, (props.data && props.data.token) || props.token).then((row) => { if (live) setEntity(row); }, () => {});
 		return () => { live = false; };
 	}, [projectId, name]);
 	const examples = entity && entity.meta && Array.isArray(entity.meta.examples) ? entity.meta.examples : [];
@@ -435,15 +487,18 @@ export function DesignComponentNode(props) {
 		props: Object.assign({}, examples[activeExample] || {}, tweakNames.length > 0 ? { __tweaks: effectiveTweaks } : {})
 	};
 	return React.createElement("div", { style: chrome.card },
-		React.createElement("div", { style: chrome.head },
+		React.createElement("div", { style: chrome.head, "data-design-head": "1" },
 			React.createElement("span", { style: { fontWeight: 600 } }, title || name),
 			React.createElement("span", { style: chrome.tag }, "AI · 组件"),
 			React.createElement("span", { style: chrome.muted }, name),
+			typeof data.onEdit === "function" ? React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); data.onEdit(); }, className: "daw-wb-btn", "data-variant": "ghost" }, (data.labels && data.labels.edit) || "编辑") : null,
+			React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); setMode(mode === "annotate" ? "view" : "annotate"); }, className: "daw-wb-btn", "data-variant": "ghost", "data-on": String(mode === "annotate") }, mode === "annotate" ? "退出标注" : ((data.labels && data.labels.annotate) || "标注")),
+			React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); setMode(mode === "edit" ? "view" : "edit"); }, className: "daw-wb-btn", "data-variant": "ghost", "data-on": String(mode === "edit") }, mode === "edit" ? "退出直接改" : ((data.labels && data.labels.editDirect) || "直接改")),
 			exampleCount > 1 ? React.createElement("span", { style: { display: "flex", gap: 4, marginLeft: "auto" } },
 				Array.from({ length: Math.min(exampleCount, 6) }, (_, index) => React.createElement("button", {
 					key: index,
 					onClick: (event) => { event.stopPropagation(); setActiveExample(index); },
-					style: Object.assign({}, chrome.btn, { borderColor: index === activeExample ? "var(--daw-accent, #c05bd0)" : undefined, fontWeight: index === activeExample ? 600 : 400 })
+					className: "daw-wb-btn", "data-variant": "ghost", "data-on": String(index === activeExample)
 				}, "例子 " + (index + 1)))
 			) : null
 		),
@@ -459,7 +514,7 @@ export function DesignComponentNode(props) {
 						React.createElement("select", {
 							value: String(value),
 							onChange: (event) => setTweakValues((prev) => Object.assign({}, prev, { [key]: event.target.value })),
-							style: Object.assign({}, chrome.btn, { padding: "1px 4px" })
+							className: "daw-wb-btn", "data-variant": "ghost"
 						}, options.map((option) => React.createElement("option", { key: String(option), value: String(option) }, String(option))))
 					);
 				}
@@ -479,7 +534,8 @@ export function DesignComponentNode(props) {
 		) : null,
 		React.createElement(SandboxPreview, {
 			projectId: projectId, kind: "component", id: name, title: title, packId: data.packId, token: (props.data && props.data.token) || props.token,
-			entry: entry, exampleIndex: activeExample, sourceHash: data.sourceHash, width: "desktop", scale: props.scale || 0.42, maxHeight: props.maxHeight || 360
+			entry: entry, exampleIndex: activeExample, sourceHash: data.sourceHash, width: "desktop", scale: props.scale || 0.42, maxHeight: props.maxHeight || 360,
+			mode: mode, onChanged: data.onDesignChanged
 		})
 	);
 }
@@ -495,6 +551,7 @@ export function DesignArtboardNode(props) {
 	// 画板跳转（设计方案 §9.1 / §6.4）：navigate 到同需求的另一个画板 → 这个节点就地切换预览，
 	// 并在卡头给一个「返回」把栈退回去。跳转不做页面导航（沙箱里也导航不了）。
 	const [trail, setTrail] = useState([artboardId]);
+	const [mode, setMode] = useState("view");
 	// 跳转失败时给一句提示（不打断预览）
 	const [navNote, setNavNote] = useState("");
 	const current = trail[trail.length - 1] || artboardId;
@@ -503,7 +560,7 @@ export function DesignArtboardNode(props) {
 		// 只在 links 里声明过、且真的存在时才跳（P2 审计 I7：跳到不存在的画板会红框 + 标题变成 id）
 		const links = Array.isArray(data.links) ? data.links : [];
 		if (links.indexOf(target) < 0) { setNavNote("这个画板没有连到「" + target + "」"); return; }
-		loadEntity(projectId, "artboard", target).then((row) => {
+		loadEntity(projectId, "artboard", target, (props.data && props.data.token) || props.token).then((row) => {
 			if (row === null) { setNavNote("画板「" + target + "」不存在"); return; }
 			setTrail((prev) => (prev[prev.length - 1] === target ? prev : prev.concat([target])));
 		}, () => {});
@@ -513,25 +570,30 @@ export function DesignArtboardNode(props) {
 	useEffect(() => {
 		let alive = true;
 		if (current === artboardId) { setCurrentTitle(title); return undefined; }
-		loadEntity(projectId, "artboard", current).then((row) => {
+		loadEntity(projectId, "artboard", current, (props.data && props.data.token) || props.token).then((row) => {
 			if (!alive) return;
 			setCurrentTitle(row && row.meta && row.meta.title ? row.meta.title : current);
 		}, () => {});
 		return () => { alive = false; };
 	}, [projectId, artboardId, current, title]);
 	return React.createElement("div", { style: chrome.card },
-		React.createElement("div", { style: chrome.head },
+		React.createElement("div", { style: chrome.head, "data-design-head": "1" },
 			React.createElement("span", { style: { fontWeight: 600 } }, currentTitle || current),
 			React.createElement("span", { style: chrome.tag }, "AI · 画板"),
 			React.createElement("span", { style: chrome.muted }, width === "mobile" ? "手机" : "桌面"),
 			data.requirementId ? React.createElement("span", { style: chrome.muted }, "· 需求 " + String(data.requirementId).slice(0, 12)) : null,
+			typeof data.onEdit === "function" ? React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); data.onEdit(); }, className: "daw-wb-btn", "data-variant": "ghost" }, (data.labels && data.labels.edit) || "编辑") : null,
+			React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); setMode(mode === "annotate" ? "view" : "annotate"); }, className: "daw-wb-btn", "data-variant": "ghost", "data-on": String(mode === "annotate") }, mode === "annotate" ? "退出标注" : ((data.labels && data.labels.annotate) || "标注")),
+			React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); setMode(mode === "edit" ? "view" : "edit"); }, className: "daw-wb-btn", "data-variant": "ghost", "data-on": String(mode === "edit") }, mode === "edit" ? "退出直接改" : ((data.labels && data.labels.editDirect) || "直接改")),
 			navNote !== "" ? React.createElement("span", { style: { color: "#b45309", fontSize: 11 } }, navNote) : null,
-			trail.length > 1 ? React.createElement("button", { onClick: (event) => { event.stopPropagation(); back(); }, style: Object.assign({}, chrome.btn, { marginLeft: "auto" }), title: "回到上一个画板" }, "← 返回 (" + (trail.length - 1) + ")") : null
+			trail.length > 1 ? React.createElement("button", { onClick: (event) => { event.stopPropagation(); back(); }, className: "daw-wb-btn", "data-variant": "ghost", style: { marginLeft: "auto" }, title: "回到上一个画板" }, "← 返回 (" + (trail.length - 1) + ")") : null
 		),
 		React.createElement(SandboxPreview, {
 			projectId: projectId, kind: "artboard", id: current, title: currentTitle, packId: data.packId, token: (props.data && props.data.token) || props.token,
 			entry: { key: current + "-0", props: {} }, sourceHash: current === artboardId ? data.sourceHash : undefined, width: width, scale: props.scale || 0.42, maxHeight: props.maxHeight || 420,
-			onNavigate: goTo
+			onNavigate: goTo,
+			mode: mode,
+			onChanged: data.onDesignChanged
 		})
 	);
 }
@@ -573,12 +635,12 @@ export function useDesignLive(projectId, token, options) {
 			const id = kind === "artboard" ? target.artboardId : target.name;
 			try {
 				await ensureHost();
-				const compiled = await loadCompiled(projectId, kind, id, 0);
+				const compiled = await loadCompiled(projectId, kind, id, 0, token);
 				if (compiled === null || compiled.code === "") {
 					await postResult({ requestId: request.requestId, ok: false, error: "拿不到编译产物" });
 					return;
 				}
-				const entity = await loadEntity(projectId, kind, id);
+				const entity = await loadEntity(projectId, kind, id, token);
 				const examples = entity && entity.meta && Array.isArray(entity.meta.examples) ? entity.meta.examples : [];
 				const result = await host.render({
 					name: id,
@@ -655,7 +717,7 @@ export async function openSourceEditor(el) {
 	const id = kind === "artboard" ? data.artboardId : data.name;
 	const token = typeof el.token === "string" ? el.token : "";
 	const [entity, runtime, pack] = await Promise.all([
-		loadEntity(projectId, kind, id),
+		loadEntity(projectId, kind, id, token),
 		loadRuntimeText().catch(() => ""),
 		loadPackText(data.packId).catch(() => ({ styles: "", bundle: "" }))
 	]);

@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createMount } from "./harness.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginDir = join(here, "..");
@@ -52,6 +53,37 @@ test("client.design.js 能在最小宿主环境里加载，并导出画布需要
 	for (const name of ["DesignComponentNode", "DesignArtboardNode", "openSourceEditor", "createSandboxHost", "loadEntity", "sandboxSrcdoc"]) {
 		assert.equal(typeof exported[name], "function", "产物必须导出 " + name);
 	}
+});
+
+test("画板节点卡头可直接切到标注/直接改模式", () => {
+	const code = readFileSync(join(pluginDir, "lib", "client.design.js"), "utf8");
+	let registered = null;
+	new Function("window", code)({ __ModuleLoader__: { load: (entry) => { registered = entry; } } });
+	const { mount, shim } = createMount();
+	const exported = registered.factory((spec) => {
+		if (spec === "react") return shim;
+		if (spec === "react/jsx-runtime") return { jsx: () => null, jsxs: () => null };
+		if (spec === "react-dom" || spec === "react-dom/client") return {};
+		throw new Error("未知外部模块：" + spec);
+	});
+	const view = mount(exported.DesignArtboardNode, { data: { original: { artboardId: "board-a", title: "设计图", width: "desktop" }, projectId: "p1", token: "t" } });
+	const buttons = [];
+	const walk = (node) => {
+		if (!node || typeof node !== "object") return;
+		if (Array.isArray(node)) { node.forEach(walk); return; }
+		if (node.type === "button") buttons.push(node);
+		walk(node.props && node.props.children);
+	};
+	walk(view.tree);
+	const annotate = buttons.find((node) => node.props.children === "标注");
+	const edit = buttons.find((node) => node.props.children === "直接改");
+	assert.ok(annotate && edit, "卡头要有标注和直接改按钮");
+	annotate.props.onClick({ stopPropagation() {} });
+	view.rerender();
+	assert.ok(buttons.some((node) => node.props.children === "退出标注") || JSON.stringify(view.tree).includes("退出标注"));
+	edit.props.onClick({ stopPropagation() {} });
+	view.rerender();
+	assert.ok(JSON.stringify(view.tree).includes("退出直接改"));
 });
 
 // ── 2) 未声明变量扫描（简易 no-undef）────────────────────────────────────────

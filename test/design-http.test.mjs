@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,7 @@ const SESSION_EVENTS = [{ type: "user/message", seq: 1, data: { content: [{ type
 
 async function boot() {
 	const routes = [];
+	const disposers = [];
 	const tools = {};
 	const followups = [];   // 记录 agent.followup 收到的消息（评论回传断言用）
 	const ctx = {
@@ -34,7 +35,7 @@ async function boot() {
 			if (name === "tools") return { register: (tool) => { tools[tool.name] = tool; return () => {}; }, schemas: () => [] };
 			return undefined;
 		},
-		effect(run) { return run(); },
+		effect(run) { const dispose = run(); if (typeof dispose === "function") disposers.push(dispose); return dispose; },
 		on() { return () => {}; }
 	};
 	plugin.apply(ctx);
@@ -57,7 +58,7 @@ async function boot() {
 		return { status: res.status, body: parsed };
 	}
 	const close = () => new Promise((resolve) => { if (typeof server.closeAllConnections === "function") server.closeAllConnections(); server.close(() => resolve()); });
-	return { call, close, tools, followups };
+	return { call, close, tools, followups, base, handler: route.handler, dispose() { disposers.forEach((dispose) => dispose()); } };
 }
 
 function freshStore() {
@@ -86,8 +87,32 @@ async function withApp(run) {
 		const token = (await app.call("GET", "/activity")).body.controlToken;
 		const projectId = (await app.call("POST", "/projects", { name: "设计项目", mainSessionId: "session-a" }, token)).body.data.project.projectId;
 		return await run({ app, token, projectId, dir });
-	} finally { await app.close(); rmSync(dir, { recursive: true, force: true }); }
+	} finally { app.dispose(); await app.close(); rmSync(dir, { recursive: true, force: true }); }
 }
+
+test("文件变更流：SSE 连接先发 ready，并在文件变化时发定向通知", () => withApp(async ({ app, projectId, dir }) => {
+	const headers = {};
+	let text = "";
+	const cleanup = [];
+	const res = {
+		statusCode: 0,
+		setHeader(name, value) { headers[name] = value; },
+		flushHeaders() {},
+		write(chunk) { text += chunk; },
+		end() {},
+		on(event, listener) { if (event === "close") cleanup.push(listener); }
+	};
+	const req = { url: "/agent-whales/api/store-stream?projectId=" + encodeURIComponent(projectId), headers: {}, on() {} };
+	await app.handler(req, res);
+	assert.equal(res.statusCode, 200);
+	assert.match(headers["content-type"], /text\/event-stream/);
+	assert.match(text, /event: ready/);
+	writeFileSync(join(dir, "canvas.json"), "{}");
+	await new Promise((resolve) => setTimeout(resolve, 250));
+	assert.match(text, /event: store-changed/);
+	assert.match(text, /canvas\.json/);
+	cleanup.forEach((listener) => listener());
+}));
 
 test("POST /design/source：人保存源码要 token；by=user 会把元素标成 userEdited（之后 agent 写入被锁）", () => withApp(async ({ app, token, projectId }) => {
 	const anon = await app.call("POST", "/design/source", { projectId, name: "ApprovalTimeline", source: SOURCE });
@@ -123,6 +148,21 @@ test("GET /design/source：读要同源 token（防匿名拿别人的源码）�
 
 	const missing = await app.call("GET", `/design/source?projectId=${projectId}&kind=component&id=Nope`, undefined, token);
 	assert.equal(missing.body.code, 40401);
+}));
+
+test("画布直接改：/design/classes 与 /design/edit 能改文本和 token 类", () => withApp(async ({ app, token, projectId }) => {
+	await app.call("POST", "/design/source", { projectId, name: "ApprovalTimeline", source: SOURCE }, token);
+	const classes = await app.call("GET", `/design/classes?projectId=${projectId}&kind=component&id=ApprovalTimeline&wsrc=e0`, undefined, token);
+	assert.equal(classes.body.code, 200, JSON.stringify(classes.body));
+	assert.ok(classes.body.data.classes.some((row) => row.name === "flex"));
+
+	const textEdit = await app.call("POST", "/design/edit", { projectId, kind: "component", name: "ApprovalTimeline", wsrc: "e2", text: "确认" }, token);
+	assert.equal(textEdit.body.code, 200, JSON.stringify(textEdit.body));
+	assert.match(textEdit.body.data.source, />确认<\/Button>/);
+
+	const classEdit = await app.call("POST", "/design/edit", { projectId, kind: "component", name: "ApprovalTimeline", wsrc: "e0", fromClass: "flex", toClass: "grid" }, token);
+	assert.equal(classEdit.body.code, 200, JSON.stringify(classEdit.body));
+	assert.match(classEdit.body.data.source, /className="grid flex-col/);
 }));
 
 test("GET /design/components|artboards：列表只读；summary 给计数与组件包", () => withApp(async ({ app, token, projectId }) => {

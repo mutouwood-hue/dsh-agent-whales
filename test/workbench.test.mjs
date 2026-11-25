@@ -62,7 +62,8 @@ test("工作台路由：解析 / 生成互为逆运算，非法片段回落列�
   assert.deepEqual(wbRouteOf("/settings"), { kind: "settings" });
   assert.deepEqual(wbRouteOf("/p/proj-1/tasks"), { kind: "workbench", projectId: "proj-1", tab: "table" });
   assert.deepEqual(wbRouteOf("/p/proj-1/exec"), { kind: "workbench", projectId: "proj-1", tab: "table" });
-  assert.deepEqual(wbRouteOf("/p/proj-1/brief"), { kind: "workbench", projectId: "proj-1", tab: "reqs" });
+  assert.deepEqual(wbRouteOf("/p/proj-1/brief"), { kind: "workbench", projectId: "proj-1", tab: "canvas" });
+  assert.deepEqual(wbRouteOf("/p/proj-1/reqs"), { kind: "workbench", projectId: "proj-1", tab: "canvas" });
   assert.deepEqual(wbRouteOf("/p/proj-1/table"), { kind: "workbench", projectId: "proj-1", tab: "table" });
   assert.deepEqual(wbRouteOf("/p/proj-1/__proto__"), { kind: "workbench", projectId: "proj-1", tab: "canvas" }, "原型链上的名字不是页签");
   assert.deepEqual(wbRouteOf("/p/proj-1"), { kind: "workbench", projectId: "proj-1", tab: "canvas" });
@@ -569,8 +570,8 @@ test("画布路由：记住上次选择，无记录时仍是列表（D10 两条�
   const seeded = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": JSON.stringify({ kind: "workbench", projectId: "proj-9", tab: "office" }) } });
   const route = seeded.plugin.__test.wbRoute;
   assert.deepEqual(route.get(), { kind: "workbench", projectId: "proj-9", tab: "office" }, "必须 recall 上次的项目与 tab");
-  // 旧版本记住的页签：任务 / 执行 → 表格，简报 → 需求（R4）
-  for (const [old, now] of [["tasks", "table"], ["exec", "table"], ["brief", "reqs"], ["canvas", "canvas"], ["reqs", "reqs"], ["table", "table"], ["nope", "canvas"], ["__proto__", "canvas"], ["constructor", "canvas"]]) {
+  // 旧版本记住的页签：任务 / 执行 → 表格，简报 / 需求 → 画布（需求内审后）
+  for (const [old, now] of [["tasks", "table"], ["exec", "table"], ["brief", "canvas"], ["canvas", "canvas"], ["reqs", "canvas"], ["table", "table"], ["nope", "canvas"], ["__proto__", "canvas"], ["constructor", "canvas"]]) {
     const r = loadPlugin({ storedExtra: { "dsh-agent-whales.last-view": JSON.stringify({ kind: "workbench", projectId: "proj-9", tab: old }) } }).plugin.__test.wbRoute.get();
     assert.deepEqual(r, { kind: "workbench", projectId: "proj-9", tab: now }, "旧页签 " + old + " → " + now);
   }

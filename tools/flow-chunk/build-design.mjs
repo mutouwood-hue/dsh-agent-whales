@@ -69,6 +69,20 @@ writeFileSync(join(pluginDir, "lib", "client.sandbox-runtime.js"), runtimeText, 
 console.log("lib/client.sandbox-runtime.js", (Buffer.byteLength(runtimeText) / 1024).toFixed(1) + " KB");
 
 // ── 2) client.design.js（画布半边，React 外置）────────────────────────────────
+// 内置 shadcn 包也要以 CommonJS 文本送进沙箱；不能把带函数的 raw 对象直接 postMessage。
+const builtinPackResult = await build({
+	stdin: { contents: 'import { shadcnRaw } from "../proto/shadcn-pack.jsx"; module.exports = shadcnRaw;', resolveDir: join(here, "design"), loader: "js" },
+	bundle: true,
+	write: false,
+	format: "cjs",
+	platform: "browser",
+	target: "es2019",
+	minify: true,
+	legalComments: "none",
+	external: ["react", "react/jsx-runtime"],
+	nodePaths: [nodeModules]
+});
+const builtinCss = readFileSync(join(here, "proto", "shadcn.generated.css"), "utf8");
 const designResult = await build({
 	entryPoints: [join(here, "design", "entry.jsx")],
 	bundle: true,
@@ -81,7 +95,11 @@ const designResult = await build({
 	legalComments: "none",
 	external: ["react", "react-dom", "react/jsx-runtime", "react-dom/client"],
 	loader: { ".css": "text", ".jsx": "jsx" },
-	define: { "process.env.NODE_ENV": "\"production\"" },
+	define: {
+		"process.env.NODE_ENV": "\"production\"",
+		"__WHALES_SHADCN_BUNDLE__": JSON.stringify(builtinPackResult.outputFiles[0].text),
+		"__WHALES_SHADCN_CSS__": JSON.stringify(builtinCss)
+	},
 	nodePaths: [nodeModules]
 });
 const designText = "/* dsh-agent-whales · client.design.js —— 由 tools/flow-chunk/build-design.mjs 生成，勿手改。\n"

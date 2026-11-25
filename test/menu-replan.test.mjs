@@ -109,7 +109,7 @@ test("旧版本记在 localStorage 里的路由：发送记录 / 事件台 → �
   assert.deepEqual(recall({ kind: "inbox" }), { kind: "inbox" });
   assert.deepEqual(recall({ kind: "settings" }), { kind: "settings" });
   assert.deepEqual(recall({ kind: "start" }), { kind: "start" });
-  assert.deepEqual(recall({ kind: "workbench", projectId: "p1", tab: "reqs" }), { kind: "workbench", projectId: "p1", tab: "reqs" });
+  assert.deepEqual(recall({ kind: "workbench", projectId: "p1", tab: "reqs" }), { kind: "workbench", projectId: "p1", tab: "canvas" });
   assert.deepEqual(recall({ kind: "does-not-exist" }), { kind: "list" });
   assert.deepEqual(recall({ kind: "__proto__" }), { kind: "list" }, "原型链上的名字不能当成「已搬走」的路由");
   assert.deepEqual(recall({ kind: "constructor" }), { kind: "list" });
