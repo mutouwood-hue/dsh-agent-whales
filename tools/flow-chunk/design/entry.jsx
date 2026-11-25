@@ -247,6 +247,21 @@ const chrome = {
 
 const PAGE_WIDTH = { mobile: 390, desktop: 1024 };
 
+function usePreviewWidth(viewport) {
+	const [width, setWidth] = useState(560);
+	useEffect(() => {
+		const box = viewport.current;
+		if (!box) return undefined;
+		function resize() { if (box.clientWidth > 0) setWidth(box.clientWidth); }
+		resize();
+		if (typeof ResizeObserver === "undefined") return undefined;
+		const observer = new ResizeObserver(resize);
+		observer.observe(box);
+		return () => observer.disconnect();
+	}, [viewport]);
+	return width;
+}
+
 /**
  * 一个「沙箱预览」主体：负责 iframe + init + render 的整条链路。
  * 组件节点和画板节点共用它，区别只在 spec（组件 vs 画板入口）。
@@ -258,9 +273,14 @@ function SandboxPreview(props) {
 	const [state, setState] = useState({ status: "loading", error: "", info: null });
 	// 画布内两种直接操作：标注（发对话）与直接改（文本 / token 类）。
 	const interaction = mode === "edit" || mode === "annotate" ? mode : "view";
+	const interactionRef = useRef(interaction);
+	interactionRef.current = interaction;
+	const navigateRef = useRef(onNavigate);
+	navigateRef.current = onNavigate;
 	const [pendingPick, setPendingPick] = useState(null);
 	const [commentText, setCommentText] = useState("");
 	const [commentNote, setCommentNote] = useState("");
+	const [commentSending, setCommentSending] = useState(false);
 	const [editInfo, setEditInfo] = useState(null);
 	const [editText, setEditText] = useState("");
 	const [editNote, setEditNote] = useState("");
@@ -274,12 +294,13 @@ function SandboxPreview(props) {
 		setEditInfo(null);
 		setCommentNote("");
 		setEditNote("");
-	}, [interaction, state.status]);
+	}, [interaction, id]);
 
 	const submitComment = useCallback(async () => {
-		if (pendingPick === null) return;
+		if (pendingPick === null || commentSending) return;
 		const body = String(commentText || "").trim();
 		if (body === "") return;
+		setCommentSending(true);
 		setCommentNote("提交中…");
 		try {
 			const response = await fetch(API + "/design/comments?projectId=" + encodeURIComponent(projectId), {
@@ -299,7 +320,7 @@ function SandboxPreview(props) {
 			});
 			const payload = await response.json();
 			if (payload && payload.code === 200) {
-				setCommentNote(payload.data && payload.data.delivered === "sent" ? "已提交，已发给 agent" : "已提交（agent 未在线，它下次读 comments 能看到）");
+				setCommentNote(payload.data && payload.data.delivered === "sent" ? "标注已保存并发送" : "标注已保存，送达待确认");
 				setPendingPick(null);
 				setCommentText("");
 			} else {
@@ -307,8 +328,8 @@ function SandboxPreview(props) {
 			}
 		} catch (error) {
 			setCommentNote("失败：" + String(error && error.message || error));
-		}
-	}, [pendingPick, commentText, projectId, kind, id, token]);
+		} finally { setCommentSending(false); }
+	}, [pendingPick, commentText, commentSending, projectId, kind, id, token]);
 
 	const saveEdit = useCallback(async (patch) => {
 		if (pendingPick === null || !pendingPick.wsrc) { setEditNote("这个元素没有源码锚点，请用标注让 AI 改"); return; }
@@ -333,16 +354,17 @@ function SandboxPreview(props) {
 		let live = true;
 		const frame = frameRef.current;
 		if (!frame) return undefined;
+		setState({ status: "loading", error: "", info: null });
 		const host = createSandboxHost(frame, {
 			title: title,
 			onError: () => {},
-			onNavigate: onNavigate,
+			onNavigate: (target) => navigateRef.current?.(target),
 			// 点选（设计方案 §9.3）：沙箱只回 wsrc + 标签 + nth，行列由宿主用静态表换（前端不重复存一份表）
 			onPick: (pick) => {
 				if (!live || !pick) return;
 				// wsrc → 行列：拿实体的 jsxTable 换
 				loadEntity(projectId, kind, id, token).then((row) => {
-					if (!live) return;
+					if (!live || interactionRef.current === "view") return;
 					const table = row && Array.isArray(row.jsxTable) ? row.jsxTable : [];
 					const hit = table.filter((item) => item && item.wsrc === pick.wsrc)[0];
 					const selected = {
@@ -358,7 +380,7 @@ function SandboxPreview(props) {
 					setPendingPick(selected);
 					setCommentNote("");
 					setEditNote("");
-					if (interaction === "edit") {
+					if (interactionRef.current === "edit") {
 						setEditText(selected.text || "");
 						setEditInfo(null);
 						if (!selected.wsrc) { setEditNote("这个元素没有源码锚点，请用标注让 AI 改"); return; }
@@ -392,6 +414,7 @@ function SandboxPreview(props) {
 					isBoard: kind === "artboard"
 				});
 				if (!live) return;
+				if (result.ok) host.setPickMode(interactionRef.current !== "view");
 				setState({ status: result.ok ? "ok" : "error", error: result.error || "", info: result });
 				if (typeof onReport === "function") onReport(result);
 			} catch (error) {
@@ -400,7 +423,7 @@ function SandboxPreview(props) {
 		})();
 		return () => { live = false; if (hostRef.current) hostRef.current.destroy(); };
 		// entry 变化（切 examples）要重渲染：用 entryKey 而不是对象（对象每次都是新的）
-	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex, localRev, interaction, snapshot]);
+	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex, localRev, snapshot, token]);
 
 	const shownScale = scale || 1;
 	const contentHeight = Math.max(120, (state.info && state.info.height) || 480);
@@ -427,17 +450,26 @@ function SandboxPreview(props) {
 			),
 			React.createElement("textarea", {
 				autoFocus: true,
+				"aria-label": "修改意见",
+				onKeyDown: (event) => {
+					if (event.key !== "Escape") return;
+					event.stopPropagation();
+					if (!commentSending) { setPendingPick(null); setCommentText(""); setCommentNote(""); }
+				},
 				value: commentText,
 				placeholder: "这里要怎么改？（例如：标题太大 / 换个颜色）",
 				onChange: (event) => setCommentText(event.target.value),
 				style: { width: "100%", boxSizing: "border-box", height: 56, resize: "vertical", font: "12px system-ui", padding: 6, borderRadius: 6, border: "1px solid #dce2ee" }
 			}),
 			React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 6, alignItems: "center" } },
-				React.createElement("button", { type: "button", className: "daw-wb-btn", onClick: submitComment, disabled: String(commentText || "").trim() === "" }, "提交"),
-				React.createElement("button", { type: "button", className: "daw-wb-btn", "data-variant": "ghost", onClick: () => { setPendingPick(null); setCommentText(""); setCommentNote(""); } }, "取消"),
-				React.createElement("span", { style: { color: "#5b6577", marginLeft: "auto" } }, commentNote)
+				React.createElement("button", { type: "button", className: "daw-wb-btn", onClick: submitComment, disabled: commentSending || String(commentText || "").trim() === "" }, "提交"),
+				React.createElement("button", { type: "button", className: "daw-wb-btn", "data-variant": "ghost", disabled: commentSending, onClick: () => { setPendingPick(null); setCommentText(""); setCommentNote(""); } }, "取消"),
+				React.createElement("span", { role: "status", style: { color: "#5b6577", marginLeft: "auto" } }, commentNote)
 			)
 		) : null,
+		pendingPick === null && interaction === "annotate" && commentNote !== "" ? React.createElement("div", {
+			role: "status", style: { position: "absolute", left: 8, bottom: 8, maxWidth: "calc(100% - 16px)", padding: "5px 8px", borderRadius: 6, background: "var(--daw-surface, #fff)", color: "var(--daw-text, #172033)", fontSize: 12 }
+		}, commentNote) : null,
 		pendingPick !== null && interaction === "edit" ? React.createElement("div", {
 			style: { position: "absolute", left: 8, right: 8, bottom: 8, zIndex: 3, background: "#fff", border: "1px solid #2563eb", borderRadius: 8, padding: "8px 10px", boxShadow: "0 8px 24px rgba(15,23,42,.18)", font: "12px system-ui", maxHeight: "80%", overflow: "auto" }
 		},
@@ -552,55 +584,66 @@ export function DesignArtboardNode(props) {
 	const title = typeof data.title === "string" ? data.title : artboardId;
 	// 这些字段是 client.js 放进**节点 data** 的（React Flow 只把 data 放进 props.data）
 	const projectId = (props.data && props.data.projectId) || props.projectId || "";
-	const width = data.width === "mobile" ? "mobile" : "desktop";
-	// 画板跳转（设计方案 §9.1 / §6.4）：navigate 到同需求的另一个画板 → 这个节点就地切换预览，
-	// 并在卡头给一个「返回」把栈退回去。跳转不做页面导航（沙箱里也导航不了）。
-	const [trail, setTrail] = useState([artboardId]);
+	const token = (props.data && props.data.token) || props.token;
+	const labels = props.data?.labels || data.labels || {};
+	const [trail, setTrail] = useState([]);
 	const [mode, setMode] = useState("view");
-	// 跳转失败时给一句提示（不打断预览）
 	const [navNote, setNavNote] = useState("");
-	const current = trail[trail.length - 1] || artboardId;
+	const linked = trail[trail.length - 1];
+	const current = linked ? linked.id : artboardId;
+	const currentData = linked ? linked.meta : data;
+	const currentTitle = currentData.title || (linked ? current : title);
+	const width = currentData.width === "mobile" ? "mobile" : "desktop";
+	const viewport = useRef(null);
+	const availableWidth = usePreviewWidth(viewport);
+	const scale = props.review ? Math.min(1, availableWidth / PAGE_WIDTH[width]) : props.scale || 0.42;
 	const goTo = useCallback((target) => {
-		if (typeof target !== "string" || target === "") return;
-		// 只在 links 里声明过、且真的存在时才跳（P2 审计 I7：跳到不存在的画板会红框 + 标题变成 id）
-		const links = Array.isArray(data.links) ? data.links : [];
-		if (links.indexOf(target) < 0) { setNavNote("这个画板没有连到「" + target + "」"); return; }
-		loadEntity(projectId, "artboard", target, (props.data && props.data.token) || props.token).then((row) => {
+		if (typeof target !== "string" || target === "" || target === current) return;
+		if (!Array.isArray(currentData.links) || !currentData.links.includes(target)) {
+			setNavNote("这个画板没有连到「" + target + "」");
+			return;
+		}
+		loadEntity(projectId, "artboard", target, token).then((row) => {
 			if (row === null) { setNavNote("画板「" + target + "」不存在"); return; }
-			setTrail((prev) => (prev[prev.length - 1] === target ? prev : prev.concat([target])));
-		}, () => {});
-	}, [data.links, projectId]);
-	const back = useCallback(() => setTrail((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev)), []);
-	const [currentTitle, setCurrentTitle] = useState(title);
-	useEffect(() => {
-		let alive = true;
-		if (current === artboardId) { setCurrentTitle(title); return undefined; }
-		loadEntity(projectId, "artboard", current, (props.data && props.data.token) || props.token).then((row) => {
-			if (!alive) return;
-			setCurrentTitle(row && row.meta && row.meta.title ? row.meta.title : current);
-		}, () => {});
-		return () => { alive = false; };
-	}, [projectId, artboardId, current, title]);
-	return React.createElement("div", { style: chrome.card },
-		React.createElement("div", { style: chrome.head, "data-design-head": "1" },
-			React.createElement("span", { style: { fontWeight: 600 } }, currentTitle || current),
-			React.createElement("span", { style: chrome.tag }, "AI · 画板"),
+			setNavNote("");
+			setTrail((previous) => previous[previous.length - 1]?.id === target ? previous : [...previous, { id: target, meta: row.meta || {} }]);
+		}, () => { setNavNote("画板加载失败"); });
+	}, [current, currentData.links, projectId, token]);
+	function toggleMode(event, next) {
+		event.stopPropagation();
+		setMode((previous) => previous === next ? "view" : next);
+	}
+	const button = (label, key) => React.createElement("button", {
+		type: "button", className: "daw-wb-btn", "data-variant": props.review && key === "annotate" ? "primary" : "ghost",
+		"data-on": String(mode === key), "aria-pressed": mode === key, onClick: (event) => toggleMode(event, key)
+	}, label);
+	return React.createElement("div", { style: props.review ? { background: "var(--daw-surface, #fff)" } : chrome.card },
+		React.createElement("div", {
+			style: props.review ? { ...chrome.head, cursor: "default", flexWrap: "wrap", whiteSpace: "normal" } : chrome.head,
+			"data-design-head": "1"
+		},
+			React.createElement("span", { style: { fontWeight: 650, flex: props.review ? "1 1 95px" : undefined, minWidth: 0, overflowWrap: "anywhere" } }, currentTitle),
+			props.review ? null : React.createElement("span", { style: chrome.tag }, "AI · 画板"),
 			React.createElement("span", { style: chrome.muted }, width === "mobile" ? "手机" : "桌面"),
-			data.requirementId ? React.createElement("span", { style: chrome.muted }, "· 需求 " + String(data.requirementId).slice(0, 12)) : null,
-			typeof data.onEdit === "function" ? React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); data.onEdit(); }, className: "daw-wb-btn", "data-variant": "ghost" }, (data.labels && data.labels.edit) || "编辑") : null,
-			React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); setMode(mode === "annotate" ? "view" : "annotate"); }, className: "daw-wb-btn", "data-variant": "ghost", "data-on": String(mode === "annotate") }, mode === "annotate" ? "退出标注" : ((data.labels && data.labels.annotate) || "标注")),
-			React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); setMode(mode === "edit" ? "view" : "edit"); }, className: "daw-wb-btn", "data-variant": "ghost", "data-on": String(mode === "edit") }, mode === "edit" ? "退出直接改" : ((data.labels && data.labels.editDirect) || "直接改")),
-			navNote !== "" ? React.createElement("span", { style: { color: "#b45309", fontSize: 11 } }, navNote) : null,
-			trail.length > 1 ? React.createElement("button", { onClick: (event) => { event.stopPropagation(); back(); }, className: "daw-wb-btn", "data-variant": "ghost", style: { marginLeft: "auto" }, title: "回到上一个画板" }, "← 返回 (" + (trail.length - 1) + ")") : null
+			!props.review && data.requirementId ? React.createElement("span", { style: chrome.muted }, "· 需求 " + String(data.requirementId).slice(0, 12)) : null,
+			!linked && typeof data.onEdit === "function" ? React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); data.onEdit(); }, className: "daw-wb-btn", "data-variant": "ghost" }, labels.edit || "编辑") : null,
+			button(mode === "annotate" ? "退出标注" : (labels.annotate || "标注"), "annotate"),
+			button(mode === "edit" ? "退出直接改" : (labels.editDirect || "直接改"), "edit"),
+			trail.length > 0 ? React.createElement("button", { type: "button", onClick: (event) => {
+				event.stopPropagation();
+				setNavNote("");
+				setTrail((previous) => previous.slice(0, -1));
+			}, className: "daw-wb-btn", "data-variant": "ghost", title: "回到上一个画板" }, "← 返回 (" + trail.length + ")") : null
 		),
-		React.createElement(SandboxPreview, {
-			projectId: projectId, kind: "artboard", id: current, title: currentTitle, packId: data.packId, token: (props.data && props.data.token) || props.token,
-			entry: { key: current + "-0", props: {} }, sourceHash: current === artboardId ? data.sourceHash : undefined, width: width, scale: props.scale || 0.42, maxHeight: props.maxHeight || 420,
-			onNavigate: goTo,
-			interactive: true,
-			mode: mode,
-			onChanged: data.onDesignChanged
-		})
+		navNote ? React.createElement("div", { role: "status", style: { padding: "6px 10px", color: "var(--daw-warn, #b45309)", fontSize: 12 } }, navNote) : null,
+		React.createElement("div", {
+			ref: props.review ? viewport : undefined,
+			style: props.review ? { display: "grid", justifyItems: "center", minWidth: 0, overflow: "hidden", background: "var(--daw-surface-muted, #f5f6f8)" } : undefined
+		}, React.createElement(SandboxPreview, {
+			projectId, kind: "artboard", id: current, title: currentTitle, packId: currentData.packId || data.packId, token,
+			entry: { key: current + "-0", props: {} }, sourceHash: currentData.sourceHash, width, scale, maxHeight: props.maxHeight || 420,
+			onNavigate: goTo, interactive: true, mode, onChanged: props.data?.onDesignChanged || data.onDesignChanged
+		}))
 	);
 }
 
@@ -608,7 +651,7 @@ export function DesignArtboardNode(props) {
 export function DesignChatPreview(props) {
 	const delivery = props.delivery;
 	const viewport = useRef(null);
-	const [availableWidth, setAvailableWidth] = useState(560);
+	const availableWidth = usePreviewWidth(viewport);
 	const [trail, setTrail] = useState([delivery.entryId]);
 	const board = delivery.boards.find((item) => item.id === trail[trail.length - 1]);
 	const snapshot = useMemo(() => board && ({
@@ -616,15 +659,8 @@ export function DesignChatPreview(props) {
 		deps: board.dependencies.map((name) => ({ name, code: delivery.modules[name] }))
 	}), [board, delivery]);
 	useEffect(() => {
-		const box = viewport.current;
-		if (!box) return undefined;
-		function resize() { if (box.clientWidth > 0) setAvailableWidth(box.clientWidth); }
-		resize();
-		if (typeof ResizeObserver === "undefined") return undefined;
-		const observer = new ResizeObserver(resize);
-		observer.observe(box);
-		return () => observer.disconnect();
-	}, []);
+		if (board && typeof props.onBoardChange === "function") props.onBoardChange(board.id);
+	}, [board, props.onBoardChange]);
 	if (!board) return null;
 	const scale = Math.min(1, availableWidth / PAGE_WIDTH[board.width === "mobile" ? "mobile" : "desktop"]);
 	return React.createElement("div", { ref: viewport, style: { display: "grid", justifyItems: "center", minWidth: 0, overflow: "hidden" } },

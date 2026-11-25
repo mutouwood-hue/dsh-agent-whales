@@ -491,3 +491,21 @@ test("pack-api：内置 shadcn 包也要给组件清单（真机验证：agent �
 	assert.ok(button && button.variant, "Button 要说明 variant");
 	assert.deepEqual(button.variant.values, ["default", "secondary", "outline", "ghost", "destructive"]);
 }));
+
+test("高保真设计指南能在会话创建项目之前读取，并进入工具的文本输出", async () => {
+	const dir = freshStore();
+	const app = await boot(dir, SESSION_EVENTS);
+	try {
+		const designRead = app.tools.whales_design_read;
+		const args = { what: "design-guide" };
+		const guide = await designRead.execute(args, { agent: { id: "session-without-project" } });
+		assert.match(guide.guide, /当前项目/);
+		assert.match(guide.guide, /参考图/);
+		assert.match(guide.guide, /先验看/);
+		assert.match(designRead.output.render(args, guide)[0].text, /画板设计指南/);
+	} finally {
+		app.dispose();
+		await app.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

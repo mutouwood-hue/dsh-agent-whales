@@ -61,6 +61,8 @@ description: dsh-agent-whales 的项目协作协议手册——在一个鲸鱼�
 
 轻量线框可用 `whales_prototype_draw`。完整设计、高保真页面和可交互原型用 `whales_design_write` 写 TSX 画板；同一轮回复里会附上写入成功的画板。
 
+高保真设计、参考图设计和按批注改稿，先用 `whales_design_read` 的 `what:"design-guide"` 取设计指南，再按用户的任务和项目现有风格构图、编写交互和检查渲染。
+
 - **先读再写**：`whales_design_read` 的 `what:"list"` 看本项目已有哪些组件（能复用就复用，不重复造），
   `what:"pack-api"` 看当前组件库有哪些组件与 props——别凭记忆写 props 名。
 - **用当前项目的风格**：先看工作区已有界面、组件与 token。用 `styleFiles` 加载工作区的标准 CSS（相对路径，按顺序应用），需要自由布局时直接写 TSX、内联 `style` 或 `export const css`。`@cds` 和 `@project/<组件名>` 都是可选的复用入口。
