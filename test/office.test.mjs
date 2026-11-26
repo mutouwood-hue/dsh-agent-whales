@@ -103,7 +103,7 @@ test("工作室场景和角色动作均被写入素材白名单", () => {
   const { keys } = manifest();
   const characters = ["cat", "goldfish", "liang"];
   const actions = ["walk", "type", "game", "coffee"];
-  for (const name of ["day", "night", ...characters, ...characters.flatMap((character) => actions.map((action) => character + "-" + action))]) {
+  for (const name of ["room-day", "room-night", "room-desk", ...characters, ...characters.flatMap((character) => actions.map((action) => character + "-" + action))]) {
     const key = "o-studio-" + name;
     const file = readFileSync(new URL("../assets/office/" + key + ".webp", import.meta.url));
     assert.equal(file.length, keys[key].bytes);
@@ -152,11 +152,17 @@ test("办公室区分会话状态、分配任务、任务依赖和等你审批",
     assert.match(texts(deskOf("s-d")), /验收.*office\.wait\.report/);
     assert.equal(deskOf("s-d").props["data-attention"], "true");
     assert.match(texts(view.tree), /office\.attention \{"count":2\}/);
-    const portraits = find(view.tree, (n) => typeof n.props["data-character"] === "string");
-    assert.deepEqual(portraits.map((n) => n.props["data-character"]), ["cat", "goldfish", "liang", "cat", "goldfish"]);
-    const actionsOf = (id) => find(deskOf(id), (n) => typeof n.props["data-action"] === "string").map((n) => n.props["data-action"]);
+    const stage = find(view.tree, (n) => n.props.className === "daw-office-stage")[0];
+    const actors = find(stage, (n) => typeof n.props["data-actor-session"] === "string");
+    assert.deepEqual(actors.map((n) => n.props["data-character"]), ["cat", "goldfish", "liang", "cat", "goldfish"]);
+    const actorOf = (id) => actors.find((n) => n.props["data-actor-session"] === id);
+    const actionsOf = (id) => find(actorOf(id), (n) => typeof n.props["data-action"] === "string").map((n) => n.props["data-action"]);
     assert.deepEqual(actionsOf("s-main"), ["walk", "game", "coffee"]);
-    assert.deepEqual(actionsOf("s-a"), ["type"]);
+    assert.equal(actorOf("s-a").props["data-motion"], "type");
+    assert.ok(find(actorOf("s-a"), (n) => n.type === "img").some((n) => n.props.src.endsWith("goldfish-type.webp")));
+    assert.equal(actorOf("s-a").props.style["--home-x"], deskOf("s-a").props.style["--home-x"]);
+    assert.notEqual(actorOf("s-main").props.style["--home-x"], actorOf("s-main").props.style["--rest-x"]);
+    assert.equal(find(stage, (n) => n.props.className === "daw-office-fixture").length, 4);
     assert.deepEqual(actionsOf("s-b"), []);
     assert.deepEqual(actionsOf("s-c"), []);
   } finally { host.restore(); }
@@ -176,7 +182,7 @@ test("切换办公室场景后更换背景，手动选项与工位保留", async
       assert.equal(t.settings.getSnapshot().officeScene, scene);
       const room = find(view.tree, (n) => n.props.className === "daw-office-room")[0];
       assert.equal(room.props["data-scene"], scene);
-      assert.ok(find(room, (n) => n.type === "img").some((n) => n.props.src.endsWith("o-studio-" + scene + ".webp")));
+      assert.ok(find(room, (n) => n.type === "img").some((n) => n.props.src.endsWith("o-studio-room-" + scene + ".webp")));
       assert.equal(find(room, (n) => n.props["data-session"] === "s-main").length, 1);
     }
   } finally { t.settings.set({ officeScene: "auto" }); host.restore(); }
@@ -297,7 +303,7 @@ test("点工位把对应会话 id 交给 onOpenSession；按钮带「打开对�
     const view = mount(t.WbOfficePage, { t: KEY, projectId: "p1", onOpenSession: (id) => opened.push(id) });
     await view.settle();
     const desks = find(view.tree, (n) => typeof n.props["data-session"] === "string");
-    assert.equal(desks[1].props.title, KEY("office.open"));
+    assert.ok(desks[1].props.title.startsWith(KEY("office.open")));
     desks[1].props.onClick();
     desks[0].props.onClick();
     assert.deepEqual(opened, ["s-a", "s-main"]);
@@ -311,9 +317,9 @@ test("素材加载失败时隐藏图片，工位文字仍可打开对话", async
     const opened = [];
     const view = mount(t.WbOfficePage, { t: KEY, projectId: "p1", onOpenSession: (id) => opened.push(id) });
     await view.settle();
-    const images = find(view.tree, (n) => n.type === "img" && n.props.className !== "daw-office-action-img");
-    assert.equal(images.length, 2);
-    for (const img of images) {
+    const backdropAndDesk = find(view.tree, (n) => n.type === "img" && ["daw-office-backdrop", "daw-office-fixture"].includes(n.props.className));
+    assert.equal(backdropAndDesk.length, 2);
+    for (const img of backdropAndDesk) {
       const element = {};
       img.props.onError({ currentTarget: element });
       assert.equal(element.hidden, true);
@@ -322,6 +328,25 @@ test("素材加载失败时隐藏图片，工位文字仍可打开对话", async
     const desk = find(view.tree, (n) => n.props["data-session"] === "s-main")[0];
     desk.props.onClick();
     assert.deepEqual(opened, ["s-main"]);
+  } finally { host.restore(); }
+});
+
+test("成员超过六位时可切到下一间工作室，工位保持可点击", async () => {
+  const members = Array.from({ length: 7 }, (_, index) => ({ sessionId: "s-" + index }));
+  const host = fakeHost({ project: { projectId: "p1", mainSessionId: "s-0", members }, sessions: [] });
+  try {
+    const { t, mount } = load();
+    const opened = [];
+    const view = mount(t.WbOfficePage, { t: KEY, projectId: "p1", onOpenSession: (id) => opened.push(id) });
+    await view.settle();
+    const desks = () => find(view.tree, (n) => typeof n.props["data-session"] === "string");
+    assert.equal(desks().length, 6);
+    const next = find(view.tree, (n) => n.type === "button" && n.props["aria-label"] === KEY("office.room.next"))[0];
+    next.props.onClick();
+    view.rerender();
+    assert.equal(desks().length, 1);
+    desks()[0].props.onClick();
+    assert.deepEqual(opened, ["s-6"]);
   } finally { host.restore(); }
 });
 

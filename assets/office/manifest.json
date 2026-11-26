@@ -186,6 +186,24 @@
    "h": 480,
    "w": 1440
   },
+  "o-studio-room-day": {
+   "bytes": 118792,
+   "frames": 1,
+   "h": 627,
+   "w": 1254
+  },
+  "o-studio-room-desk": {
+   "bytes": 24142,
+   "frames": 1,
+   "h": 390,
+   "w": 372
+  },
+  "o-studio-room-night": {
+   "bytes": 107560,
+   "frames": 1,
+   "h": 627,
+   "w": 1254
+  },
   "o-walk-side": {
    "bytes": 45596,
    "frames": 2,
