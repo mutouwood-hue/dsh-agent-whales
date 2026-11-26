@@ -1,16 +1,20 @@
 # Whales Design · Cursor 原型
 
-把 DSH 插件里的 TSX 编译器和隔离预览接到 Cursor Agent。Agent 可创建和修改画板；MCP App 在对话中显示交互预览，支持选元素、保存批注并请求 Agent 修改。画板按工作区保存在 `.whales-design/`，请像其他工作文件一样管理它们。
+把 DSH 插件里的 TSX 编译器和隔离预览接到 Cursor Agent。Agent 创建或修改画板后，编辑器扩展监听文件变化并尝试自动打开侧栏画布。多张画板可拖动、缩放、连接和交互预览，也可选中元素保存批注。画板和布局保存在当前工作区的 `.whales-design/`。
 
 ## 准备
 
-需要 Node.js 20 或以上、支持 MCP Apps 的 Cursor，以及本仓库完整源码。先在本仓库根目录安装编译依赖，再构建适配层：
+需要 Node.js 22 或以上、支持 MCP Apps 的 Cursor，以及本仓库完整源码。先在本仓库根目录安装编译依赖，再构建适配层：
 
 ```bash
 npm ci
 npm ci --prefix cursor-design
+npm ci --prefix tools/flow-chunk
 npm run build --prefix cursor-design
+npm run pack:canvas --prefix cursor-design
 ```
+
+在 Cursor 的扩展面板右上角选择“从 VSIX 安装”，选择 `cursor-design/dist/whales-design-canvas.vsix`，安装后重新加载窗口。扩展可从活动栏打开；也可以运行命令“Whales Design: Open Canvas”。
 
 在**要使用画板的项目**中配置 `.cursor/mcp.json`（已有文件时合并 `mcpServers`，不要覆盖已有服务器）：
 
@@ -32,14 +36,14 @@ npm run build --prefix cursor-design
 
 > 用 Whales Design 做一个可交互的发票关联页面，生成画板供我查看。
 
-若没有自动调用，可明确要求使用 `whales_design_write`。选择「标注」后点击设计元素，输入意见并点击发送；若 Cursor 不支持应用发送消息，意见仍会保存，在对话中说「按画板批注修改」即可。
+若没有自动调用，可明确要求使用 `whales_design_write`。选择画板上的「标注修改」，点击设计元素并输入意见，然后点击「保存并复制修改请求」，把复制的请求粘贴到 Cursor 对话。画板标题可以拖动，连接点可以连线；这些布局保存在本地。
 
 ## 当前范围
 
-这是原型：支持单个画板预览和切换，尚不是 DSH 的多节点自由画布；只支持导入 React，不支持 DSH 的组件库、`@project` 组件、多画板跳转、直接改元素、设计确认或 DSH 团队功能。沙箱不能访问网络，因而外部图片和在线字体不能直接加载。预览高度按内容变化并在对话区域内滚动。画板更新后点击「刷新」取得最新版本。
+这是多画板原型：支持拖动、缩放、连线、交互预览和元素批注；使用 TSX 与 React 生成交互式页面。连线表达画布关系；原型组件可调用 `navigate("目标画板id")`，将视野切换到已有画板。尚不支持 DSH 组件库、`@project` 组件、直接改元素、设计确认或 DSH 团队功能。沙箱不能访问网络，因此外部图片和在线字体不能直接加载。
 
-不同 Cursor 版本对 MCP Apps 的显示和消息发送行为可能不同。若只看见工具文本，检查 Cursor 版本和 MCP Apps 支持；源码仍保存在工作区，不能据此声称界面已验证。
+自动打开依赖 Cursor 对 VS Code 扩展、文件监听及 Webview 的支持；尚需在目标 Cursor 环境实测。若未自动打开，可点击活动栏 Whales Design 图标或运行上述命令，再点「刷新」。如果画布位于较窄的侧栏，可以把视图拖到次要侧栏或放大侧栏。
 
 ## 验证
 
-`npm test --prefix cursor-design` 覆盖 MCP 服务连接、写入、读取、编译失败保护、批注及 UI 资源。浏览器模拟宿主检查可运行 `CHROME_PATH="/Chrome/可执行文件的绝对路径" npm run test:ui --prefix cursor-design`。该检查使用 Chromium 和模拟 MCP App 宿主；Cursor 真机验证需要实际安装 Cursor。
+`npm test --prefix cursor-design` 覆盖 MCP 服务连接、写入、读取、编译失败保护、批注及 UI 资源。浏览器模拟宿主检查可运行 `CHROME_PATH="/Chrome/可执行文件的绝对路径" npm run test:ui --prefix cursor-design`。该检查使用 Chromium 和模拟 MCP App 宿主。多画板可用 `CHROME_PATH="/Chrome/可执行文件的绝对路径" npm run test:canvas --prefix cursor-design` 验证。自动打开行为经过模拟扩展宿主测试；Cursor 真机验证需要实际安装 Cursor。

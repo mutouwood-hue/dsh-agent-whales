@@ -1,0 +1,27 @@
+import { chromium } from 'playwright-core';
+import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join,dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {createStore} from '../core.mjs';
+const dir=dirname(dirname(fileURLToPath(import.meta.url)));if(!process.env.CHROME_PATH)throw Error('Set CHROME_PATH');
+const workspace=mkdtempSync(join(tmpdir(),'whales-canvas-')), store=createStore(workspace);
+for(const [id,title] of [['one','第一页'],['two','第二页']])store.write({id,title,source:`import React from 'react'; export default function Board({navigate}){const [n,setN]=React.useState(0);return <div style={{height:750,background:'#fff'}}><h1>${title}</h1><button onClick={()=>setN(n+1)}>次数 {n}</button><button onClick={()=>navigate("two")}>去第二页</button></div>}`});
+const boards=store.list().map(x=>store.get(x.id));
+const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH,args:['--no-sandbox']});
+try {
+ const page=await browser.newPage({viewport:{width:1500,height:950}});page.on('pageerror',e=>console.error('PAGE ERROR',String(e)));
+ await page.route('**/*',async route=>{const url=route.request().url();if(url.endsWith('/canvas.js'))return route.fulfill({contentType:'text/javascript',body:readFileSync(join(dir,'editor-extension/media/canvas.js'))});if(url.endsWith('/canvas.css'))return route.fulfill({contentType:'text/css',body:readFileSync(join(dir,'editor-extension/media/canvas.css'))});return route.fulfill({contentType:'text/html',body:`<html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; frame-src 'self' blob: data:;"><link rel="stylesheet" href="/canvas.css"></head><body><div id="root"></div><script>window.messages=[];window.acquireVsCodeApi=()=>({postMessage:m=>window.messages.push(m)});</script><script src="/canvas.js"></script></body></html>`});});
+ await page.goto('http://localhost/');await page.waitForFunction(()=>window.messages.some(x=>x.type==='ready'));
+ await page.evaluate(b=>window.postMessage({type:'snapshot',workspace:'测试',boards:b,positions:{},edges:[]},'*'),boards);
+ await page.locator('.board').nth(1).waitFor();await page.waitForFunction(()=>document.querySelectorAll('.preview-message').length===0,{timeout:15000});
+ const frame=page.frameLocator('iframe').first();const clickInFrame=async text=>{const rect=await frame.getByText(text).evaluate(el=>{const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};});const iframe=page.locator('iframe').first();const box=await iframe.boundingBox();const width=await iframe.evaluate(el=>el.offsetWidth);await page.mouse.click(box.x+rect.x*box.width/width,box.y+rect.y*box.width/width);};await clickInFrame('次数 0');await frame.getByText('次数 1').waitFor();
+ const title=page.locator('.board-head').first();const box=await title.boundingBox();await page.mouse.move(box.x+50,box.y+12);await page.mouse.down();await page.mouse.move(box.x+100,box.y+65,{steps:5});await page.mouse.up();
+ await page.waitForFunction(()=>window.messages.some(x=>x.type==='saveLayout'));const layout=await page.evaluate(()=>window.messages.find(x=>x.type==='saveLayout'));if(Object.keys(layout.positions).length!==2)throw Error('positions not saved');
+ const sourceHandle=await page.locator('.react-flow__handle.source').first().boundingBox(),targetHandle=await page.locator('.react-flow__handle.target').nth(1).boundingBox();await page.mouse.move(sourceHandle.x+sourceHandle.width/2,sourceHandle.y+sourceHandle.height/2);await page.mouse.down();await page.mouse.move(targetHandle.x+targetHandle.width/2,targetHandle.y+targetHandle.height/2,{steps:15});await page.mouse.up();await page.waitForFunction(()=>window.messages.some(x=>x.type==='saveLayout'&&x.edges.length===1),null,{timeout:5000});
+ await page.locator('.react-flow__controls-zoomout').click();await page.locator('.react-flow__controls-zoomout').click();await page.locator('.board').first().getByText('标注修改').click();await clickInFrame('第一页');await page.locator('.board').first().getByText('已选',{exact:false}).waitFor();await page.locator('.board').first().locator('textarea').fill('调整标题');await page.locator('.board').first().getByText('保存并复制修改请求').click();
+ await page.waitForFunction(()=>window.messages.some(x=>x.type==='comment'),null,{timeout:5000});const msg=await page.evaluate(()=>window.messages.find(x=>x.type==='comment'));if(!msg?.wsrc||msg.text!=='调整标题')throw Error('annotation not sent');
+ if(process.env.CANVAS_SCREENSHOT)await page.screenshot({path:process.env.CANVAS_SCREENSHOT});
+ await page.locator('.board').first().getByText('退出标注').click();await clickInFrame('去第二页');await page.getByRole('status').getByText('已切换到「第二页」。').waitFor();
+ console.log('Multi-board canvas, interactive preview, navigation, dragging, connections and annotation passed.');
+}finally{await browser.close();rmSync(workspace,{recursive:true,force:true});}

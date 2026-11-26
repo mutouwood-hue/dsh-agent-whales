@@ -12,8 +12,8 @@ export function createServer(workspace) {
  const server=new McpServer({name:'whales-cursor-design',version:'0.1.0'});
  const ui={ui:{resourceUri:uri}};
  const result=(data, text) => ({content:[{type:'text',text}],structuredContent:data});
- const boardResult=(id) => result({board:store.get(id),boards:store.list()}, '画板已保存并打开。请检查交互和视觉效果；编译成功不代表已完成视觉验证。');
- registerAppTool(server,'whales_design_write',{description:'创建或更新可交互设计画板。source 是完整 TSX，默认导出 React 组件；只允许从 react 导入。按用户需求构建设计，使用真实交互和清晰的视觉层级。更新前先读取画板和批注。编译失败时修复错误后重试。',inputSchema:{id:z.string(),title:z.string(),source:z.string(),width:z.enum(['desktop','mobile']).optional(),resolvesComments:z.array(z.string()).optional()},_meta:ui},async args=>{
+ const boardResult=(id) => result({board:store.get(id),boards:store.list()}, '画板已保存。若已安装 Whales Design Canvas 扩展，侧栏会尝试自动打开；否则手动打开设计画布。请检查交互和视觉效果；编译成功不代表已完成视觉验证。');
+ registerAppTool(server,'whales_design_write',{description:'创建或更新可交互设计画板。source 是完整 TSX，默认导出 React 组件；只允许从 react 导入。组件可接收 navigate(id) 跳转到已有画板。按用户需求构建设计，使用真实交互和清晰的视觉层级。更新前先读取画板和批注。编译失败时修复错误后重试。',inputSchema:{id:z.string(),title:z.string(),source:z.string(),width:z.enum(['desktop','mobile']).optional(),resolvesComments:z.array(z.string()).optional()},_meta:ui},async args=>{
    const output=store.write(args); if(!output.written) return {isError:true,content:[{type:'text',text:JSON.stringify(output.errors)}]};
    if(args.resolvesComments?.length) store.resolveComments(args.id,args.resolvesComments);
    return boardResult(args.id);
