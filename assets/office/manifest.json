@@ -108,9 +108,21 @@
    "h": 384,
    "w": 288
   },
+  "o-studio-cat-type-loop": {
+   "bytes": 115794,
+   "frames": 16,
+   "h": 384,
+   "w": 288
+  },
   "o-studio-cat-walk": {
    "bytes": 21652,
    "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-cat-walk-loop": {
+   "bytes": 131176,
+   "frames": 4,
    "h": 384,
    "w": 288
   },
@@ -144,9 +156,21 @@
    "h": 384,
    "w": 288
   },
+  "o-studio-goldfish-type-loop": {
+   "bytes": 119728,
+   "frames": 16,
+   "h": 384,
+   "w": 288
+  },
   "o-studio-goldfish-walk": {
    "bytes": 22484,
    "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-goldfish-walk-loop": {
+   "bytes": 142358,
+   "frames": 4,
    "h": 384,
    "w": 288
   },
@@ -174,9 +198,21 @@
    "h": 384,
    "w": 288
   },
+  "o-studio-liang-type-loop": {
+   "bytes": 82782,
+   "frames": 16,
+   "h": 384,
+   "w": 288
+  },
   "o-studio-liang-walk": {
    "bytes": 16924,
    "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-liang-walk-loop": {
+   "bytes": 81476,
+   "frames": 4,
    "h": 384,
    "w": 288
   },

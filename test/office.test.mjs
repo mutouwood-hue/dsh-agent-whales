@@ -109,6 +109,25 @@ test("工作室场景和角色动作均被写入素材白名单", () => {
     assert.equal(file.length, keys[key].bytes);
     assert.equal(file.toString("ascii", 8, 12), "WEBP");
   }
+  for (const character of characters) {
+    for (const action of ["walk", "type"]) {
+      const key = "o-studio-" + character + "-" + action + "-loop";
+      const clip = keys[key];
+      const file = readFileSync(new URL("../assets/office/" + key + ".webp", import.meta.url));
+      assert.equal(file.length, clip.bytes);
+      assert.equal(file.toString("ascii", 8, 12), "WEBP");
+      assert.equal(clip.w, 288);
+      assert.equal(clip.h, 384);
+      let frames = 0;
+      for (let offset = 12; offset + 8 <= file.length;) {
+        const bytes = file.readUInt32LE(offset + 4);
+        if (file.toString("ascii", offset, offset + 4) === "ANMF") frames++;
+        offset += 8 + bytes + (bytes % 2);
+      }
+      assert.ok(frames >= 4, "素材需要包含真实的动作帧");
+      assert.equal(frames, clip.frames);
+    }
+  }
 });
 
 const MEMBERS = [{ sessionId: "s-main" }, { sessionId: "s-a", title: "前端" }, { sessionId: "s-b", title: "后端" }, { sessionId: "s-c" }, { sessionId: "s-d" }];
@@ -160,6 +179,12 @@ test("办公室区分会话状态、分配任务、任务依赖和等你审批",
     assert.deepEqual(actionsOf("s-main"), ["walk", "game", "coffee"]);
     assert.equal(actorOf("s-a").props["data-motion"], "type");
     assert.ok(find(actorOf("s-a"), (n) => n.type === "img").some((n) => n.props.src.endsWith("goldfish-type.webp")));
+    const [walk] = find(actorOf("s-main"), (n) => n.type === "source");
+    const [typing] = find(actorOf("s-a"), (n) => n.type === "source");
+    assert.ok(walk.props.srcSet.endsWith("cat-walk-loop.webp"));
+    assert.ok(typing.props.srcSet.endsWith("goldfish-type-loop.webp"));
+    assert.equal(walk.props.media, "(prefers-reduced-motion: no-preference)");
+    assert.equal(typing.props.media, walk.props.media);
     assert.equal(actorOf("s-a").props.style["--home-x"], deskOf("s-a").props.style["--home-x"]);
     assert.notEqual(actorOf("s-main").props.style["--home-x"], actorOf("s-main").props.style["--rest-x"]);
     assert.equal(find(stage, (n) => n.props.className === "daw-office-fixture").length, 4);
