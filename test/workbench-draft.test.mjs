@@ -329,21 +329,19 @@ test("目标条：没有提案时整个条不渲染——不占传统对话的�
   assert.equal(buttonsOf(tree).length, 0, "更不该放按钮");
 });
 
-test("目标条：对话已属于某个项目（含对话内画图自动建的）→ 只给一条窄的「打开画布」，点了进那个项目的画布", async () => {
+test("项目对话从顶栏打开所属画布，输入框上方不重复", async () => {
   const { plugin } = loadPlugin();
   installDocumentStub();
   const api = plugin.__test;
-  await prime(api, { "/projects": { projects: [{ projectId: "proj-chat", name: "素材替换方案", mainSessionId: "s-main", members: [], origin: "conversation" }] } });
+  await prime(api, { "/projects": { projects: [{ projectId: "proj-chat", name: "素材替换方案", mainSessionId: "s-main", members: [{ sessionId: "s-worker" }] }] } });
   try {
-    const tree = render(h(api.WhaleGoalBar, goalProps(api)));
-    assert.ok(tree, "在项目里就要有入口");
-    const texts = [];
-    collectText(tree, texts);
-    assert.ok(texts.join("|").includes("素材替换方案"));
+    const props = goalProps(api, { sessionId: "s-worker" });
+    assert.equal(render(h(api.WhaleGoalBar, props)), null);
+    assert.equal(render(h(api.WhaleProjectCanvasAction, goalProps(api, { sessionId: "unbound" }))), null);
+    const tree = render(h(api.WhaleProjectCanvasAction, props));
     const buttons = buttonsOf(tree);
     assert.equal(buttons.length, 1);
-    // 保留 DSH 右侧栏入口，只去掉画布内容内部侧栏。
-    assert.equal(buttons[0].props.children, "在侧边打开画布");
+    assert.equal(buttons[0].props.children, "项目画布");
     buttons[0].props.onClick();
     assert.deepEqual(api.wbRoute.get(), { kind: "workbench", projectId: "proj-chat", tab: "canvas" });
   } finally {

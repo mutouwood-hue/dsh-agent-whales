@@ -79,21 +79,17 @@ test("锚点按相对位置选边：同列上下排走上下边，左右排走�
   assert.deepEqual([byId["relay:b|a"].sourceHandle, byId["relay:b|a"].targetHandle], ["s-t", "t-b"]);
 });
 
-test("节点清单：派生节点 + 「加 Agent」占位 + 空态引导；占位 / 引导不带锚点；Thread 与 MCP 引导卡已删除（传了也不画）", () => {
+test("节点清单：派生节点与空态引导，画布操作不占节点", () => {
   const { wbFlowItems } = api();
   const el = { type: "div", props: {} };
   const items = wbFlowItems({
     nodes: [{ id: "m", kind: "composer", x: 430, y: 220, w: 320 }, { id: "a", kind: "agent", x: 800, y: 24, w: 200 }],
     nodeEl: (node) => ({ type: "div", props: { "data-id": node.id } }),
-    addEl: el, emptyGuideEl: el, agentCount: 1,
-    // 旧调用方可能还传这些：必须被忽略
-    threadEl: el, mcpGuideEl: el, classicNode: () => el
+    emptyGuideEl: el
   });
-  assert.deepEqual(items.map((item) => item.id), ["m", "a", "__add", "__guide"]);
+  assert.deepEqual(items.map((item) => item.id), ["m", "a", "__guide"]);
   assert.equal(items.find((item) => item.id === "a").el.props["data-id"], "a");
-  assert.equal(items.find((item) => item.id === "__add").y, 24 + 168);
-  assert.deepEqual(items.filter((item) => item.handles === false).map((item) => item.id), ["__add", "__guide"]);
-  assert.equal(items.some((item) => item.id === "__thread" || item.id === "__mcpguide"), false);
+  assert.deepEqual(items.filter((item) => item.handles === false).map((item) => item.id), ["__guide"]);
   const bare = wbFlowItems({ nodes: [{ id: "m", kind: "composer", x: 0, y: 0, w: 1 }] });
   assert.deepEqual(bare.map((item) => [item.id, item.el]), [["m", null]], "没给 nodeEl：节点仍在，只是没有卡片内容，不抛");
 });
