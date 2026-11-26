@@ -82,11 +82,12 @@ function createSandboxHost(frame, options) {
 	let readyWaiters = [];
 	let renderWaiter = null;
 	let booted = false;
+	const bootId = nextNonce();
 	const onMessage = (event) => {
 		// P0 结论：origin 必须是不透明源，再核对 nonce（不依赖 event.source）
 		if (event.origin !== "null") return;
 		const data = event.data || {};
-		if (data.type === "booted") { booted = true; return; }
+		if (data.type === "booted") { if (data.bootId === bootId) booted = true; return; }
 		if (data.nonce !== nonce) return;
 		if (data.type === "ready") {
 			ready = true;
@@ -96,6 +97,10 @@ function createSandboxHost(frame, options) {
 		}
 		if (data.type === "rendered") {
 			if (renderWaiter !== null) { const w = renderWaiter; renderWaiter = null; w(data); }
+			return;
+		}
+		if (data.type === "resize") {
+			if (typeof opts.onResize === "function") opts.onResize(data.height);
 			return;
 		}
 		if (data.type === "pick") {
@@ -114,7 +119,7 @@ function createSandboxHost(frame, options) {
 	window.addEventListener("message", onMessage);
 
 	frame.setAttribute("sandbox", "allow-scripts");
-	frame.setAttribute("srcdoc", sandboxSrcdoc({ csp: SANDBOX_CSP, title: opts.title || "whales-design" }));
+	frame.setAttribute("srcdoc", sandboxSrcdoc({ csp: SANDBOX_CSP, title: opts.title || "whales-design", bootId }));
 
 	/** init：把运行时 / 组件包 / 样式推进去，返回 ready 信息。 */
 	function init(payload) {
@@ -172,9 +177,7 @@ function createSandboxHost(frame, options) {
 
 	function setPickMode(enabled) {
 		if (!ready) return;
-		const runNonce = nextNonce();
-		nonce = runNonce;
-		frame.contentWindow.postMessage({ type: "pick-mode", nonce: runNonce, enabled: Boolean(enabled) }, "*");
+		frame.contentWindow.postMessage({ type: "pick-mode", nonce: nonce, enabled: Boolean(enabled) }, "*");
 	}
 
 	return {
@@ -271,6 +274,7 @@ function SandboxPreview(props) {
 	const frameRef = useRef(null);
 	const hostRef = useRef(null);
 	const [state, setState] = useState({ status: "loading", error: "", info: null });
+	const [measuredHeight, setMeasuredHeight] = useState(0);
 	// 画布内两种直接操作：标注（发对话）与直接改（文本 / token 类）。
 	const interaction = mode === "edit" || mode === "annotate" ? mode : "view";
 	const interactionRef = useRef(interaction);
@@ -355,8 +359,10 @@ function SandboxPreview(props) {
 		const frame = frameRef.current;
 		if (!frame) return undefined;
 		setState({ status: "loading", error: "", info: null });
+		setMeasuredHeight(0);
 		const host = createSandboxHost(frame, {
 			title: title,
+			onResize: (height) => { if (live && Number.isFinite(height) && height > 0) setMeasuredHeight(Math.min(20000, height)); },
 			onError: () => {},
 			onNavigate: (target) => navigateRef.current?.(target),
 			// 点选（设计方案 §9.3）：沙箱只回 wsrc + 标签 + nth，行列由宿主用静态表换（前端不重复存一份表）
@@ -426,11 +432,10 @@ function SandboxPreview(props) {
 	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex, localRev, snapshot, token]);
 
 	const shownScale = scale || 1;
-	const contentHeight = Math.max(120, (state.info && state.info.height) || 480);
-	const height = interactive
-		? Math.min(maxHeight || 640, Math.max(120, Math.ceil(contentHeight * shownScale)))
-		: Math.min(maxHeight || 640, Math.max(120, (state.info && state.info.height) || 260));
-	const viewportHeight = interactive ? Math.ceil(height / shownScale) : contentHeight;
+	const contentHeight = Math.max(120, measuredHeight || (state.info && Math.max(state.info.height || 0, state.info.scrollHeight || 0)) || 480);
+	const naturalHeight = Math.max(120, Math.ceil(contentHeight * shownScale));
+	const height = maxHeight ? Math.min(maxHeight, naturalHeight) : naturalHeight;
+	const viewportHeight = Math.ceil(height / shownScale);
 	const api = (typeof API === "string" ? API : "/agent-whales/api");
 	return React.createElement("div", { style: { position: "relative", width: Math.ceil(pageWidth * (scale || 1)), height: height, overflow: "hidden", background: "#fff" } },
 		React.createElement("iframe", {
@@ -642,7 +647,7 @@ export function DesignArtboardNode(props) {
 			style: props.review ? { display: "grid", justifyItems: "center", minWidth: 0, overflow: "hidden", background: "var(--daw-surface-muted, #f5f6f8)" } : undefined
 		}, React.createElement(SandboxPreview, {
 			projectId, kind: "artboard", id: current, title: currentTitle, packId: currentData.packId || data.packId, token,
-			entry: { key: current + "-0", props: {} }, sourceHash: currentData.sourceHash, width, scale, maxHeight: props.maxHeight || 420,
+			entry: { key: current + "-0", props: {} }, sourceHash: currentData.sourceHash, width, scale,
 			onNavigate: goTo, interactive: true, mode, onChanged: props.data?.onDesignChanged || data.onDesignChanged
 		}))
 	);
@@ -671,7 +676,7 @@ export function DesignChatPreview(props) {
 		}, props.backLabel || "返回上一屏") : null,
 		React.createElement(SandboxPreview, {
 			projectId: delivery.projectId, kind: "artboard", id: board.id, title: board.title,
-			packId: delivery.packId, width: board.width, scale, maxHeight: 640, interactive: true, snapshot,
+			packId: delivery.packId, width: board.width, scale, interactive: true, snapshot,
 			onNavigate: (target) => {
 				if (target !== board.id && board.links.includes(target) && delivery.boards.some((item) => item.id === target)) {
 					setTrail((previous) => [...previous, target]);
