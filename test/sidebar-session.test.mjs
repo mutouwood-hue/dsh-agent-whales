@@ -3,13 +3,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { installDocumentStub, loadPlugin } from "./harness.mjs";
 
-function setup() {
+function setup({ deferredTabs = false } = {}) {
   const { plugin } = loadPlugin();
   installDocumentStub();
   const registrations = [];
   const tabTypes = [];
   const opened = [];
   const selected = [];
+  const registry = { register(type) { tabTypes.push(type); return () => {}; } };
+  let registerTabs;
   plugin.apply({
     effect(run) { return run(); },
     slots: {
@@ -18,14 +20,17 @@ function setup() {
     },
     locale: { register() { return () => {}; } },
     sessions: { binding: () => undefined },
+    ...(deferredTabs && { inject(deps, register) {
+      if (deps.includes("sidebarRightTabs")) registerTabs = register;
+    } }),
     get(name) {
-      if (name === "sidebarRightTabs") return { register(type) { tabTypes.push(type); return () => {}; } };
+      if (name === "sidebarRightTabs" && !deferredTabs) return registry;
       if (name === "sidebarRight") return { openTab(kind) { opened.push(kind); } };
       if (name === "layout") return { selectPanel(panel) { selected.push(panel); return true; } };
       return undefined;
     }
   });
-  return { api: plugin.__test, registrations, tabTypes, opened, selected };
+  return { api: plugin.__test, registrations, tabTypes, opened, selected, provideTabs: () => registerTabs({ sidebarRightTabs: registry }) };
 }
 
 test("保留 DSH 右侧栏画布 body 与 guide 注册", () => {
@@ -36,6 +41,13 @@ test("保留 DSH 右侧栏画布 body 与 guide 注册", () => {
   assert.equal(tabTypes.length, 1);
   assert.equal(tabTypes[0].kind, "whales-canvas");
   assert.ok(tabTypes[0].guide.some((entry) => entry.id === "whales-canvas"));
+});
+
+test("宿主晚于插件提供右侧栏注册表时仍注册画布", () => {
+  const { tabTypes, provideTabs } = setup({ deferredTabs: true });
+  assert.equal(tabTypes.length, 0);
+  provideTabs();
+  assert.equal(tabTypes[0]?.kind, "whales-canvas");
 });
 
 test("打开画布优先走 DSH 右侧栏，不切主面板", () => {

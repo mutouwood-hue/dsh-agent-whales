@@ -121,13 +121,14 @@ test("Composer 卡：首条消息在挂上后补交一次（setDraft + submit）
   const t = loaded.plugin.__test;
   t.wbSetPending("session-new", "给审批流做导入导出");
   const { log, actions } = fakeActions();
+  const opened = [];
   await withFetch((target) => {
     if (target.startsWith("/sessions/session-new/messages")) {
       return ok({ sessionId: "session-new", total: 2, rows: [{ role: "user", text: "给审批流做导入导出" }, { role: "assistant", text: "好的，先看表单模型" }] });
     }
     return ok({});
   }, async (calls) => {
-    const props = { t: KEY, sessionId: "session-new", inputActions: actions, useSession: (sel) => sel({ running: false }), useInput: (sel) => sel({ phase: "plain" }) };
+    const props = { t: KEY, sessionId: "session-new", inputActions: actions, onOpenSession: (id) => opened.push(id), useSession: (sel) => sel({ running: false }), useInput: (sel) => sel({ phase: "plain" }) };
     const view = mount(t.WbSessionComposer, props);
     assert.deepEqual(log, [["setDraft", "给审批流做导入导出"], ["submit"]], "挂上即补交首条，且只交一次");
     await view.settle();
@@ -135,6 +136,9 @@ test("Composer 卡：首条消息在挂上后补交一次（setDraft + submit）
     assert.deepEqual(log.length, 2, "重画不能再交一次");
     const text = texts(view.tree);
     assert.ok(text.indexOf("好的，先看表单模型") >= 0, "回复要显示在画布卡上：" + text);
+    assert.ok(!text.includes("给审批流做导入导出"), "有回复时只预览回复");
+    buttonByText(view.tree, "chat.openFull").props.onClick();
+    assert.deepEqual(opened, ["session-new"]);
     assert.ok(calls.some((c) => c.target === "/sessions/session-new/messages?limit=8"), "回复走 /sessions/:id/messages");
   });
 });

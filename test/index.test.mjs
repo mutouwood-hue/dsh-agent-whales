@@ -1525,7 +1525,7 @@ test("素材路由：OPTIONS 204，非 GET/HEAD/OPTIONS 405 + allow", () => {
   }
 });
 
-// X4 办公室素材：/agent-whales/api/office/，与 /art/ 分开，只放行 o-sit-<姿势>（鲸鱼娘坐姿横条，AI 生成）
+// 办公室和头顶鲸鱼使用各自的素材清单。
 const OFFICE_BASE = "/agent-whales/api/office/";
 
 test("办公室素材：清单键与 assets/office/manifest.json 一致，每张 200 + image/webp + 字节数对得上", () => {
@@ -1535,10 +1535,11 @@ test("办公室素材：清单键与 assets/office/manifest.json 一致，每张
   assert.equal(manifest.status, 200);
   const body = JSON.parse(manifest.body);
   assert.deepEqual(Object.keys(body.keys).sort(), Object.keys(fileManifest.keys).sort());
-  assert.equal(Object.keys(body.keys).length, 16, "9 个坐姿 + 1 条侧面行走 + 椅子 / 桌子两层 + 盆栽 / 书架 + 地砖 / 墙");
+  assert.ok(body.keys["o-studio-day"] && body.keys["o-studio-night"]);
+  assert.ok(body.keys["o-sit-idle"]);
   assert.equal("layout" in body, false, "layout 只是构建记录，宿主清单协议里没有它，不能漏给浏览器");
   for (const [key, entry] of Object.entries(body.keys)) {
-    assert.match(key, /^o-(sit-(idle|type|wait|sleep|read|run|think|done|oops)|station-(back|front)|walk-side|plant|shelf|floor|wall)$/);
+    assert.match(key, /^o-[a-z0-9-]+$/);
     const result = callRoute(route, { method: "GET", url: OFFICE_BASE + key + ".webp" });
     assert.equal(result.status, 200, key);
     assert.equal(result.headers["content-type"], "image/webp", key);

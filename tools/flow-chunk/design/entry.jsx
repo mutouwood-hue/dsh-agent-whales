@@ -614,8 +614,8 @@ export function DesignArtboardNode(props) {
 		setMode((previous) => previous === next ? "view" : next);
 	}
 	const button = (label, key) => React.createElement("button", {
-		type: "button", className: "daw-wb-btn", "data-variant": props.review && key === "annotate" ? "primary" : "ghost",
-		"data-on": String(mode === key), "aria-pressed": mode === key, onClick: (event) => toggleMode(event, key)
+		type: "button", className: "daw-wb-btn", "data-variant": "tool",
+		"aria-pressed": mode === key, onClick: (event) => toggleMode(event, key)
 	}, label);
 	return React.createElement("div", { style: props.review ? { background: "var(--daw-surface, #fff)" } : chrome.card },
 		React.createElement("div", {
@@ -627,8 +627,9 @@ export function DesignArtboardNode(props) {
 			React.createElement("span", { style: chrome.muted }, width === "mobile" ? "手机" : "桌面"),
 			!props.review && data.requirementId ? React.createElement("span", { style: chrome.muted }, "· 需求 " + String(data.requirementId).slice(0, 12)) : null,
 			!linked && typeof data.onEdit === "function" ? React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); data.onEdit(); }, className: "daw-wb-btn", "data-variant": "ghost" }, labels.edit || "编辑") : null,
-			button(mode === "annotate" ? "退出标注" : (labels.annotate || "标注"), "annotate"),
-			button(mode === "edit" ? "退出直接改" : (labels.editDirect || "直接改"), "edit"),
+			React.createElement("div", { className: "daw-wb-board-tools", role: "group", "aria-label": labels.toolGroup || "画板工具" },
+				button(mode === "annotate" ? "退出标注" : (labels.annotate || "标注"), "annotate"),
+				button(mode === "edit" ? "退出直接改" : (labels.editDirect || "直接改"), "edit")),
 			trail.length > 0 ? React.createElement("button", { type: "button", onClick: (event) => {
 				event.stopPropagation();
 				setNavNote("");

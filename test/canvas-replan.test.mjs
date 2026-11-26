@@ -132,7 +132,7 @@ test("已删除的东西确实不在了：导出的纯函数、样式规则、�
     assert.equal(css.indexOf(dead), -1, "样式规则 " + dead + " 应已删除");
   }
   assert.ok(css.indexOf(".daw-wb-canvas-fallback{") >= 0, "降级块的样式在");
-  assert.ok(css.indexOf(".daw-wb-flowbar{") >= 0 && css.indexOf(".daw-wb-flowbar button[data-on=true]{") >= 0, "新画布的模式条（flowbar）样式不能被误删");
+  assert.ok(css.includes(".daw-wb-flowbar{") && css.includes(".daw-wb-zoombtn[data-on=true]"), "画布模式条与其共享的选中态样式均可用");
   assert.ok(css.indexOf(".daw-wb-canvaswrap{") >= 0, "画布容器样式在");
   for (const lang of ["zh", "en"]) {
     for (const key of ["canvas.thread", "canvas.thread.members", "canvas.engine.classic", "canvas.engine.flow", "canvas.legend.mcp"]) assert.equal(t.WB_TEXT[lang][key], undefined, lang + " " + key + " 应已删除");

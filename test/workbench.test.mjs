@@ -242,6 +242,10 @@ test("画布节点：主对话=Composer、其余成员=Agent、落点去重成�
   const contexts = nodes.filter((node) => node.kind === "folder");
   assert.equal(composer.length, 1, "主对话只能有一个 Composer 节点");
   assert.equal(composer[0].sessionId, "s-main");
+  assert.equal(composer[0].title, "主对话");
+  const bareSession = [{ sessionId: "s-main", title: "s-main" }];
+  const projectWithLeadTitle = { ...project, members: [{ sessionId: "s-main", title: "项目启动会" }] };
+  assert.equal(wbCanvasNodes(projectWithLeadTitle, [], bareSession).find((node) => node.kind === "composer").title, "项目启动会");
   assert.equal(agents.length, 2, "两个成员 = 两个 Agent 节点");
   assert.equal(contexts.length, 2, "work/t1 与 work/t2 两个落点");
   const shared = contexts.filter((node) => node.title === "work/t1")[0];
@@ -281,13 +285,13 @@ test("耗时：秒/分/时/天四档", () => {
 
 // ── 7. 组件渲染冒烟（React 垫片）───────────────────────────────────────────
 
-test("工作台外壳：默认渲染项目列表侧栏与顶栏，主题跟着设置走", () => {
+test("工作台外壳：默认渲染项目列表和顶栏，主题跟着设置走", () => {
   const { plugin } = loadPlugin();
   installDocumentStub();
   const { WhaleWorkbench } = plugin.__test;
   const tree = render(h(WhaleWorkbench, {}));
   assert.ok(findByClass(tree, "daw-wb").length >= 1, "外壳必须挂 daw-wb（token 根）");
-  assert.ok(findByClass(tree, "daw-wb-side").length >= 1, "侧栏必须渲染");
+  assert.equal(findByClass(tree, "daw-wb-side").length, 0, "工作台沿用 DSH 的侧栏");
   assert.ok(findByClass(tree, "daw-wb-main").length >= 1, "主列必须渲染");
   assert.ok(findByClass(tree, "daw-wb-top").length >= 1, "顶栏必须渲染");
   // 默认落点是项目列表（D10：首次不默认进画布）
@@ -448,6 +452,9 @@ test("侧栏入口：点了才切面板，不默认抢占", () => {
   });
   assert.ok(node, "入口必须渲染成一个按钮");
   assert.equal(typeof node.props.onClick, "function");
+  const icon = render(h(api.WhalePanelEntry, { size: 18, active: true }));
+  assert.equal(icon.type, "svg", "新版宿主负责按钮和标签，插件只提供图标");
+  assert.equal(icon.props.width, 18);
   // 没有 layout 服务时点击必须静默（不抛、不崩）
   assert.equal(api.wbSelectPanel("whales-canvas"), false);
   assert.doesNotThrow(() => node.props.onClick());
@@ -891,7 +898,7 @@ test("A1：可加入会话排除主对话与现有成员，坏数据当不能加
   assert.equal(wbAddableSessions(sessions, {}).length, 4);
 });
 
-test("A1：画布上真的有「添加 Agent」落点，点得开也关得掉", async () => {
+test("A1：从画布工具栏打开或取消「添加 Agent」", async () => {
   // 这条曾经是源码 grep（断言 "setAddState(true)" 字面量）。改名就红，而且抓不到真 bug：
   // 2026-11-14 真机三连——addState 元组当值用（弹窗条件永不成立）、setAddState 未声明
   // （点击即抛 ReferenceError）、busyState 从没声明（点「加入」就抛）。
@@ -951,8 +958,12 @@ test("A1：画布上真的有「添加 Agent」落点，点得开也关得掉", 
     const view = await flowMount(mount, api, { t: t, projectId: "p1" }, loaded);
     const addNodes = [];
     collect(view.tree, addNodes, (n) => n.props["data-kind"] === "add");
-    assert.equal(addNodes.length, 1, "画布上必须有一个「添加 Agent」占位节点");
-    assert.doesNotThrow(() => { addNodes[0].props.onClick({ stopPropagation() {} }); view.rerender(); }, "点添加节点不能抛");
+    assert.equal(addNodes.length, 0);
+    const addButtons = [];
+    collect(view.tree, addButtons, (n) => n.type === "button" && texts(n) === "＋ 添加 Agent");
+    assert.equal(addButtons.length, 1);
+    addButtons[0].props.onClick();
+    view.rerender();
     assert.equal(modalsIn(view.tree).length, 1, "点完必须弹出加入弹窗");
     const allButtons = [];
     collect(view.tree, allButtons, (n) => n.type === "button");
@@ -1596,7 +1607,8 @@ test("空态引导：点「新建任务」弹画布内模态，取消关得掉�
       collectNodes(node.props ? node.props.children : undefined);
     };
     collectNodes(view.tree);
-    assert.ok(nodes.length >= 3, "弹窗开着的时候画布节点也还在（" + nodes.length + " 个）——崩了就会全没");
+    assert.ok(nodes.some((node) => node.props["data-kind"] === "composer"));
+    assert.ok(nodes.some((node) => node.props["data-kind"] === "guide"));
     // 取消关得掉（按钮要重新收集：上面的 buttons 是点之前的快照，弹窗里的不在里面）
     const modalButtons = [];
     const collectInto = (node, sink) => {

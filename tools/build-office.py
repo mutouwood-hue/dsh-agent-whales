@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""办公室素材构建：鲸鱼娘坐姿帧 + 配套家具 → assets/office/*.webp（透明底，家具与人物同一比例）。
+"""重建旧版办公室素材（鲸鱼娘坐姿帧与配套家具）。
 
 用法：python tools/build-office.py <源图目录> [--qa <质检输出目录>]
 
@@ -24,7 +24,7 @@
     人的腿从花边桌布下面露出来，与简报「桌面盖住膝盖以下」的约定一致；
   - 不去地面阴影：这批图本来就没有地面。
 manifest.json 是宿主路由的白名单（运行时不扫目录）；frames 是横条里的帧数，w/h 是整条的尺寸；
-layout 记录工位的对位数据，浏览器端常量由 test/office.test.mjs 对照它校验。
+layout 保留旧版工位的对位数据。
 """
 import argparse
 import importlib.util
@@ -254,6 +254,13 @@ def main():
         "walker": {"w": walker_w, "h": walk_h},
         "station": {"w": sw, "h": sh, "girlX": gx, "girlY": gy},
     }
+    # 工作室场景是独立素材，重建旧的姿势帧时仍把它们写入白名单。
+    for name in os.listdir(OUT_DIR):
+        if not name.startswith("o-studio-") or not name.endswith(".webp"):
+            continue
+        path = os.path.join(OUT_DIR, name)
+        with Image.open(path) as im:
+            keys[name[:-5]] = {"bytes": os.path.getsize(path), "frames": 1, "w": im.width, "h": im.height}
     with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as handle:
         json.dump({"version": 1, "keys": keys, "layout": layout}, handle, ensure_ascii=False, indent=1, sort_keys=True)
         handle.write("\n")

@@ -52,12 +52,14 @@ async function mountPage(name, props) {
   return { t, view, restore: () => { if (original === undefined) delete globalThis.fetch; else globalThis.fetch = original; } };
 }
 
-test("项目内页签条只剩三个：画布 · 表格 · 办公室；需求与待办收进画布，不再有独立需求页", async () => {
+test("项目页签显示画布、任务和办公室，任务角标说明未完成数", async () => {
   const c = await mountPage("WbTabs", { route: { kind: "workbench", projectId: "p1", tab: "canvas" }, reqAttention: 2, openTasks: 3, runningTasks: 4 });
   try {
     const tabs = byClass(c.view.tree, "daw-wb-tab");
     assert.deepEqual(tabs.map((n) => texts(n).replace(/\d+$/, "")), [KEY("tab.canvas"), KEY("tab.table"), KEY("tab.office")]);
-    assert.equal(texts(tabs[1]), KEY("tab.table") + "7", "表格页签角标 = 待办任务 + 在跑任务");
+    assert.equal(texts(tabs[1]), KEY("tab.table") + "7", "任务页签角标 = 待办任务 + 在跑任务");
+    assert.equal(tabs[1].props["aria-label"], KEY("tab.table") + " · " + KEY("tab.table.count", { count: 7 }));
+    assert.equal(c.t.WB_TEXT.zh["tab.table"], "任务");
     assert.doesNotMatch(texts(c.view.tree), /tab\.(tasks|brief|exec)\b/);
   } finally { c.restore(); }
 });

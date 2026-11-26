@@ -194,8 +194,10 @@ test("apply：注册 shell.overlay 与 settings.section，并登记中英文案"
   plugin.apply(ctx);
 
   // DSH 右侧栏画布保留；画布内容内部侧栏由 narrow 模式去掉。
-  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "whales.canvas.session", "sidebar.right.pane.tab", "conversation.chat.turnTail", "sidebar.panellist", "conversation.input.dock"]);
-  assert.equal(registrations.length, 9);
+  assert.deepEqual(injections, ["shell.overlay", "settings.section", "conversation.view", "main", "whales.canvas.session", "sidebar.right.pane.tab", "conversation.chat.turnTail", "sidebar.panellist", "conversation.session.header.utilities", "conversation.input.dock"]);
+  assert.equal(registrations.length, 10);
+  const canvasAction = registrations.find((entry) => entry.options.id === "whales-project-canvas");
+  assert.equal(canvasAction.options.name, "conversation.session.header.utilities");
   const tail = registrations.find((entry) => entry.options.name === "conversation.chat.turnTail");
   assert.equal(typeof tail.component, "function");
   assert.equal(definitions.length, 1);

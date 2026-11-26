@@ -84,6 +84,162 @@
    "h": 462,
    "w": 364
   },
+  "o-studio-cat": {
+   "bytes": 25066,
+   "frames": 1,
+   "h": 480,
+   "w": 384
+  },
+  "o-studio-cat-coffee": {
+   "bytes": 19868,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-cat-game": {
+   "bytes": 20600,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-cat-type": {
+   "bytes": 21810,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-cat-type-loop": {
+   "bytes": 115794,
+   "frames": 16,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-cat-walk": {
+   "bytes": 21652,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-cat-walk-loop": {
+   "bytes": 131176,
+   "frames": 4,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-day": {
+   "bytes": 80454,
+   "frames": 1,
+   "h": 480,
+   "w": 1440
+  },
+  "o-studio-goldfish": {
+   "bytes": 35160,
+   "frames": 1,
+   "h": 480,
+   "w": 384
+  },
+  "o-studio-goldfish-coffee": {
+   "bytes": 21798,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-goldfish-game": {
+   "bytes": 21942,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-goldfish-type": {
+   "bytes": 25088,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-goldfish-type-loop": {
+   "bytes": 119728,
+   "frames": 16,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-goldfish-walk": {
+   "bytes": 22484,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-goldfish-walk-loop": {
+   "bytes": 142358,
+   "frames": 4,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-liang": {
+   "bytes": 26484,
+   "frames": 1,
+   "h": 480,
+   "w": 384
+  },
+  "o-studio-liang-coffee": {
+   "bytes": 16864,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-liang-game": {
+   "bytes": 15714,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-liang-type": {
+   "bytes": 22146,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-liang-type-loop": {
+   "bytes": 82782,
+   "frames": 16,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-liang-walk": {
+   "bytes": 16924,
+   "frames": 1,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-liang-walk-loop": {
+   "bytes": 81476,
+   "frames": 4,
+   "h": 384,
+   "w": 288
+  },
+  "o-studio-night": {
+   "bytes": 66902,
+   "frames": 1,
+   "h": 480,
+   "w": 1440
+  },
+  "o-studio-room-day": {
+   "bytes": 118792,
+   "frames": 1,
+   "h": 627,
+   "w": 1254
+  },
+  "o-studio-room-desk": {
+   "bytes": 24142,
+   "frames": 1,
+   "h": 390,
+   "w": 372
+  },
+  "o-studio-room-night": {
+   "bytes": 107560,
+   "frames": 1,
+   "h": 627,
+   "w": 1254
+  },
   "o-walk-side": {
    "bytes": 45596,
    "frames": 2,

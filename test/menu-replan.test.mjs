@@ -75,25 +75,29 @@ async function mountWith(Component, props, overrides) {
 
 // ── 侧栏：只剩三项 ──────────────────────────────────────────────────────────
 
-test("侧栏只剩三项：项目 · 需要我处理 · 设置；没有发送记录 / 事件台 / 团队，也没有底部的「宿主团队」卡", async () => {
-  const c = await mountWith("WbSidebar", { route: { kind: "list" }, running: 2 });
+test("待办与设置迁到工作台顶栏，返回对话保留一个入口", async () => {
+  const navigate = [];
+  let back = 0;
+  const c = await mountWith("WbTopbar", { route: { kind: "list" }, running: 2, onNavigate: (route) => navigate.push(route.kind), onBack: () => { back++; } });
   try {
-    const navs = byClass(c.view.tree, "daw-wb-nav");
-    assert.deepEqual(navs.map((n) => texts(n)), [KEY("nav.projects"), KEY("nav.inbox"), KEY("nav.settings")]);
-    assert.equal(byClass(c.view.tree, "daw-wb-user").length, 0, "底部「宿主团队（只读）」小卡已删除（宿主自带，重复）");
-    assert.doesNotMatch(texts(c.view.tree), /nav\.(handoffs|events|team)|team\.host/);
-    assert.ok(c.calls.some((x) => x.target === "/inbox"), "前提：侧栏确实订阅了 /inbox（否则下面这条没有意义）");
-    assert.ok(!c.calls.some((x) => x.target === "/events" || x.target.startsWith("/events?")), "侧栏不再订阅 /events（事件数徽标随事件台一起删了）");
+    const actions = byClass(c.view.tree, "daw-wb-top-actions")[0];
+    const buttons = byClass(actions, "daw-wb-btn");
+    assert.deepEqual(buttons.map((node) => texts(node)), [KEY("nav.inbox"), KEY("nav.settings"), KEY("top.refresh"), KEY("top.back")]);
+    buttons[0].props.onClick(); buttons[1].props.onClick(); buttons[3].props.onClick();
+    assert.deepEqual(navigate, ["inbox", "settings"]);
+    assert.equal(back, 1);
+    assert.ok(c.calls.some((x) => x.target === "/inbox"), "顶栏保留待办订阅");
+    assert.ok(!c.calls.some((x) => x.target === "/events" || x.target.startsWith("/events?")), "顶栏不再订阅 /events");
   } finally { c.restore(); }
 });
 
-test("侧栏高亮：在项目工作台 / 从画布开始里高亮「项目」；在需要我处理里高亮它；设置同理", async () => {
-  for (const [route, want] of [[{ kind: "workbench", projectId: "p1", tab: "canvas" }, "nav.projects"], [{ kind: "start" }, "nav.projects"], [{ kind: "inbox" }, "nav.inbox"], [{ kind: "settings" }, "nav.settings"], [{ kind: "list" }, "nav.projects"]]) {
-    const c = await mountWith("WbSidebar", { route });
+test("顶栏显示当前待办或设置入口的选中状态", async () => {
+  for (const [kind, want] of [["inbox", "nav.inbox"], ["settings", "nav.settings"]]) {
+    const c = await mountWith("WbTopbar", { route: { kind } });
     try {
-      const on = byClass(c.view.tree, "daw-wb-nav").filter((n) => n.props["data-on"] === "true");
-      assert.equal(on.length, 1, JSON.stringify(route));
-      assert.equal(texts(on[0]), KEY(want), JSON.stringify(route));
+      const current = byClass(c.view.tree, "daw-wb-btn").filter((n) => n.props["aria-current"] === "page");
+      assert.equal(current.length, 1, kind);
+      assert.equal(texts(current[0]), KEY(want));
     } finally { c.restore(); }
   }
 });
@@ -170,8 +174,8 @@ test("活动分区：按项目收窄时请求带 projectId；没有数据给「�
 
 test("已删除的页面 / 符号 / 文案键确实不在了；仍被使用的没有被误删", () => {
   const t = loadPlugin().plugin.__test;
-  for (const name of ["WbEventsPage", "WbEventDetail", "WbSourceHealth", "WbTeamPage", "WbFirstPage", "WbHandoffsPage", "WB_EVENT_SOURCES", "WB_HEALTH_WORDS", "wbEventActionProject"]) assert.equal(t[name], undefined, name + " 已删除");
-  for (const name of ["WbHandoffsPanel", "WbEventsTimeline", "WbSection", "WbInboxPage", "WbSidebar"]) assert.equal(typeof t[name], "function", name + " 仍在");
+  for (const name of ["WbEventsPage", "WbEventDetail", "WbSourceHealth", "WbTeamPage", "WbFirstPage", "WbHandoffsPage", "WbSidebar", "WB_EVENT_SOURCES", "WB_HEALTH_WORDS", "wbEventActionProject"]) assert.equal(t[name], undefined, name + " 已删除");
+  for (const name of ["WbHandoffsPanel", "WbEventsTimeline", "WbSection", "WbInboxPage", "WbTopbar"]) assert.equal(typeof t[name], "function", name + " 仍在");
   for (const lang of ["zh", "en"]) {
     for (const key of ["nav.handoffs", "nav.events", "nav.team", "team.host", "team.desc", "first.welcome", "event.health.title", "event.action.open", "event.title", "list.stat.events"]) assert.equal(t.WB_TEXT[lang][key], undefined, lang + " " + key + " 已删除");
     for (const key of ["nav.projects", "nav.inbox", "nav.settings", "handoff.title", "handoff.export", "activity.events", "activity.events.desc", "inbox.foot", "common.none"]) assert.ok(t.WB_TEXT[lang][key], lang + " 缺 " + key);
