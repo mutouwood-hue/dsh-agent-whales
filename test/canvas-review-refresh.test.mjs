@@ -148,7 +148,7 @@ test("画布内需求面板的确认按钮真的调用 confirm-design 并带 rev
   for (const url of ["/projects/p1/requirements/r1", "/projects/p1/requirements/r1/e2e", "/canvas?projectId=p1", "/design/comments?projectId=p1", "/component-packs"]) await api.wbCache.read(url);
   const view = mount(api.WbRequirementCanvasPanel, { projectId: "p1", reqId: "r1" });
   await view.settle(10);
-  const button = buttonByText(view.tree, "确认设计并推进");
+  const button = buttonByText(view.tree, "确认设计");
   assert.ok(button, "画布审查面板里有确认按钮");
   button.props.onClick();
   await view.settle(10);

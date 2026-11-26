@@ -281,13 +281,13 @@ test("耗时：秒/分/时/天四档", () => {
 
 // ── 7. 组件渲染冒烟（React 垫片）───────────────────────────────────────────
 
-test("工作台外壳：默认渲染项目列表侧栏与顶栏，主题跟着设置走", () => {
+test("工作台外壳：默认渲染项目列表和顶栏，主题跟着设置走", () => {
   const { plugin } = loadPlugin();
   installDocumentStub();
   const { WhaleWorkbench } = plugin.__test;
   const tree = render(h(WhaleWorkbench, {}));
   assert.ok(findByClass(tree, "daw-wb").length >= 1, "外壳必须挂 daw-wb（token 根）");
-  assert.ok(findByClass(tree, "daw-wb-side").length >= 1, "侧栏必须渲染");
+  assert.equal(findByClass(tree, "daw-wb-side").length, 0, "工作台沿用 DSH 的侧栏");
   assert.ok(findByClass(tree, "daw-wb-main").length >= 1, "主列必须渲染");
   assert.ok(findByClass(tree, "daw-wb-top").length >= 1, "顶栏必须渲染");
   // 默认落点是项目列表（D10：首次不默认进画布）
@@ -448,6 +448,9 @@ test("侧栏入口：点了才切面板，不默认抢占", () => {
   });
   assert.ok(node, "入口必须渲染成一个按钮");
   assert.equal(typeof node.props.onClick, "function");
+  const icon = render(h(api.WhalePanelEntry, { size: 18, active: true }));
+  assert.equal(icon.type, "svg", "新版宿主负责按钮和标签，插件只提供图标");
+  assert.equal(icon.props.width, 18);
   // 没有 layout 服务时点击必须静默（不抛、不崩）
   assert.equal(api.wbSelectPanel("whales-canvas"), false);
   assert.doesNotThrow(() => node.props.onClick());
