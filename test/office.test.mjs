@@ -36,13 +36,14 @@ function load() {
   return { t, mount };
 }
 
-function fakeHost({ project, sessions, active, state, tasks = [] }) {
+function fakeHost({ project, sessions, active, state, tasks = [], office }) {
   const original = globalThis.fetch;
   globalThis.fetch = (url) => {
     const target = String(url).replace("/agent-whales/api", "");
     let data = ok({});
     if (target === "/projects/p1") data = ok({ project });
     else if (target === "/sessions") data = ok({ sessions });
+    else if (target === "/projects/p1/office" && office !== undefined) data = ok({ sessions: typeof office === "function" ? office() : office });
     else if (target === "/tasks?projectId=p1") data = ok({ tasks });
     // 真机的 /activity 是裸 JSON、没有 {code,msg,data} 信封；假宿主必须一样，否则测不出解包的 bug。
     else if (target === "/activity") data = { at: Date.now(), active: active || {}, state: state || {}, visitTools: true, ultra: false, controlToken: "t" };
@@ -385,7 +386,7 @@ test("路由：office 是合法 tab；坏 tab 仍回落 canvas", () => {
 test("文案：中英两份都有全部 office 键，且不再提 MetroCity", async () => {
   const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
   const poses = ["idle", "type", "read", "run", "think", "wait", "done", "oops", "sleep"].map((pose) => "office.pose." + pose);
-  const keys = ["tab.office", "office.empty", "office.tool", "office.open", "office.main", "office.untitled", "office.scene.auto", "office.scene.day", "office.scene.night", "office.wait.member"].concat(poses);
+  const keys = ["tab.office", "office.empty", "office.tool", "office.open", "office.main", "office.subagent", "office.untitled", "office.scene.auto", "office.scene.day", "office.scene.night", "office.wait.member"].concat(poses);
   for (const key of keys) {
     const hits = source.split('"' + key + '":').length - 1;
     assert.equal(hits, 2, key + " 必须在中文与英文各出现一次");
@@ -413,5 +414,84 @@ test("回归：/activity 是宿主的裸 JSON（没有信封），wbCache 必须
       t.wbCache.reset();
       await assert.rejects(() => t.wbCache.read("/sessions"), /code 0/);
     } finally { globalThis.fetch = original; }
+  } finally { host.restore(); }
+});
+
+
+test("六个已登记工位之外的新运行子 agent 出现在首房间，并按父子地址打开", async () => {
+  const members = Array.from({ length: 6 }, (_, index) => ({ sessionId: "s-" + index }));
+  const sessions = members.map(({ sessionId }) => ({ sessionId, live: true }));
+  const host = fakeHost({
+    project: { projectId: "p1", mainSessionId: "s-0", members }, sessions,
+    office: [...sessions, { sessionId: "child", parentSessionId: "s-0", title: "前端子任务", running: true, live: true }]
+  });
+  try {
+    const { t, mount } = load();
+    const opened = [];
+    const view = mount(t.WbOfficePage, { t: KEY, projectId: "p1", onOpenSession: (...args) => opened.push(args) });
+    await view.settle();
+    const desks = find(view.tree, (node) => typeof node.props["data-session"] === "string");
+    assert.deepEqual(desks.map((node) => node.props["data-session"]), ["s-0", "child", "s-1", "s-2", "s-3", "s-4"]);
+    const child = desks.find((node) => node.props["data-session"] === "child");
+    assert.equal(child.props["data-pose"], "type");
+    assert.match(texts(child), /office\.subagent/);
+    assert.match(texts(view.tree), /office\.members .*7/);
+    child.props.onClick();
+    assert.deepEqual(opened, [["child", "s-0"]]);
+    t.wbCache.reset();
+  } finally { host.restore(); }
+});
+
+test("停留在办公室时轮询名册，新子 agent 自动出现、收工更新、卸载后停止轮询", async () => {
+  let roster = [{ sessionId: "main", live: true }];
+  const host = fakeHost({ project: { projectId: "p1", mainSessionId: "main", members: [] }, sessions: roster, office: () => roster });
+  const { t, mount } = load();
+  const originalInterval = globalThis.setInterval;
+  const originalClear = globalThis.clearInterval;
+  const timers = new Map();
+  let nextTimer = 0;
+  globalThis.setInterval = (fn, ms) => { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; };
+  globalThis.clearInterval = (id) => timers.delete(id);
+  try {
+    const view = mount(t.WbOfficePage, { t: KEY, projectId: "p1" });
+    await view.settle();
+    assert.equal(find(view.tree, (node) => node.props["data-session"] === "child").length, 0);
+    roster = [...roster, { sessionId: "child", title: "新子代理", parentSessionId: "main", live: true, running: true }];
+    for (const timer of timers.values()) if (timer.ms === 5000) timer.fn();
+    await view.settle();
+    const child = () => find(view.tree, (node) => node.props["data-session"] === "child")[0];
+    assert.equal(child().props["data-pose"], "type");
+    roster = [roster[0], { ...roster[1], running: false }];
+    for (const timer of timers.values()) if (timer.ms === 5000) timer.fn();
+    await view.settle();
+    assert.equal(child().props["data-pose"], "idle");
+    roster = [roster[0]];
+    for (const timer of timers.values()) if (timer.ms === 5000) timer.fn();
+    await view.settle();
+    assert.equal(child(), undefined, "未登记的临时子代理卸载后不留幽灵工位");
+    t.wbCache.reset();
+    assert.equal([...timers.values()].filter((timer) => timer.ms === 5000).length, 0);
+  } finally {
+    t.wbCache.reset();
+    globalThis.setInterval = originalInterval;
+    globalThis.clearInterval = originalClear;
+    host.restore();
+  }
+});
+
+
+test("已自动登记到第七个工位的运行子 agent 也优先显示，不重复分配工位", async () => {
+  const members = [...Array.from({ length: 6 }, (_, index) => ({ sessionId: "s-" + index })), { sessionId: "child", parentSessionId: "s-0" }];
+  const sessions = members.map((member) => ({ sessionId: member.sessionId, live: true, running: member.sessionId === "child" }));
+  const host = fakeHost({ project: { projectId: "p1", mainSessionId: "s-0", members }, sessions, office: sessions });
+  try {
+    const { t, mount } = load();
+    const view = mount(t.WbOfficePage, { t: KEY, projectId: "p1" });
+    await view.settle();
+    const desks = find(view.tree, (node) => typeof node.props["data-session"] === "string");
+    assert.equal(desks[1].props["data-session"], "child");
+    assert.equal(desks.filter((node) => node.props["data-session"] === "child").length, 1);
+    assert.match(texts(view.tree), /office\.members .*7/);
+    t.wbCache.reset();
   } finally { host.restore(); }
 });
