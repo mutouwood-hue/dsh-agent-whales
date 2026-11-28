@@ -85,3 +85,4 @@ import "./design-transfer.test.mjs";
 import "./design-edit.test.mjs";
 import "./design-build-sync.test.mjs";
 import "./design-chunk-runnable.test.mjs";
+import "./design-render.test.mjs";

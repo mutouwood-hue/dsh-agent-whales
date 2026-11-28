@@ -12,6 +12,7 @@
  *   4) **Chunk 内共享的请求缓存**：同一组件包 / 运行时文本只拉一次（方案 §6.5 的建议）。
  */
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { sandboxSrcdoc, SANDBOX_CSP } from "../../../lib/design/sandbox.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
@@ -23,21 +24,27 @@ const BUILTIN_CSS = typeof __WHALES_SHADCN_CSS__ === "string" ? __WHALES_SHADCN_
 const runtimeCache = new Map(); // "" -> Promise<string>
 const packCache = new Map(); // packId -> Promise<{ bundle, styles, raw, api, manifest }>
 
+function fetchDesign(url, options) {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), 12000);
+	return fetch(url, { ...options, signal: controller.signal }).then(async (response) => {
+		if (!response.ok) throw new Error("设计资源加载失败（" + response.status + "）");
+		// 读完响应体才解除超时，防止头已到达但内容一直挂起。
+		return url.includes("/design/source?") ? response.json() : response.text();
+	}).catch((error) => { throw controller.signal.aborted ? new Error("设计资源加载超时，请重新渲染") : error; }).finally(() => clearTimeout(timer));
+}
+
 /** 沙箱运行时：从 host 下发的 `client.sandbox-runtime.js` 文本取（预构建，见 build-design.mjs）。 */
 function loadRuntimeText() {
 	const key = "runtime";
 	if (runtimeCache.has(key)) return runtimeCache.get(key);
-	const pending = fetch(API + "/design/runtime.js")
-		.then((response) => {
-			if (!response.ok) throw new Error("运行时下载失败 " + response.status);
-			return response.text();
-		});
+	const pending = fetchDesign(API + "/design/runtime.js");
 	runtimeCache.set(key, pending);
 	pending.catch(() => runtimeCache.delete(key));
 	return pending;
 }
 
-/** 组件包三件套（bundle / styles / api）。内置 shadcn 包没有 bundle.js，返回空。 */
+/** 预览只拉组件包代码和样式；内置包直接复用构建产物。 */
 function loadPackText(packId) {
 	const id = typeof packId === "string" && packId !== "" ? packId : "shadcn";
 	if (packCache.has(id)) return packCache.get(id);
@@ -48,12 +55,10 @@ function loadPackText(packId) {
 			return { bundle: BUILTIN_BUNDLE, styles: BUILTIN_CSS, api: null, builtin: true };
 		}
 		const [bundle, styles] = await Promise.all([
-			fetch(base + "/bundle.js").then((r) => (r.ok ? r.text() : "")),
-			fetch(base + "/styles.css").then((r) => (r.ok ? r.text() : ""), () => "")
+			fetchDesign(base + "/bundle.js"),
+			fetchDesign(base + "/styles.css")
 		]);
-		let api = null;
-		try { const r = await fetch(API + "/design/pack-api?packId=" + encodeURIComponent(id)); api = await r.json(); } catch (error) { api = null; }
-		return { bundle: bundle, styles: styles, api: api, builtin: false };
+		return { bundle: bundle, styles: styles, api: null, builtin: false };
 	})();
 	packCache.set(id, pending);
 	pending.catch(() => packCache.delete(id));
@@ -79,113 +84,82 @@ function createSandboxHost(frame, options) {
 	const opts = options || {};
 	let nonce = "";
 	let ready = false;
-	let readyWaiters = [];
-	let renderWaiter = null;
+	let destroyed = false;
 	let booted = false;
+	let bootResolve = null;
+	let initResolve = null;
+	let renderResolve = null;
+	const timers = new Set();
 	const bootId = nextNonce();
+	const timeoutMs = opts.timeoutMs || 8000;
+	function waitFor(register, error) {
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => done({ ok: false, timeout: true, error }), timeoutMs);
+			timers.add(timer);
+			function done(result) { clearTimeout(timer); timers.delete(timer); resolve(result); }
+			register(done);
+		});
+	}
 	const onMessage = (event) => {
-		// P0 结论：origin 必须是不透明源，再核对 nonce（不依赖 event.source）
-		if (event.origin !== "null") return;
+		if (destroyed || event.origin !== "null") return;
 		const data = event.data || {};
-		if (data.type === "booted") { if (data.bootId === bootId) booted = true; return; }
+		if (data.type === "booted") {
+			if (data.bootId === bootId) { booted = true; if (bootResolve) bootResolve({ ok: true }); }
+			return;
+		}
 		if (data.nonce !== nonce) return;
-		if (data.type === "ready") {
-			ready = true;
-			const waiters = readyWaiters.splice(0);
-			for (const resolve of waiters) resolve(data.info || {});
-			return;
-		}
-		if (data.type === "rendered") {
-			if (renderWaiter !== null) { const w = renderWaiter; renderWaiter = null; w(data); }
-			return;
-		}
-		if (data.type === "resize") {
-			if (typeof opts.onResize === "function") opts.onResize(data.height);
-			return;
-		}
-		if (data.type === "pick") {
-			if (typeof opts.onPick === "function") opts.onPick(data.pick);
-			return;
-		}
-		if (data.type === "navigate") {
-			// 画板跳转（设计方案 §6.4）：**父页面切换预览**，不在 iframe 里导航
-			if (typeof opts.onNavigate === "function") opts.onNavigate(data.to);
-			return;
-		}
+		if (data.type === "ready") { ready = true; if (initResolve) initResolve(data.info || {}); return; }
+		if (data.type === "rendered") { if (renderResolve) { const done = renderResolve; renderResolve = null; done(data); } return; }
+		if (data.type === "resize") { opts.onResize?.(data.height); return; }
+		if (data.type === "pick") { opts.onPick?.(data.pick); return; }
+		if (data.type === "navigate") { opts.onNavigate?.(data.to); return; }
 		if (data.type === "error") {
-			if (typeof opts.onError === "function") opts.onError(data);
+			const failure = { ok: false, error: data.message || "沙箱执行失败" };
+			if (!ready && initResolve) initResolve(failure);
+			if (renderResolve) { renderResolve(failure); renderResolve = null; }
+			opts.onError?.(data);
 		}
 	};
 	window.addEventListener("message", onMessage);
-
 	frame.setAttribute("sandbox", "allow-scripts");
 	frame.setAttribute("srcdoc", sandboxSrcdoc({ csp: SANDBOX_CSP, title: opts.title || "whales-design", bootId }));
 
-	/** init：把运行时 / 组件包 / 样式推进去，返回 ready 信息。 */
-	function init(payload) {
-		nonce = nextNonce();
+	async function init(payload) {
+		if (destroyed) return { ok: false, cancelled: true };
 		if (!booted) {
-			// srcdoc 的文档还没建好时 postMessage 会丢：轮询到 booted 再发
-			const startedAt = Date.now();
-			return new Promise((resolve) => {
-				const tick = () => {
-					if (booted || Date.now() - startedAt > 6000) { resolve(); return; }
-					setTimeout(tick, 60);
-				};
-				tick();
-			}).then(() => sendInit(payload));
+			const boot = await waitFor((done) => { bootResolve = done; }, "沙箱启动超时");
+			bootResolve = null;
+			if (!boot.ok || destroyed) return boot;
 		}
-		return sendInit(payload);
+		nonce = nextNonce();
+		return waitFor((done) => {
+			initResolve = done;
+			frame.contentWindow.postMessage({ type: "init", nonce, runtime: payload.runtime, styles: payload.styles, packCode: payload.bundle }, "*");
+		}, "沙箱初始化超时");
 	}
-	function sendInit(payload) {
-		return new Promise((resolve) => {
-			readyWaiters.push(resolve);
-			frame.contentWindow.postMessage({
-				type: "init",
-				nonce: nonce,
-				runtime: payload.runtime,
-				styles: payload.styles,
-				packCode: payload.bundle
-			}, "*");
-			setTimeout(() => { if (!ready) resolve({ timeout: true }); }, 8000);
-		});
-	}
-
-	/** render：渲染一个已编译好的组件；返回沙箱回报（或 {ok:false}）。 */
 	function render(spec) {
-		if (!ready) return Promise.resolve({ ok: false, error: "沙箱还没就绪" });
-		const runNonce = nextNonce();
-		nonce = runNonce;
-		return new Promise((resolve) => {
-			renderWaiter = resolve;
+		if (destroyed || !ready) return Promise.resolve({ ok: false, error: "沙箱还没就绪" });
+		if (renderResolve) renderResolve({ ok: false, cancelled: true });
+		nonce = nextNonce();
+		return waitFor((done) => {
+			renderResolve = done;
 			frame.contentWindow.postMessage({
-				type: "render",
-				nonce: runNonce,
-				runId: spec.runId || "run-" + Date.now(),
-				mountId: spec.mountId || "main",
-				name: spec.name,
-				code: spec.code,
-				props: spec.props || {},
-				dependencies: spec.dependencies || [],
-				isBoard: spec.isBoard === true
+				type: "render", nonce, runId: spec.runId || "run-" + Date.now(), mountId: spec.mountId || "main",
+				name: spec.name, code: spec.code, props: spec.props || {}, dependencies: spec.dependencies || [], isBoard: spec.isBoard === true
 			}, "*");
-			setTimeout(() => {
-				if (renderWaiter === resolve) { renderWaiter = null; resolve({ ok: false, error: "渲染超时（8 秒）" }); }
-			}, 8000);
-		});
+		}, "渲染超时，请重新渲染");
 	}
-
-	function setPickMode(enabled) {
-		if (!ready) return;
-		frame.contentWindow.postMessage({ type: "pick-mode", nonce: nonce, enabled: Boolean(enabled) }, "*");
-	}
-
 	return {
-		init: init,
-		render: render,
-		setPickMode: setPickMode,
-		destroy: function () { window.removeEventListener("message", onMessage); },
-		isReady: function () { return ready; }
+		init, render,
+		setPickMode: function (enabled) { if (ready && !destroyed) frame.contentWindow.postMessage({ type: "pick-mode", nonce, enabled: Boolean(enabled) }, "*"); },
+		destroy: function () {
+			destroyed = true;
+			window.removeEventListener("message", onMessage);
+			for (const done of [bootResolve, initResolve, renderResolve]) if (done) done({ ok: false, cancelled: true });
+			for (const timer of timers) clearTimeout(timer);
+			timers.clear();
+		},
+		isReady: function () { return ready && !destroyed; }
 	};
 }
 
@@ -206,7 +180,7 @@ function loadEntity(projectId, kind, id, token) {
 	if (cached !== undefined && Date.now() - cached.at < ENTITY_TTL_MS) return cached.pending;
 	const query = "?projectId=" + encodeURIComponent(projectId) + "&kind=" + kind + "&id=" + encodeURIComponent(id);
 	const headers = typeof token === "string" && token !== "" ? { "x-whales-token": token } : {};
-	const pending = fetch(API + "/design/source" + query, { headers }).then((response) => (response.ok ? response.json() : null)).then((body) => {
+	const pending = fetchDesign(API + "/design/source" + query, { headers }).then((body) => {
 		if (!body || body.code !== 200) return null;
 		return body.data;
 	});
@@ -223,20 +197,20 @@ export function invalidateEntity(projectId, kind, id) {
 }
 
 /** 取编译产物：依赖（@project/*）要先各自编译好一起传进沙箱。 */
-async function loadCompiled(projectId, kind, id, depth, token) {
+async function loadCompiled(projectId, kind, id, depth, token, ancestors = []) {
+	const key = kind + ":" + id;
+	if (ancestors.includes(key)) throw new Error("组件存在循环依赖：" + ancestors.concat(key).join(" → "));
 	const entity = await loadEntity(projectId, kind, id, token);
 	if (entity === null) return null;
-	const deps = [];
 	const imports = entity.meta && Array.isArray(entity.meta.imports) ? entity.meta.imports : [];
-	if (depth < 4) {
-		for (const name of imports) {
-			const dep = await loadCompiled(projectId, "component", name, depth + 1, token);
-			if (dep !== null) deps.push(dep);
-		}
+	const children = await Promise.all(imports.map((name) => loadCompiled(projectId, "component", name, depth + 1, token, ancestors.concat(key))));
+	const deps = new Map();
+	for (const child of children) {
+		if (!child) throw new Error("拿不到依赖组件的编译产物");
+		for (const dep of child.deps) deps.set(dep.name, dep);
+		deps.set(child.name, { name: child.name, code: child.code });
 	}
-	// compiled 源码不在 meta 里，要单独从磁盘取：/design/source 只回 source + meta。
-	// 所以这里用宿主下发的 compiled（compiled.js 内容）；没有就走「让沙箱编译」的退化路径（不支持）。
-	return { name: id, code: entity.compiledCode || "", deps: deps, meta: entity.meta, source: entity.source };
+	return { name: id, code: entity.compiledCode || "", deps: Array.from(deps.values()), meta: entity.meta, source: entity.source };
 }
 
 // ── 节点：组件 / 画板 ────────────────────────────────────────────────────────
@@ -250,7 +224,7 @@ const chrome = {
 
 const PAGE_WIDTH = { mobile: 390, desktop: 1024 };
 
-function usePreviewWidth(viewport) {
+function usePreviewWidth(viewport, layoutKey) {
 	const [width, setWidth] = useState(560);
 	useEffect(() => {
 		const box = viewport.current;
@@ -261,8 +235,60 @@ function usePreviewWidth(viewport) {
 		const observer = new ResizeObserver(resize);
 		observer.observe(box);
 		return () => observer.disconnect();
-	}, [viewport]);
+	}, [viewport, layoutKey]);
 	return width;
+}
+
+/** 画布外框：指针捕获防止跨 iframe 丢失拖动，按画布缩放换算距离。 */
+function useDesignFrame(props, defaultWidth) {
+	const saved = props.data?.frameSize;
+	const [size, setSize] = useState(() => ({ w: saved?.w > 0 ? saved.w : defaultWidth, h: saved?.h > 0 ? saved.h : 0 }));
+	const frame = useRef(null);
+	const drag = useRef(null);
+	const latestSize = useRef(size);
+	latestSize.current = size;
+	const enabled = !props.review;
+	function commit(next) { setSize(next); latestSize.current = next; props.data?.onFrameResize?.(next.w, next.h); }
+	const handle = enabled ? React.createElement("button", {
+		type: "button", className: "nodrag nopan", "aria-label": "调整设计图外框大小", title: "拖拽调整大小；方向键微调",
+		style: { position: "absolute", right: 0, bottom: 0, width: 22, height: 22, padding: 0, border: 0, borderRadius: "6px 0 10px 0", background: "var(--daw-surface, #fff)", color: "#64748b", cursor: "nwse-resize", touchAction: "none", zIndex: 4 },
+		onPointerDown: (event) => {
+			if (event.button !== 0) return;
+			event.preventDefault(); event.stopPropagation();
+			const box = frame.current;
+			const rect = box.getBoundingClientRect();
+			drag.current = { x: event.clientX, y: event.clientY, w: box.offsetWidth, h: box.offsetHeight, zoom: rect.width / box.offsetWidth || 1 };
+			event.currentTarget.setPointerCapture(event.pointerId);
+		},
+		onPointerMove: (event) => {
+			const start = drag.current;
+			if (!start) return;
+			event.stopPropagation();
+			const next = { w: Math.round(Math.max(280, Math.min(2400, start.w + (event.clientX - start.x) / start.zoom))), h: Math.round(Math.max(180, Math.min(2400, start.h + (event.clientY - start.y) / start.zoom))) };
+			latestSize.current = next; setSize(next);
+		},
+		onPointerUp: (event) => {
+			if (!drag.current) return;
+			event.stopPropagation(); drag.current = null;
+			commit(latestSize.current);
+			event.currentTarget.releasePointerCapture(event.pointerId);
+		},
+		onLostPointerCapture: () => { if (drag.current) { drag.current = null; commit(latestSize.current); } },
+		onPointerCancel: () => { if (drag.current) { drag.current = null; commit(latestSize.current); } },
+		onKeyDown: (event) => {
+			if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+			event.preventDefault(); event.stopPropagation();
+			const box = frame.current;
+			const step = event.shiftKey ? 40 : 10;
+			commit({ w: Math.max(280, Math.min(2400, box.offsetWidth + (event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0))), h: Math.max(180, Math.min(2400, box.offsetHeight + (event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0))) });
+		}
+	}, "◢") : null;
+	return { frame, handle, width: size.w, style: enabled ? { ...chrome.card, position: "relative", display: "flex", flexDirection: "column", boxSizing: "border-box", width: size.w, height: size.h || undefined } : { background: "var(--daw-surface, #fff)" } };
+}
+
+function retryDesign(projectId, setRevision) {
+	for (const key of Array.from(entityCache.keys())) if (key.startsWith(projectId + "|")) entityCache.delete(key);
+	setRevision((value) => value + 1);
 }
 
 /**
@@ -270,7 +296,7 @@ function usePreviewWidth(viewport) {
  * 组件节点和画板节点共用它，区别只在 spec（组件 vs 画板入口）。
  */
 function SandboxPreview(props) {
-	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate, sourceHash, token, mode, onChanged, snapshot, interactive } = props;
+	const { projectId, kind, id, title, packId, entry, width, scale, maxHeight, exampleIndex, onReport, onNavigate, sourceHash, token, mode, onChanged, snapshot, interactive, renderRevision } = props;
 	const frameRef = useRef(null);
 	const hostRef = useRef(null);
 	const [state, setState] = useState({ status: "loading", error: "", info: null });
@@ -401,11 +427,12 @@ function SandboxPreview(props) {
 		hostRef.current = host;
 		(async () => {
 			try {
-				const [runtime, pack] = await Promise.all([loadRuntimeText(), loadPackText(packId)]);
-				const info = await host.init({ runtime: runtime, styles: pack.styles, bundle: pack.bundle });
+				const [info, compiled] = await Promise.all([
+					Promise.all([loadRuntimeText(), loadPackText(packId)]).then(([runtime, pack]) => live ? host.init({ runtime, styles: pack.styles, bundle: pack.bundle }) : { cancelled: true }),
+					snapshot || loadCompiled(projectId, kind, id, 0, token)
+				]);
 				if (!live) return;
-				if (info && info.timeout) { setState({ status: "error", error: "沙箱初始化超时", info: null }); return; }
-				const compiled = snapshot || await loadCompiled(projectId, kind, id, 0, token);
+				if (info && (info.timeout || info.ok === false)) { setState({ status: "error", error: info.error || "沙箱初始化失败", info: null }); return; }
 				if (!live) return;
 				if (compiled === null || compiled.code === "") {
 					setState({ status: "error", error: "拿不到编译产物（源码可能还没保存）", info: info });
@@ -427,10 +454,16 @@ function SandboxPreview(props) {
 				if (live) setState({ status: "error", error: String(error && error.message || error), info: null });
 			}
 		})();
-		return () => { live = false; if (hostRef.current) hostRef.current.destroy(); };
+		return () => { live = false; host.destroy(); if (hostRef.current === host) hostRef.current = null; };
 		// entry 变化（切 examples）要重渲染：用 entryKey 而不是对象（对象每次都是新的）
-	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex, localRev, snapshot, token]);
+	}, [projectId, kind, id, packId, sourceHash, entry && entry.key, exampleIndex, localRev, snapshot, token, renderRevision]);
 
+	function retry() {
+		if (!snapshot) {
+			for (const key of Array.from(entityCache.keys())) if (key.startsWith(projectId + "|")) entityCache.delete(key);
+		}
+		setLocalRev((value) => value + 1);
+	}
 	const shownScale = scale || 1;
 	const contentHeight = Math.max(120, measuredHeight || (state.info && Math.max(state.info.height || 0, state.info.scrollHeight || 0)) || 480);
 	const naturalHeight = Math.max(120, Math.ceil(contentHeight * shownScale));
@@ -444,7 +477,8 @@ function SandboxPreview(props) {
 			style: { border: 0, width: pageWidth, height: viewportHeight, transform: "scale(" + shownScale + ")", transformOrigin: "0 0", pointerEvents: interactive || interaction !== "view" ? "auto" : "none", display: "block" }
 		}),
 		state.status === "loading" ? React.createElement("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "#8a93a6", background: "rgba(255,255,255,.6)" } }, "沙箱渲染中…") : null,
-		state.status === "error" ? React.createElement("div", { style: { position: "absolute", left: 8, right: 8, bottom: 8, border: "1px solid #dc2626", background: "#fef2f2", color: "#991b1b", borderRadius: 8, padding: "6px 8px", fontSize: 11, fontFamily: "ui-monospace, Consolas, monospace", maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap" } }, "渲染出错：" + String(state.error).slice(0, 400)) : null,
+		state.status === "error" ? React.createElement("div", { style: { position: "absolute", left: 8, right: 8, bottom: 8, border: "1px solid #dc2626", background: "#fef2f2", color: "#991b1b", borderRadius: 8, padding: "6px 8px", fontSize: 11, fontFamily: "ui-monospace, Consolas, monospace", maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap" } }, React.createElement("span", { role: "alert" }, "渲染出错：" + String(state.error || "预览内容为空").slice(0, 400)),
+			React.createElement("button", { type: "button", className: "daw-wb-btn nodrag nopan", style: { marginLeft: 8 }, onClick: retry }, "重新渲染")) : null,
 		interaction !== "view" ? React.createElement("div", { style: { position: "absolute", left: 8, top: 6, zIndex: 2, font: "11px system-ui", padding: "3px 8px", borderRadius: 999, background: "#2563eb", color: "#fff" } }, interaction === "edit" ? "直接改：点选元素" : "标注：点选元素") : null,
 		pendingPick !== null && interaction === "annotate" ? React.createElement("div", {
 			style: { position: "absolute", left: 8, right: 8, bottom: 8, zIndex: 3, background: "#fff", border: "1px solid #2563eb", borderRadius: 8, padding: "8px 10px", boxShadow: "0 8px 24px rgba(15,23,42,.18)", font: "12px system-ui" }
@@ -502,6 +536,8 @@ export function DesignComponentNode(props) {
 	// 这些字段是 client.js 放进**节点 data** 的（React Flow 只把 data 放进 props.data）
 	const projectId = (props.data && props.data.projectId) || props.projectId || "";
 	const exampleCount = Number.isFinite(data.examplesCount) ? data.examplesCount : 0;
+	const frameBox = useDesignFrame(props, 440);
+	const [renderRevision, setRenderRevision] = useState(0);
 	const [activeExample, setActiveExample] = useState(0);
 	const [mode, setMode] = useState("view");
 	const [entity, setEntity] = useState(null);
@@ -528,11 +564,12 @@ export function DesignComponentNode(props) {
 		key: name + "-" + activeExample + "-" + JSON.stringify(effectiveTweaks),
 		props: Object.assign({}, examples[activeExample] || {}, tweakNames.length > 0 ? { __tweaks: effectiveTweaks } : {})
 	};
-	return React.createElement("div", { style: chrome.card },
-		React.createElement("div", { style: chrome.head, "data-design-head": "1" },
+	return React.createElement("div", { ref: frameBox.frame, style: frameBox.style },
+		React.createElement("div", { style: { ...chrome.head, flexWrap: "wrap", whiteSpace: "normal", flexShrink: 0 }, "data-design-head": "1" },
 			React.createElement("span", { style: { fontWeight: 600 } }, title || name),
 			React.createElement("span", { style: chrome.tag }, "AI · 组件"),
 			React.createElement("span", { style: chrome.muted }, name),
+			React.createElement("button", { type: "button", className: "daw-wb-btn nodrag", onClick: (event) => { event.stopPropagation(); retryDesign(projectId, setRenderRevision); } }, "重新渲染"),
 			typeof data.onEdit === "function" ? React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); data.onEdit(); }, className: "daw-wb-btn", "data-variant": "ghost" }, (data.labels && data.labels.edit) || "编辑") : null,
 			React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); setMode(mode === "annotate" ? "view" : "annotate"); }, className: "daw-wb-btn", "data-variant": "ghost", "data-on": String(mode === "annotate") }, mode === "annotate" ? "退出标注" : ((data.labels && data.labels.annotate) || "标注")),
 			React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); setMode(mode === "edit" ? "view" : "edit"); }, className: "daw-wb-btn", "data-variant": "ghost", "data-on": String(mode === "edit") }, mode === "edit" ? "退出直接改" : ((data.labels && data.labels.editDirect) || "直接改")),
@@ -574,11 +611,11 @@ export function DesignComponentNode(props) {
 				);
 			})
 		) : null,
-		React.createElement(SandboxPreview, {
-			projectId: projectId, kind: "component", id: name, title: title, packId: data.packId, token: (props.data && props.data.token) || props.token,
-			entry: entry, exampleIndex: activeExample, sourceHash: data.sourceHash, width: "desktop", scale: props.scale || 0.42, maxHeight: props.maxHeight || 360,
+		React.createElement("div", { className: "nodrag nowheel", style: { minHeight: 0, flex: 1, overflow: "auto" } }, React.createElement(SandboxPreview, {
+			renderRevision, projectId: projectId, kind: "component", id: name, title: title, packId: data.packId, token: (props.data && props.data.token) || props.token,
+			entry: entry, exampleIndex: activeExample, sourceHash: data.sourceHash, width: "desktop", scale: (frameBox.width - 2) / PAGE_WIDTH.desktop, maxHeight: props.maxHeight || (frameBox.style.height ? undefined : 360),
 			mode: mode, onChanged: data.onDesignChanged
-		})
+		})), frameBox.handle
 	);
 }
 
@@ -591,6 +628,8 @@ export function DesignArtboardNode(props) {
 	const projectId = (props.data && props.data.projectId) || props.projectId || "";
 	const token = (props.data && props.data.token) || props.token;
 	const labels = props.data?.labels || data.labels || {};
+	const frameBox = useDesignFrame(props, 460);
+	const [renderRevision, setRenderRevision] = useState(0);
 	const [trail, setTrail] = useState([]);
 	const [mode, setMode] = useState("view");
 	const [navNote, setNavNote] = useState("");
@@ -601,7 +640,7 @@ export function DesignArtboardNode(props) {
 	const width = currentData.width === "mobile" ? "mobile" : "desktop";
 	const viewport = useRef(null);
 	const availableWidth = usePreviewWidth(viewport);
-	const scale = props.review ? Math.min(1, availableWidth / PAGE_WIDTH[width]) : props.scale || 0.42;
+	const scale = props.review ? Math.min(1, availableWidth / PAGE_WIDTH[width]) : (frameBox.width - 2) / PAGE_WIDTH[width];
 	const goTo = useCallback((target) => {
 		if (typeof target !== "string" || target === "" || target === current) return;
 		if (!Array.isArray(currentData.links) || !currentData.links.includes(target)) {
@@ -622,9 +661,9 @@ export function DesignArtboardNode(props) {
 		type: "button", className: "daw-wb-btn", "data-variant": "tool",
 		"aria-pressed": mode === key, onClick: (event) => toggleMode(event, key)
 	}, label);
-	return React.createElement("div", { style: props.review ? { background: "var(--daw-surface, #fff)" } : chrome.card },
+	return React.createElement("div", { ref: frameBox.frame, style: frameBox.style },
 		React.createElement("div", {
-			style: props.review ? { ...chrome.head, cursor: "default", flexWrap: "wrap", whiteSpace: "normal" } : chrome.head,
+			style: { ...chrome.head, cursor: props.review ? "default" : "grab", flexWrap: "wrap", whiteSpace: "normal", flexShrink: 0 },
 			"data-design-head": "1"
 		},
 			React.createElement("span", { style: { fontWeight: 650, flex: props.review ? "1 1 95px" : undefined, minWidth: 0, overflowWrap: "anywhere" } }, currentTitle),
@@ -632,6 +671,7 @@ export function DesignArtboardNode(props) {
 			React.createElement("span", { style: chrome.muted }, width === "mobile" ? "手机" : "桌面"),
 			!props.review && data.requirementId ? React.createElement("span", { style: chrome.muted }, "· 需求 " + String(data.requirementId).slice(0, 12)) : null,
 			!linked && typeof data.onEdit === "function" ? React.createElement("button", { type: "button", onClick: (event) => { event.stopPropagation(); data.onEdit(); }, className: "daw-wb-btn", "data-variant": "ghost" }, labels.edit || "编辑") : null,
+			React.createElement("button", { type: "button", className: "daw-wb-btn nodrag", onClick: (event) => { event.stopPropagation(); retryDesign(projectId, setRenderRevision); } }, "重新渲染"),
 			React.createElement("div", { className: "daw-wb-board-tools", role: "group", "aria-label": labels.toolGroup || "画板工具" },
 				button(mode === "annotate" ? "退出标注" : (labels.annotate || "标注"), "annotate"),
 				button(mode === "edit" ? "退出直接改" : (labels.editDirect || "直接改"), "edit")),
@@ -644,12 +684,13 @@ export function DesignArtboardNode(props) {
 		navNote ? React.createElement("div", { role: "status", style: { padding: "6px 10px", color: "var(--daw-warn, #b45309)", fontSize: 12 } }, navNote) : null,
 		React.createElement("div", {
 			ref: props.review ? viewport : undefined,
-			style: props.review ? { display: "grid", justifyItems: "center", minWidth: 0, overflow: "hidden", background: "var(--daw-surface-muted, #f5f6f8)" } : undefined
+			className: "nodrag nowheel",
+			style: props.review ? { display: "grid", justifyItems: "center", minWidth: 0, overflow: "hidden", background: "var(--daw-surface-muted, #f5f6f8)" } : { flex: 1, minHeight: 0, overflow: "auto" }
 		}, React.createElement(SandboxPreview, {
-			projectId, kind: "artboard", id: current, title: currentTitle, packId: currentData.packId || data.packId, token,
+			renderRevision, projectId, kind: "artboard", id: current, title: currentTitle, packId: currentData.packId || data.packId, token,
 			entry: { key: current + "-0", props: {} }, sourceHash: currentData.sourceHash, width, scale,
 			onNavigate: goTo, interactive: true, mode, onChanged: props.data?.onDesignChanged || data.onDesignChanged
-		}))
+		})), frameBox.handle
 	);
 }
 
@@ -657,7 +698,12 @@ export function DesignArtboardNode(props) {
 export function DesignChatPreview(props) {
 	const delivery = props.delivery;
 	const viewport = useRef(null);
-	const availableWidth = usePreviewWidth(viewport);
+	const dialog = useRef(null);
+	const inlineStage = useRef(null);
+	const fullStage = useRef(null);
+	const [stage] = useState(() => document.createElement("div"));
+	const availableWidth = usePreviewWidth(viewport, props.fullscreen);
+	const [localRevision, setLocalRevision] = useState(0);
 	const [trail, setTrail] = useState([delivery.entryId]);
 	const board = delivery.boards.find((item) => item.id === trail[trail.length - 1]);
 	const snapshot = useMemo(() => board && ({
@@ -667,22 +713,47 @@ export function DesignChatPreview(props) {
 	useEffect(() => {
 		if (board && typeof props.onBoardChange === "function") props.onBoardChange(board.id);
 	}, [board, props.onBoardChange]);
+	useEffect(() => {
+		const box = dialog.current;
+		const target = props.fullscreen ? fullStage.current : inlineStage.current;
+		if (target && stage.parentNode !== target) {
+			// moveBefore 保留 iframe 的文档与表单状态；旧 WebView 不支持时重新初始化沙箱。
+			if (stage.isConnected && typeof target.moveBefore === "function") target.moveBefore(stage, null);
+			else { const moving = stage.isConnected; target.appendChild(stage); if (moving) setLocalRevision((value) => value + 1); }
+		}
+		if (props.fullscreen && box && !box.open) box.showModal();
+		else if (box?.open) box.close();
+	}, [props.fullscreen, stage]);
 	if (!board) return null;
 	const scale = Math.min(1, availableWidth / PAGE_WIDTH[board.width === "mobile" ? "mobile" : "desktop"]);
-	return React.createElement("div", { ref: viewport, style: { display: "grid", justifyItems: "center", minWidth: 0, overflow: "hidden" } },
+	const content = React.createElement("div", { ref: viewport, style: { display: "grid", justifyItems: "center", minWidth: 0, overflow: "hidden" } },
 		trail.length > 1 ? React.createElement("button", {
 			type: "button", className: "daw-wb-btn", "data-variant": "ghost",
 			onClick: () => setTrail((previous) => previous.slice(0, -1))
 		}, props.backLabel || "返回上一屏") : null,
 		React.createElement(SandboxPreview, {
 			projectId: delivery.projectId, kind: "artboard", id: board.id, title: board.title,
-			packId: delivery.packId, width: board.width, scale, interactive: true, snapshot,
+			packId: delivery.packId, width: board.width, scale, interactive: true, snapshot, renderRevision: String(props.renderRevision || 0) + ":" + localRevision,
 			onNavigate: (target) => {
-				if (target !== board.id && board.links.includes(target) && delivery.boards.some((item) => item.id === target)) {
-					setTrail((previous) => [...previous, target]);
-				}
+				if (target !== board.id && board.links.includes(target) && delivery.boards.some((item) => item.id === target)) setTrail((previous) => [...previous, target]);
 			}
 		})
+	);
+	return React.createElement(React.Fragment, null,
+		React.createElement("div", { ref: inlineStage }),
+		createPortal(content, stage),
+		React.createElement("dialog", {
+			ref: dialog, "aria-label": board.title || board.id,
+			onCancel: () => props.onCloseFullscreen?.(), onClose: () => { if (props.fullscreen) props.onCloseFullscreen?.(); },
+			onClick: (event) => { if (event.target === event.currentTarget) props.onCloseFullscreen?.(); },
+			style: { width: "calc(100vw - 32px)", maxWidth: "none", height: "calc(100dvh - 32px)", maxHeight: "none", padding: 0, border: "1px solid var(--daw-border, #dce2ee)", borderRadius: 12, background: "var(--daw-surface, #fff)", color: "var(--daw-text, #172033)" }
+		}, React.createElement("div", { style: { height: "100%", display: "flex", flexDirection: "column" } },
+			React.createElement("header", { style: { ...chrome.head, cursor: "default", flexShrink: 0 } },
+				React.createElement("strong", { style: { flex: 1, minWidth: 0, whiteSpace: "normal" } }, board.title || board.id),
+				React.createElement("button", { type: "button", className: "daw-wb-btn", onClick: () => setLocalRevision((value) => value + 1) }, "重新渲染"),
+				React.createElement("button", { type: "button", className: "daw-wb-btn", onClick: () => props.onCloseFullscreen?.() }, props.closeLabel || "关闭")),
+			React.createElement("div", { ref: fullStage, className: "nowheel", style: { flex: 1, minHeight: 0, overflow: "auto", background: "#f5f6f8" } })
+		))
 	);
 }
 
