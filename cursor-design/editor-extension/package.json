@@ -2,16 +2,45 @@
   "name": "whales-design-canvas",
   "displayName": "Whales Design Canvas",
   "description": "Display Whales Design artboards in a draggable canvas.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "mutouwood",
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Visualization"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization"
+  ],
   "main": "./extension.cjs",
-  "activationEvents": ["onStartupFinished"],
-  "extensionKind": ["workspace"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
   "contributes": {
-    "commands": [{ "command": "whalesCanvas.open", "title": "Whales Design: Open Canvas" }],
-    "viewsContainers": { "activitybar": [{ "id": "whalesCanvas", "title": "Whales Design", "icon": "media/icon.svg" }] },
-    "views": { "whalesCanvas": [{ "type": "webview", "id": "whalesCanvas.view", "name": "设计画布" }] }
+    "commands": [
+      {
+        "command": "whalesCanvas.open",
+        "title": "Whales Design: Open Canvas"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "whalesCanvas",
+          "title": "Whales Design",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "whalesCanvas": [
+        {
+          "type": "webview",
+          "id": "whalesCanvas.view",
+          "name": "设计画布"
+        }
+      ]
+    }
   }
 }

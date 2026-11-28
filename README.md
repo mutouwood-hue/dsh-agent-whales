@@ -1228,7 +1228,9 @@ dsh plugin --profile web add github:mutouwood-hue/dsh-agent-whales
 
 ## 版本与兼容性
 
-当前插件版本：**0.25.3**（M6 项目工作台：节点画画布 + 任务表 report 四态 + 简报按需读取 + worker preset + **ultra 模式：强制加载 deep-effort 执行契约**）。
+当前插件版本：**0.26.0**（M6 项目工作台：节点画画布 + 任务表 report 四态 + 简报按需读取 + worker preset + **ultra 模式：强制加载 deep-effort 执行契约**）。
+
+**0.26.0（2026-11-28）**：办公室人数超过 6 位时自动扩建连续区域，共用可拖动平移、缩放和查看全局的场景；支持定位任意 Agent，并提示区域与成员的待处理事项。屏幕外和后台区域停止动作动画，角色及家具保持比例。当前项目的运行子 Agent 继续自动加入名册，无需登记。同步发布 Cursor Design 0.2.0：对话与多画板预览共用分阶段超时和重试，继承离屏渲染完成回报修复；支持全屏预览、重新渲染，以及画布外框拖拽缩放和尺寸保存。Cursor 安装包和独立 MCP 服务包见 [GitHub Release](https://github.com/mutouwood-hue/dsh-agent-whales/releases/tag/v0.26.0)，配置见 [Cursor 说明](cursor-design/README.md)。
 
 **0.25.3（2026-11-28）**：画布与办公室共用每 5 秒更新的项目 agent 名册，画布补齐未登记的子 agent、孙级 agent，保留父子地址并显示只读父子线；引用也包含这些子 agent 的文件。文件按「代码文件」「需求与文档」「其他文件」分组，外部链接单独展示。各类分别保留最近文件，可单独收起分类或展开较早文件，避免代码文件挤掉 MD 文档；同时修复冷启动时的画布 hook 顺序。
 

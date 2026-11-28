@@ -19,6 +19,18 @@ try {
  const title=page.locator('.board-head').first();const box=await title.boundingBox();await page.mouse.move(box.x+50,box.y+12);await page.mouse.down();await page.mouse.move(box.x+100,box.y+65,{steps:5});await page.mouse.up();
  await page.waitForFunction(()=>window.messages.some(x=>x.type==='saveLayout'));const layout=await page.evaluate(()=>window.messages.find(x=>x.type==='saveLayout'));if(Object.keys(layout.positions).length!==2)throw Error('positions not saved');
  const sourceHandle=await page.locator('.react-flow__handle.source').first().boundingBox(),targetHandle=await page.locator('.react-flow__handle.target').nth(1).boundingBox();await page.mouse.move(sourceHandle.x+sourceHandle.width/2,sourceHandle.y+sourceHandle.height/2);await page.mouse.down();await page.mouse.move(targetHandle.x+targetHandle.width/2,targetHandle.y+targetHandle.height/2,{steps:15});await page.mouse.up();await page.waitForFunction(()=>window.messages.some(x=>x.type==='saveLayout'&&x.edges.length===1),null,{timeout:5000});
+ const firstBoard=page.locator('.board').first();
+ await firstBoard.getByRole('button',{name:'全屏',exact:true}).click();await page.locator('.board-dialog[open]').waitFor();await frame.getByText('次数 1').waitFor();
+ await page.locator('.board-dialog[open]').getByRole('button',{name:'关闭',exact:true}).click();await page.locator('.board-dialog[open]').waitFor({state:'hidden'});await frame.getByText('次数 1').waitFor();
+ await title.click();
+ const handle=page.locator('.react-flow__node-board').first().locator('.react-flow__resize-control.handle.bottom.right');await handle.waitFor();
+ const resizeBox=await handle.boundingBox(),beforeWidth=await firstBoard.evaluate(el=>el.offsetWidth),nodeBox=await firstBoard.boundingBox(),zoom=nodeBox.width/beforeWidth;
+ await page.mouse.move(resizeBox.x+resizeBox.width/2,resizeBox.y+resizeBox.height/2);await page.mouse.down();await page.mouse.move(resizeBox.x+resizeBox.width/2+100,resizeBox.y+resizeBox.height/2+50,{steps:10});await page.mouse.up();
+ await page.waitForFunction(w=>window.messages.some(x=>x.type==='saveLayout'&&x.sizes?.one?.width>w+20),beforeWidth);
+ const saved=await page.evaluate(()=>window.messages.filter(x=>x.type==='saveLayout').at(-1));
+ if(Math.abs(saved.sizes.one.width-beforeWidth-100/zoom)>5)throw Error('resize must account for viewport zoom');
+ await frame.getByText('次数 1').waitFor();
+ await firstBoard.getByRole('button',{name:'重新渲染',exact:true}).click();await frame.getByText('次数 0').waitFor();
  await page.locator('.react-flow__controls-zoomout').click();await page.locator('.react-flow__controls-zoomout').click();await page.locator('.board').first().getByText('标注修改').click();await clickInFrame('第一页');await page.locator('.board').first().getByText('已选',{exact:false}).waitFor();await page.locator('.board').first().locator('textarea').fill('调整标题');await page.locator('.board').first().getByText('保存并复制修改请求').click();
  await page.waitForFunction(()=>window.messages.some(x=>x.type==='comment'),null,{timeout:5000});const msg=await page.evaluate(()=>window.messages.find(x=>x.type==='comment'));if(!msg?.wsrc||msg.text!=='调整标题')throw Error('annotation not sent');
  if(process.env.CANVAS_SCREENSHOT)await page.screenshot({path:process.env.CANVAS_SCREENSHOT});

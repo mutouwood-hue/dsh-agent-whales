@@ -1,6 +1,19 @@
-# Whales Design · Cursor 原型
+# Whales Design · Cursor 0.2.0
 
 把 DSH 插件里的 TSX 编译器和隔离预览接到 Cursor Agent。Agent 创建或修改画板后，编辑器扩展监听文件变化并尝试自动打开侧栏画布。多张画板可拖动、缩放、连接和交互预览，也可选中元素保存批注。画板和布局保存在当前工作区的 `.whales-design/`。
+
+## 安装发布包
+
+在 [v0.26.0 发布页](https://github.com/mutouwood-hue/dsh-agent-whales/releases/tag/v0.26.0) 下载：
+
+- `whales-design-canvas-0.2.0.vsix`：Cursor 扩展面板选择“从 VSIX 安装”，然后重新加载窗口。
+- `whales-cursor-design-0.2.0.zip`：解压到固定目录，提供已打包的 MCP 服务和预览，保留 Node.js 22+，无需安装 npm 依赖。按包内 README 配置 `.cursor/mcp.json`，将 `args` 指向解压目录的 `server.mjs`，`WHALES_WORKSPACE` 指向目标项目。
+
+已有 MCP 配置请合并，更新时保持 `WHALES_WORKSPACE` 不变，画板、批注与布局继续保存在该项目 `.whales-design/`。
+
+0.2.0 两个预览入口均支持「重新渲染」和「全屏」；超时或出错时可直接重试。对话全屏优先请求宿主的全屏显示模式；宿主不支持时，弹窗受当前 MCP 预览区域限制。画布全屏在当前 Webview 内打开，支持关闭按钮和 Escape。支持浏览器的 `moveBefore` 时保留画板内部交互状态；较旧 Webview 在移动 iframe 时会重新渲染。
+
+画布选中画板后，拖动边框控制点可调整外框大小；页面内容保持桌面/手机视口宽度，按外框宽度缩放，较长页面可滚动。尺寸和位置、连线一起保存到 `.whales-design/canvas.json`。
 
 ## 准备
 
@@ -12,9 +25,10 @@ npm ci --prefix cursor-design
 npm ci --prefix tools/flow-chunk
 npm run build --prefix cursor-design
 npm run pack:canvas --prefix cursor-design
+npm run pack:standalone --prefix cursor-design
 ```
 
-在 Cursor 的扩展面板右上角选择“从 VSIX 安装”，选择 `cursor-design/dist/whales-design-canvas.vsix`，安装后重新加载窗口。扩展可从活动栏打开；也可以运行命令“Whales Design: Open Canvas”。
+在 Cursor 的扩展面板右上角选择“从 VSIX 安装”，选择 `cursor-design/dist/whales-design-canvas-0.2.0.vsix`，安装后重新加载窗口。扩展可从活动栏打开；也可以运行命令“Whales Design: Open Canvas”。
 
 在**要使用画板的项目**中配置 `.cursor/mcp.json`（已有文件时合并 `mcpServers`，不要覆盖已有服务器）：
 
@@ -40,7 +54,7 @@ npm run pack:canvas --prefix cursor-design
 
 ## 当前范围
 
-这是多画板原型：支持拖动、缩放、连线、交互预览和元素批注；使用 TSX 与 React 生成交互式页面。连线表达画布关系；原型组件可调用 `navigate("目标画板id")`，将视野切换到已有画板。尚不支持 DSH 组件库、`@project` 组件、直接改元素、设计确认或 DSH 团队功能。沙箱不能访问网络，因此外部图片和在线字体不能直接加载。
+这是设计图适配层：支持拖动、外框缩放、连线、全屏、手动重渲染、交互预览和元素批注；使用 TSX 与 React 生成交互式页面。连线表达画布关系；原型组件可调用 `navigate("目标画板id")`，将视野切换到已有画板。尚不支持 DSH 组件库、`@project` 组件、直接改元素、设计确认或 DSH 团队功能。沙箱不能访问网络，因此外部图片和在线字体不能直接加载。
 
 自动打开依赖 Cursor 对 VS Code 扩展、文件监听及 Webview 的支持；尚需在目标 Cursor 环境实测。若未自动打开，可点击活动栏 Whales Design 图标或运行上述命令，再点「刷新」。如果画布位于较窄的侧栏，可以把视图拖到次要侧栏或放大侧栏。
 

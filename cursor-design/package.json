@@ -1,6 +1,6 @@
 {
   "name": "whales-cursor-design",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,8 +9,9 @@
     "start": "node server.mjs",
     "test:ui": "node test/ui-check.mjs",
     "build:canvas": "node editor-extension/build.mjs",
-    "pack:canvas": "npm run build:canvas && cd editor-extension && vsce package --no-dependencies --allow-missing-repository -o ../dist/whales-design-canvas.vsix",
-    "test:canvas": "node test/canvas-check.mjs"
+    "pack:canvas": "npm run build:canvas && cd editor-extension && vsce package --no-dependencies --allow-missing-repository -o ../dist/whales-design-canvas-0.2.0.vsix",
+    "test:canvas": "node test/canvas-check.mjs",
+    "pack:standalone": "node pack-standalone.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^1.0.0",

@@ -10,7 +10,9 @@ test('editor watches generated boards, opens view, saves layout and feedback',as
   const view={webview:{cspSource:'http://localhost',asWebviewUri:u=>u.toString(),postMessage:m=>posted.push(m),onDidReceiveMessage:fn=>{handler=fn;}},onDidDispose:()=>{}};provider.resolveWebviewView(view);
   await handler({type:'ready'});assert.equal(posted.at(-1).boards[0].title,'设计');
   events.change();await new Promise(resolve=>setTimeout(resolve,400));assert.ok(commands.includes('whalesCanvas.view.focus'));
-  await handler({type:'saveLayout',positions:{one:{x:20,y:30}},edges:[]});assert.deepEqual(JSON.parse(readFileSync(join(workspace,'.whales-design','canvas.json'))).positions.one,{x:20,y:30});
+  await handler({type:'saveLayout',positions:{one:{x:20,y:30}},sizes:{one:{width:720,height:610},bad:{width:Infinity,height:450},tiny:{width:1,height:1}},edges:[]});assert.deepEqual(JSON.parse(readFileSync(join(workspace,'.whales-design','canvas.json'))).positions.one,{x:20,y:30});
+  assert.deepEqual(JSON.parse(readFileSync(join(workspace,'.whales-design','canvas.json'))).sizes,{one:{width:720,height:610}});
+  await handler({type:'ready'});assert.deepEqual(posted.at(-1).sizes.one,{width:720,height:610});
   await handler({type:'comment',boardId:'one',wsrc:'e0',text:'调整标题'});assert.match(clipboard,/whales_design_write/);assert.equal(store.comments()[0].text,'调整标题');
  }finally{Module._load=original;rmSync(workspace,{recursive:true,force:true});}
 });

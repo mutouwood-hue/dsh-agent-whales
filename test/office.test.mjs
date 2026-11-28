@@ -357,22 +357,20 @@ test("素材加载失败时隐藏图片，工位文字仍可打开对话", async
   } finally { host.restore(); }
 });
 
-test("成员超过六位时可切到下一间工作室，工位保持可点击", async () => {
-  const members = Array.from({ length: 7 }, (_, index) => ({ sessionId: "s-" + index }));
+test("25 位 agent 自动扩建五个连续区域，全部工位均可打开且无需翻页", async () => {
+  const members = Array.from({ length: 25 }, (_, index) => ({ sessionId: "s-" + index }));
   const host = fakeHost({ project: { projectId: "p1", mainSessionId: "s-0", members }, sessions: [] });
   try {
-    const { t, mount } = load();
-    const opened = [];
-    const view = mount(t.WbOfficePage, { t: KEY, projectId: "p1", onOpenSession: (id) => opened.push(id) });
+    const { t, mount } = load(), opened = [];
+    const view = mount(t.WbOfficePage, { t: KEY, projectId: "p1", onOpenSession: id => opened.push(id) });
     await view.settle();
-    const desks = () => find(view.tree, (n) => typeof n.props["data-session"] === "string");
-    assert.equal(desks().length, 6);
-    const next = find(view.tree, (n) => n.type === "button" && n.props["aria-label"] === KEY("office.room.next"))[0];
-    next.props.onClick();
-    view.rerender();
-    assert.equal(desks().length, 1);
-    desks()[0].props.onClick();
-    assert.deepEqual(opened, ["s-6"]);
+    const desks = find(view.tree, n => typeof n.props["data-session"] === "string");
+    assert.equal(desks.length, 25);
+    const rooms = find(view.tree, n => n.props.className === "daw-office-room");
+    assert.deepEqual(rooms.map(room => find(room, n => typeof n.props["data-session"] === "string").length), [6,6,6,6,1]);
+    assert.equal(find(view.tree, n => n.props["aria-label"] === KEY("office.room.next")).length, 0);
+    desks[24].props.onClick(); assert.deepEqual(opened, ["s-24"]);
+    assert.equal(find(view.tree, n => n.type === "select")[0].props.children[1].length, 25);
   } finally { host.restore(); }
 });
 
@@ -431,7 +429,7 @@ test("六个已登记工位之外的新运行子 agent 出现在首房间，并�
     const view = mount(t.WbOfficePage, { t: KEY, projectId: "p1", onOpenSession: (...args) => opened.push(args) });
     await view.settle();
     const desks = find(view.tree, (node) => typeof node.props["data-session"] === "string");
-    assert.deepEqual(desks.map((node) => node.props["data-session"]), ["s-0", "child", "s-1", "s-2", "s-3", "s-4"]);
+    assert.deepEqual(desks.map((node) => node.props["data-session"]), ["s-0", "child", "s-1", "s-2", "s-3", "s-4", "s-5"]);
     const child = desks.find((node) => node.props["data-session"] === "child");
     assert.equal(child.props["data-pose"], "type");
     assert.match(texts(child), /office\.subagent/);

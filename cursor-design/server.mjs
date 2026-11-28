@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -9,7 +9,7 @@ import { createStore } from './core.mjs';
 const uri='ui://whales/design.html';
 export function createServer(workspace) {
  const store=createStore(workspace);
- const server=new McpServer({name:'whales-cursor-design',version:'0.1.0'});
+ const server=new McpServer({name:'whales-cursor-design',version:'0.2.0'});
  const ui={ui:{resourceUri:uri}};
  const result=(data, text) => ({content:[{type:'text',text}],structuredContent:data});
  const boardResult=(id) => result({board:store.get(id),boards:store.list()}, '画板已保存。若已安装 Whales Design Canvas 扩展，侧栏会尝试自动打开；否则手动打开设计画布。请检查交互和视觉效果；编译成功不代表已完成视觉验证。');
@@ -24,7 +24,7 @@ export function createServer(workspace) {
  registerAppResource(server,'whales-design',uri,{mimeType:RESOURCE_MIME_TYPE},async()=>({contents:[{uri,mimeType:RESOURCE_MIME_TYPE,text:readFileSync(fileURLToPath(new URL('./dist/app.html',import.meta.url)),'utf8')}]}));
  return server;
 }
-if (process.argv[1] && fileURLToPath(import.meta.url)===process.argv[1]) {
+if (process.argv[1] && fileURLToPath(import.meta.url)===realpathSync(process.argv[1])) {
  const server=createServer(process.env.WHALES_WORKSPACE);
  await server.connect(new StdioServerTransport());
 }

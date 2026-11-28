@@ -7,6 +7,11 @@ function activate(context) {
   let view, timer, selectedWorkspace;
   const workspaces = () => vscode.workspace.workspaceFolders || [];
   const rootOf = folder => path.join(folder.uri.fsPath, '.whales-design');
+  function validSizes(input) {
+    const sizes={};
+    for(const [id,s] of Object.entries(input||{})) if(/^[a-z0-9-]{1,32}$/.test(id)&&s&&Number.isFinite(s.width)&&Number.isFinite(s.height)&&s.width>=280&&s.width<=1800&&s.height>=240&&s.height<=1800)sizes[id]={width:s.width,height:s.height};
+    return sizes;
+  }
   function getSnapshot(folder) {
     const base = rootOf(folder), boardDir = path.join(base, 'design', 'workspace', 'artboards');
     let entries = []; try { entries=fs.readdirSync(boardDir,{withFileTypes:true}).filter(d=>d.isDirectory() && /^[a-z0-9-]{1,32}$/.test(d.name)); } catch(e) { if(e.code!=='ENOENT') throw e; }
@@ -16,7 +21,7 @@ function activate(context) {
     }
     boards.sort((a,b)=>a.id.localeCompare(b.id));
     let layout={}; try { layout=JSON.parse(fs.readFileSync(path.join(base,'canvas.json'),'utf8')); } catch(e) { if(e.code!=='ENOENT')console.warn('Whales: invalid canvas layout',e.message); }
-    return {boards,positions:layout.positions||{},edges:layout.edges||[]};
+    return {boards,positions:layout.positions||{},sizes:validSizes(layout.sizes),edges:layout.edges||[]};
   }
   function sendSnapshot() {
     if(!view)return;
@@ -28,9 +33,10 @@ function activate(context) {
   function saveLayout(msg) {
     const folder=selectedWorkspace || workspaces()[0]; if(!folder)return;
     const positions={};
-    for(const [id,p] of Object.entries(msg.positions||{})) if(/^[a-z0-9-]{1,32}$/.test(id)&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&Math.abs(p.x)<100000&&Math.abs(p.y)<100000)positions[id]={x:p.x,y:p.y};
+    for(const [id,p] of Object.entries(msg.positions||{})) if(/^[a-z0-9-]{1,32}$/.test(id)&&p&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&Math.abs(p.x)<100000&&Math.abs(p.y)<100000)positions[id]={x:p.x,y:p.y};
+    const sizes=validSizes(msg.sizes);
     const edges=(Array.isArray(msg.edges)?msg.edges:[]).filter(e=>typeof e.source==='string'&&typeof e.target==='string'&&/^[a-z0-9-]{1,32}$/.test(e.source)&&/^[a-z0-9-]{1,32}$/.test(e.target)).slice(0,500).map(e=>({id:String(e.id||`${e.source}-${e.target}`).slice(0,120),source:e.source,target:e.target}));
-    const root=rootOf(folder), target=path.join(root,'canvas.json'); fs.mkdirSync(root,{recursive:true}); const temp=target+'.'+crypto.randomUUID()+'.tmp'; fs.writeFileSync(temp,JSON.stringify({positions,edges},null,2)); fs.renameSync(temp,target);
+    const root=rootOf(folder), target=path.join(root,'canvas.json'); fs.mkdirSync(root,{recursive:true}); const temp=target+'.'+crypto.randomUUID()+'.tmp'; fs.writeFileSync(temp,JSON.stringify({positions,sizes,edges},null,2)); fs.renameSync(temp,target);
   }
   async function saveComment(msg) {
     const folder=selectedWorkspace||workspaces()[0]; if(!folder)throw Error('请先打开项目文件夹');
