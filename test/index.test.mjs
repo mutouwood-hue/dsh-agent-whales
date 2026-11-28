@@ -4958,6 +4958,8 @@ describe("办公室实时子 agent 名册", () => {
     const before = readFileSync(join(h.dir, "projects.json"), "utf8");
     const office = await h.call("GET", `/agent-whales/api/projects/${projectId}/office`);
     assert.equal(office.body.code, 200);
+    const shared = await h.call("GET", `/agent-whales/api/projects/${projectId}/agents`);
+    assert.deepEqual(shared.body.data, office.body.data, "画布与办公室读取同一份项目名册");
     const rows = office.body.data.sessions;
     assert.deepEqual(rows.map((row) => row.sessionId).sort(), ["child", "grand", "session-a"]);
     assert.equal(rows.find((row) => row.sessionId === "child").running, true);
@@ -5000,4 +5002,19 @@ describe("办公室实时子 agent 名册", () => {
     child.status = "idle";
     assert.equal((await h.call("GET", url)).body.data.sessions.find((row) => row.sessionId === "child").running, false);
   });
+  test("画布引用包含未登记子 agent 的代码与文档，不收集无关子 agent 的文件", async () => {
+    const event = (path) => ({ type: "tool/call", time: 100, data: { name: "write", arguments: { file_path: path } } });
+    const h = await officeHost([
+      { id: "file-child", status: "running", session: { header: { parentSession: "session-a" }, events: [event("C:/project/child.py"), event("C:/project/PRD.md")] } },
+      { id: "file-stranger", status: "running", session: { header: { parentSession: "other" }, events: [event("C:/other/foreign.py")] } }
+    ]);
+    const projectId = await createProject(h);
+    const refs = (await h.call("GET", `/agent-whales/api/projects/${projectId}/references`)).body.data;
+    assert.ok(refs.files.some((file) => file.path.endsWith("/child.py") && file.sessions["file-child"]));
+    assert.ok(refs.files.some((file) => file.path.endsWith("/PRD.md") && file.sessions["file-child"]));
+    assert.ok(!refs.files.some((file) => file.path.endsWith("/foreign.py")));
+    const project = (await h.call("GET", `/agent-whales/api/projects/${projectId}`)).body.data.project;
+    assert.ok(!project.members.some((member) => member.sessionId === "file-child"));
+  });
+
 });

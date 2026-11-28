@@ -249,11 +249,12 @@ test("引用节点：每个对话只展示最近 4 个文件，其余折叠成�
   const graph = wbReferenceNodes(refs, ["s1", "m"], { startY: 100 });
   const files = graph.nodes.filter((node) => node.kind === "file" && !node.fold);
   assert.deepEqual(files.map((node) => node.title), ["a.go", "b.go", "c.go", "d.go"], "最近 4 个，按时间倒序；画布上没有的会话碰的文件不出现");
-  assert.equal(files[0].y, 100);
+  assert.equal(graph.nodes.find((node) => node.kind === "file-group").y, 100);
+  assert.equal(files[0].y, 148, "分类标题占用 48px");
   assert.equal(files[0].sub, "D:/repo");
   const fold = graph.nodes.find((node) => node.fold);
   assert.equal(fold.count, 2);
-  assert.equal(fold.id, "file:+s1");
+  assert.equal(fold.id, "file:+code");
   const marks = Object.fromEntries(graph.edges.filter((edge) => edge.a.startsWith("file:D")).map((edge) => [edge.a, edge.reason]));
   assert.equal(marks["file:a.go"], undefined);
   const byTitle = Object.fromEntries(graph.edges.map((edge) => [edge.a, edge]));
