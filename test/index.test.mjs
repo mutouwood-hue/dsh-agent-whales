@@ -4936,3 +4936,68 @@ describe("需求主线 P3：需求待办进「需要我处理」", () => {
     assert.equal((await group(h)).items[0].attention, "rework-limit");
   });
 });
+
+// 办公室从运行中的 agent / 官方子代理树补齐名册，不依赖 tools/result 后的永久收编。
+describe("办公室实时子 agent 名册", () => {
+  function officeHost(children = [], subagents) {
+    const root = { id: "session-a", title: "主对话", header: { origin: "user" } };
+    const live = new Map([[root.id, { id: root.id, status: "idle", session: root }], ...children.map((agent) => [agent.id, agent])]);
+    return m6Harness({
+      sessions: { list: () => [root], get: (id) => id === root.id ? root : undefined },
+      agents: { list: () => Array.from(live.values()), get: (id) => live.get(id) },
+      ...(subagents ? { subagents } : {})
+    });
+  }
+  test("没有登记成员、尚未工具回报的活子 agent 和孙 agent 即刻显示；读取不修改项目", async () => {
+    const h = await officeHost([
+      { id: "grand", status: "running", session: { header: { parentSession: "child" }, title: "孙代理" } },
+      { id: "child", status: "running", session: { header: { parentSessionId: "session-a" }, title: "正在写前端" } },
+      { id: "other", status: "running", session: { header: { parentSession: "unrelated" } } }
+    ]);
+    const projectId = await createProject(h);
+    const before = readFileSync(join(h.dir, "projects.json"), "utf8");
+    const office = await h.call("GET", `/agent-whales/api/projects/${projectId}/office`);
+    assert.equal(office.body.code, 200);
+    const rows = office.body.data.sessions;
+    assert.deepEqual(rows.map((row) => row.sessionId).sort(), ["child", "grand", "session-a"]);
+    assert.equal(rows.find((row) => row.sessionId === "child").running, true);
+    assert.equal(rows.find((row) => row.sessionId === "child").live, true);
+    assert.equal(rows.find((row) => row.sessionId === "grand").parentSessionId, "child");
+    assert.equal(readFileSync(join(h.dir, "projects.json"), "utf8"), before, "只读名册不登记成员、不写 store");
+    const method = await h.call("POST", `/agent-whales/api/projects/${projectId}/office`, {});
+    assert.equal(method.status, 405);
+  });
+  test("新版宿主目录缺子会话时，用官方子代理树补父子关系、名字和运行态", async () => {
+    const h = await officeHost([], {
+      rootOf: (agent) => agent,
+      listDescendants: async (id) => id === "session-a" ? [{ sessionId: "tree-child", parentSessionId: "session-a", description: "代码审查", status: "running" }] : []
+    });
+    const projectId = await createProject(h);
+    const rows = (await h.call("GET", `/agent-whales/api/projects/${projectId}/office`)).body.data.sessions;
+    assert.deepEqual(rows.find((row) => row.sessionId === "tree-child"), { sessionId: "tree-child", title: "代码审查", live: true, running: true, parentSessionId: "session-a" });
+  });
+  test("手动移出的子 agent、其后代和已归属其他项目的子 agent 不混入办公室", async () => {
+    const children = [
+      { id: "child", status: "running", session: { header: { parentSession: "session-a" } } },
+      { id: "grand", status: "running", session: { header: { parentSession: "child" } } },
+      { id: "foreign", status: "running", session: { header: { parentSession: "session-a" } } }
+    ];
+    const h = await officeHost(children);
+    const projectId = await createProject(h);
+    await h.call("POST", `/agent-whales/api/projects/${projectId}/members`, { sessionId: "child" });
+    await h.call("DELETE", `/agent-whales/api/projects/${projectId}/members/child`);
+    const other = await h.call("POST", "/agent-whales/api/projects", { name: "另一个项目", mainSessionId: "foreign" });
+    assert.equal(other.body.code, 200);
+    const rows = (await h.call("GET", `/agent-whales/api/projects/${projectId}/office`)).body.data.sessions;
+    assert.deepEqual(rows.map((row) => row.sessionId), ["session-a"]);
+  });
+  test("活子 agent 收工后状态更新；子代理树故障不让其余成员消失", async () => {
+    const child = { id: "child", status: "running", session: { header: { parentSession: "session-a" } } };
+    const h = await officeHost([child], { listDescendants: async () => { throw new Error("temporarily unavailable"); } });
+    const projectId = await createProject(h);
+    const url = `/agent-whales/api/projects/${projectId}/office`;
+    assert.equal((await h.call("GET", url)).body.data.sessions.find((row) => row.sessionId === "child").running, true);
+    child.status = "idle";
+    assert.equal((await h.call("GET", url)).body.data.sessions.find((row) => row.sessionId === "child").running, false);
+  });
+});
