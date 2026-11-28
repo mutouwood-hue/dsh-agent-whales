@@ -159,7 +159,7 @@ test("画布内需求面板的确认按钮真的调用 confirm-design 并带 rev
 test("设计预览请求带同源 token，避免 403 后只显示拿不到编译产物", () => {
   const source = readFileSync(new URL("../tools/flow-chunk/design/entry.jsx", import.meta.url), "utf8");
   const built = readFileSync(new URL("../lib/client.design.js", import.meta.url), "utf8");
-  assert.match(source, /fetch\(API \+ "\/design\/source" \+ query, \{ headers \}\)/);
+  assert.match(source, /fetchDesign\(API \+ "\/design\/source" \+ query, \{ headers \}\)/);
   assert.match(built, /x-whales-token/);
 });
 
