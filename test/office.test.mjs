@@ -43,7 +43,7 @@ function fakeHost({ project, sessions, active, state, tasks = [], office }) {
     let data = ok({});
     if (target === "/projects/p1") data = ok({ project });
     else if (target === "/sessions") data = ok({ sessions });
-    else if (target === "/projects/p1/office" && office !== undefined) data = ok({ sessions: typeof office === "function" ? office() : office });
+    else if ((target === "/projects/p1/office" || target === "/projects/p1/agents") && office !== undefined) data = ok({ sessions: typeof office === "function" ? office() : office });
     else if (target === "/tasks?projectId=p1") data = ok({ tasks });
     // 真机的 /activity 是裸 JSON、没有 {code,msg,data} 信封；假宿主必须一样，否则测不出解包的 bug。
     else if (target === "/activity") data = { at: Date.now(), active: active || {}, state: state || {}, visitTools: true, ultra: false, controlToken: "t" };

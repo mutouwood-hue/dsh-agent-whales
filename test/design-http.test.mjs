@@ -206,7 +206,9 @@ test("文件变更流：SSE 连接先发 ready，并在文件变化时发定向�
 	assert.match(headers["content-type"], /text\/event-stream/);
 	assert.match(text, /event: ready/);
 	writeFileSync(join(dir, "canvas.json"), "{}");
-	await new Promise((resolve) => setTimeout(resolve, 250));
+	// macOS 的文件通知可能晚于 250ms；等待真实事件，仍用有界期限检查是否送达。
+	const deadline = Date.now() + 2000;
+	while (!text.includes("event: store-changed") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
 	assert.match(text, /event: store-changed/);
 	assert.match(text, /canvas\.json/);
 	cleanup.forEach((listener) => listener());
